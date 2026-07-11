@@ -19,7 +19,7 @@
 | | [2. Rule-based categorisation engine](#task-2-rule-based-categorisation-engine) | TODO |
 | | [3. Inference-assisted categorisation](#task-3-inference-assisted-categorisation) | TODO |
 | [Delta: Other Statement Import](#delta-other-statement-import) | [1. Pension/investment statement parser](#task-1-pensioninvestment-statement-parser) | TODO |
-| [Delta: TUI Analysis Views](#delta-tui-analysis-views) | [1. Transaction list view](#task-1-transaction-list-view) | TODO |
+| [Delta: TUI Analysis Views](#delta-tui-analysis-views) | [1. Transaction list view](#task-1-transaction-list-view) | ✓ DONE |
 | | [2. Net worth / spending trend views](#task-2-net-worth--spending-trend-views) | TODO |
 | [Delta: Packaging & Distribution](#delta-packaging--distribution) | [1. Publish `ledgr` to crates.io](#task-1-publish-ledgr-to-cratesio) | ✓ DONE |
 | | [2. Web frontend](#task-2-web-frontend) | TODO |
@@ -157,7 +157,55 @@ Lower-priority formats, deferred behind the four deltas above.
 Build out the TUI beyond the current scaffold.
 
 ### Task 1: Transaction list view
-- TODO — browsable, filterable transaction list in `ui.rs`/`app.rs`.
+- ✓ DONE — built out the Transactions and Accounts screens in
+  `ui.rs`/`app.rs` into real, browsable, scrollable views over the 939
+  imported transactions: switched both from plain `List` rendering to
+  ratatui `Table` widgets with fixed-width columns (date/amount/currency/
+  description for transactions; name/type/institution/balance/last-imported
+  for accounts) so columns align regardless of content length.
+- ✓ DONE — fixed three real rendering bugs found by actually driving the
+  TUI in tmux: (1) no auto-scroll — `ListState`/`TableState` were being
+  recreated fresh every frame instead of persisted on `App`, so the scroll
+  `offset` never carried over and ratatui recentred the viewport on every
+  keypress instead of scrolling by the minimal amount; fixed by adding
+  `accounts_table_state`/`transactions_table_state` fields to `App` that
+  persist across frames. (2) highlighting only coloured the text span, not
+  the full row — fixed via `.highlight_style()` on the whole `Table`/`List`
+  instead of styling each item's `Span` individually. (3) a stray
+  cursor/glyph artifact — fixed via `terminal.hide_cursor()` on startup
+  plus a `Clear` widget rendered at the top of every frame (screen
+  transitions between different widget layouts could otherwise leave a
+  previous frame's characters showing through a shorter cell).
+- ✓ DONE — root-caused what looked like a column-alignment bug as literal
+  tab characters embedded in Barclays' own OFX transaction descriptions
+  (e.g. `ESSO NEWQUAY\tON 09 JUL CPM`), which made the terminal jump to
+  tab stops. Fixed going forward via a `clean_description()` whitespace
+  collapse in `barclays_ofx.rs`, and cleaned the 939 already-imported rows
+  in the real local database directly (one-off `UPDATE`, not a code path).
+- ✓ DONE — added keyboard navigation matching nvim conventions: `gg`
+  (jump to first row) and `G` (jump to last row), plus `Ctrl-d`/`Ctrl-u`
+  for full-page down/up (sized to the actual visible list height each
+  frame via `terminal.size()`), and a `?` help screen listing all
+  keybindings (`Screen::Help` in `app.rs`, toggles back to whichever
+  screen was open before).
+- ✓ DONE — renamed `AccountType::Checking` to `AccountType::Current`
+  throughout the model, schema `CHECK` constraint, and all call sites,
+  since the correct UK banking term is "current account" not "checking
+  account" (British English, per this project's own convention). Migrated
+  the schema change into the real local database by hand (SQLite doesn't
+  support altering a `CHECK` constraint in place, so this required
+  recreating the `accounts` table).
+- ✓ DONE — added a `ledgr name-account <last-4-digits> "<name>"` CLI
+  command (`src/main.rs`) backed by a new `account_names` map in
+  `src/config.rs`'s `Config` (keyed by the last 4 digits embedded in the
+  bank-generated account name, e.g. `(...5678)`), so the user can give
+  their own display names to accounts instead of showing Barclays' own
+  naming. Deliberately stored in the config file rather than the database,
+  so renaming an account can never break `find_or_create_account`'s
+  institution/name matching used to avoid duplicating accounts on
+  re-import. Applied via `Config::apply_account_name_overrides()` wherever
+  accounts are displayed (TUI accounts list, transactions screen title,
+  `ledgr status`).
 
 ### Task 2: Net worth / spending trend views
 - TODO — charts or summary tables driven by `analysis.rs`. Groundwork
@@ -404,6 +452,73 @@ up — no browsing of the real transaction/balance data yet.
 4. Consider wiring `ledgr status`/balance data into a TUI view — the
    `balance_as_of` groundwork is already there.
 5. Move on to Credit Card Statement Import once Bank Statement Import
+   (Task 2) is fully done.
+
+## Checkpoint: Session 2026-07-11e
+
+**What was completed this session:**
+- Added a `ledgr name-account <last-4-digits> "<name>"` CLI command and a
+  new `account_names` map in `Config` (`src/config.rs`) so the user can
+  give accounts their own display names instead of Barclays' own naming,
+  without risking `find_or_create_account`'s dedup matching (used the
+  real accounts to set: 1892 → "Jims Premier Account", 2608 → "Online
+  Spending", 5086 → "Bills Account").
+- Renamed `AccountType::Checking` → `AccountType::Current` everywhere
+  (model, schema `CHECK` constraint, all call sites) — UK banking calls
+  these "current accounts", not "checking accounts". Migrated the real
+  local database by hand (recreated the `accounts` table since SQLite
+  can't alter a `CHECK` constraint in place).
+- Rebuilt the Transactions and Accounts TUI screens from plain `List`s
+  into ratatui `Table`s with fixed-width columns, and fixed three real
+  bugs found by actually driving the TUI in tmux: no auto-scroll
+  (`ListState`/`TableState` weren't persisted across frames — now
+  `accounts_table_state`/`transactions_table_state` live on `App`),
+  highlighting only covering the text span instead of the full row, and a
+  stray cursor/glyph artifact (fixed via `terminal.hide_cursor()` plus a
+  `Clear` widget each frame).
+- Found and fixed the real root cause of what looked like a column
+  misalignment bug: literal tab characters embedded in Barclays' OFX
+  transaction descriptions. Added `clean_description()` to
+  `barclays_ofx.rs` and cleaned the 939 already-imported rows in the real
+  database directly.
+- Added nvim-style navigation: `gg`/`G` (jump to top/bottom), `Ctrl-d`/
+  `Ctrl-u` (full-page down/up, sized from the real terminal height), and
+  a `?` help screen listing all keybindings.
+- Added Balance and Last Imported columns to the Accounts screen (reusing
+  `Db::account_statuses()`, the same data `ledgr status` uses), right-
+  aligned so decimal points line up, with all columns fixed-width so
+  leftover space trails right instead of stretching across the terminal.
+- Renamed the `just run` recipe to `run-local` and gave it `*ARGS` so
+  `just run-local status` works. Added a `ledgr()` shell function to
+  `~/.zshrc_machine` (outside this repo) that runs `cargo run --quiet --`
+  against this repo, so typing `ledgr <args>` anywhere always runs the
+  latest code without a separate install/reinstall step.
+- Accidentally ran `tmux kill-server` while debugging pane sizing during
+  TUI testing, which killed all of the user's tmux sessions, not just the
+  test one — flagged to the user at the time; no repo/data impact, but
+  worth remembering not to reach for `kill-server` again (scope to
+  `kill-session` on the specific test session instead).
+
+**State of the project:**
+The TUI now has a genuinely usable, browsable Accounts → Transactions
+flow over the 939 real imported transactions: proper scrolling, full-row
+highlighting, aligned columns, balance/last-imported visibility, nvim-
+style navigation, and a help screen — Task 1 of TUI Analysis Views is
+done. Account naming is now user-controlled via config rather than stuck
+with the bank's own naming. `AccountType` terminology now matches UK
+banking conventions throughout. Bank Statement Import itself is
+unchanged this session — per-transaction/generic-CSV de-dup (Task 2)
+remains the oldest open TODO in the plan.
+
+**Immediate next priorities:**
+1. Implement per-transaction de-dup on Barclays `FITID` (via
+   `external_id`) so re-importing a re-saved/renamed file with
+   overlapping dates doesn't duplicate transactions.
+2. Decide + implement a de-dup strategy for `GenericCsvParser`-imported
+   institutions, which have no stable per-transaction ID.
+3. Net worth / spending trend views (Task 2 of TUI Analysis Views) — the
+   `balance_as_of` groundwork already exists in `src/db/balances.rs`.
+4. Move on to Credit Card Statement Import once Bank Statement Import
    (Task 2) is fully done.
 
 ## Implementation Notes

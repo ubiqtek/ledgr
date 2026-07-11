@@ -54,9 +54,17 @@ Every supported bank/pension export format implements the
 ```rust
 trait StatementParser {
     fn name(&self) -> &'static str;
+    fn account_identity(&self, path: &Path) -> Result<Option<NewAccount>, ImportError> { Ok(None) }
     fn parse(&self, path: &Path, account_id: Id) -> Result<Vec<NewTransaction>, ImportError>;
 }
 ```
+
+`account_identity` lets a format that carries its own account info (e.g.
+OFX's `BANKACCTFROM`) tell the pipeline which account a file belongs to,
+so multiple accounts at the same institution (e.g. current + savings, each
+downloaded as a separate file) don't collapse into one shared account.
+Formats with no such info (e.g. a generic CSV) return `None` and the
+pipeline falls back to a caller-supplied default account.
 
 Parsers must not touch the database themselves, so they stay trivially
 unit-testable in isolation — persistence happens afterwards via

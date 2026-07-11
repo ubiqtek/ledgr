@@ -1,3 +1,4 @@
+use crate::config::Config;
 use crate::db::Db;
 use crate::model::{Account, Transaction};
 
@@ -20,7 +21,9 @@ pub struct App {
 
 impl App {
     pub fn new(db: Db) -> anyhow::Result<Self> {
-        let accounts = db.list_accounts()?;
+        let mut accounts = db.list_accounts()?;
+        let config = Config::load_or_init(&Config::default_path()?)?;
+        config.apply_account_name_overrides(&mut accounts);
         Ok(Self {
             db,
             screen: Screen::Accounts,

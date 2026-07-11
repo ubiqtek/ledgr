@@ -57,6 +57,23 @@ CREATE INDEX IF NOT EXISTS idx_transactions_account ON transactions(account_id);
 CREATE INDEX IF NOT EXISTS idx_transactions_posted_at ON transactions(posted_at);
 CREATE INDEX IF NOT EXISTS idx_transactions_category ON transactions(category_id);
 
+-- Balance "anchors" reported by the bank itself (OFX LEDGERBAL and
+-- equivalents), one per statement that carries one. The transaction list in
+-- a given statement often doesn't reach back to account opening, so a
+-- balance can't be reliably derived by summing transactions alone; it must
+-- be reconstructed from the nearest anchor plus the transactions between
+-- that anchor and the target date.
+CREATE TABLE IF NOT EXISTS balance_snapshots (
+    id            INTEGER PRIMARY KEY,
+    account_id    INTEGER NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+    statement_id  INTEGER REFERENCES statements(id) ON DELETE SET NULL,
+    balance_minor INTEGER NOT NULL,
+    as_of         TEXT NOT NULL,
+    UNIQUE (account_id, as_of)
+);
+
+CREATE INDEX IF NOT EXISTS idx_balance_snapshots_account ON balance_snapshots(account_id, as_of);
+
 -- Generic edge table linking two transactions: transfer pairs between
 -- accounts, refunds against an original charge, suspected duplicates, etc.
 CREATE TABLE IF NOT EXISTS transaction_links (

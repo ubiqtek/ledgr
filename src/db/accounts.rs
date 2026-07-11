@@ -17,6 +17,23 @@ impl Db {
         Ok(self.conn().last_insert_rowid())
     }
 
+    /// Returns the existing account matching `institution`/`name`, or
+    /// creates one from `new` if none exists yet.
+    pub fn find_or_create_account(&self, new: &NewAccount) -> rusqlite::Result<Id> {
+        let existing = self
+            .conn()
+            .query_row(
+                "SELECT id FROM accounts WHERE institution IS ?1 AND name = ?2",
+                params![new.institution, new.name],
+                |row| row.get(0),
+            )
+            .optional()?;
+        match existing {
+            Some(id) => Ok(id),
+            None => self.insert_account(new),
+        }
+    }
+
     pub fn get_account(&self, id: Id) -> rusqlite::Result<Option<Account>> {
         self.conn()
             .query_row(
@@ -71,5 +88,22 @@ mod tests {
 
         let all = db.list_accounts().expect("list accounts");
         assert_eq!(all.len(), 1);
+    }
+
+    #[test]
+    fn find_or_create_account_reuses_a_matching_account() {
+        let db = Db::open_in_memory().expect("open db");
+        let new = NewAccount {
+            name: "Barclays Current Account".into(),
+            institution: Some("Barclays".into()),
+            account_type: AccountType::Checking,
+            currency: "GBP".into(),
+        };
+
+        let first = db.find_or_create_account(&new).expect("first call");
+        let second = db.find_or_create_account(&new).expect("second call");
+
+        assert_eq!(first, second);
+        assert_eq!(db.list_accounts().expect("list accounts").len(), 1);
     }
 }

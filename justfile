@@ -7,8 +7,8 @@ default:
 build:
     cargo build
 
-run:
-    cargo run
+run-local *ARGS:
+    cargo run -- {{ARGS}}
 
 test:
     cargo test

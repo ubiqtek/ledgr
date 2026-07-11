@@ -1,4 +1,7 @@
 mod accounts;
+mod balances;
+mod statements;
+mod status;
 mod transactions;
 
 use rusqlite::Connection;

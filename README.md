@@ -15,27 +15,22 @@ Early scaffold. Not yet functional.
   no external `sqlite3` dependency needed). Relationships that don't fit a
   strict tabular shape (transfers between accounts, category hierarchies,
   refund/reversal links) are modeled as edge tables rather than reaching for
-  a dedicated graph database — see `ledgr-core/src/db/schema.sql`.
-- **Workspace layout**: a `ledgr-core` library crate holds the domain model,
-  database access, statement import, and analysis logic. `ledgr-tui` is a
-  thin binary crate on top of it. This split exists so a future web frontend
-  can reuse `ledgr-core` without dragging in the TUI.
+  a dedicated graph database — see `src/db/schema.sql`.
+- **Single crate**: domain model, database access, statement import,
+  analysis, and the TUI all live in one `ledgr` crate/binary for now. See
+  ADR `doc/adr/0003-single-crate-package-ledgr.md` — split back into a
+  library + binary later if/when a web frontend needs to reuse the domain
+  logic without the TUI.
 - **TUI**: [`ratatui`](https://ratatui.rs) + [`crossterm`](https://docs.rs/crossterm).
 - **Import**: statement parsers implement the `StatementParser` trait in
-  `ledgr-core::import`, so adding a new bank's CSV/OFX format is a matter of
+  `src/import`, so adding a new bank's CSV/OFX format is a matter of
   writing one new parser.
-
-## Crates
-
-- `ledgr-core` — domain model, SQLite schema/migrations, statement import,
-  analysis.
-- `ledgr-tui` — the terminal application.
 
 ## Development
 
 ```sh
 cargo build
-cargo run -p ledgr-tui
+cargo run
 cargo test
 ```
 
@@ -45,8 +40,9 @@ cargo test
 - [ ] Parse pension/investment statement formats (PDF? OFX?)
 - [ ] Transaction categorization (rule-based, then inference-assisted)
 - [ ] Net worth / spending trend views in the TUI
-- [ ] Web frontend for richer visualizations, sharing `ledgr-core`
-- [ ] Publish `ledgr-core`/`ledgr-tui` to crates.io
+- [ ] Web frontend for richer visualizations, extracting the domain logic
+      back into its own crate
+- [ ] Publish `ledgr` to crates.io
 
 ## License
 

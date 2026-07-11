@@ -28,7 +28,7 @@ Comparing the three:
   XML in v2.x) and includes `FITID`, a bank-assigned stable transaction ID
   designed for exactly this de-duplication problem. It maps directly onto
   the `external_id` column already present on `transactions`
-  (`ledgr-core/src/db/schema.sql`).
+  (`src/db/schema.sql`).
 
 The Rust crate landscape for OFX has a naming trap: the crate literally
 named `ofx` is unrelated (bindings for the OpenFX visual-effects plugin
@@ -36,7 +36,7 @@ standard, not Open Financial Exchange). Of the crates that actually parse
 financial OFX:
 
 - `ofxy` — OFX 1.x (SGML) only, and licensed GPL-3.0, which would conflict
-  with `ledgr-core`'s planned MIT/Apache-2.0 dual license for crates.io
+  with `ledgr`'s planned MIT/Apache-2.0 dual license for crates.io
   publishing.
 - `ofx-rs` (Govcraft) — supports both OFX 1.x (SGML) and 2.x (XML) through
   one entry point, exposes `FITID`/accounts/balances, uses
@@ -66,8 +66,8 @@ is working end-to-end.
 
 ## Consequences
 
-- `ledgr-core` gains a dependency on `ofx-rs`; its MIT/Apache-2.0 licensing
-  keeps `ledgr-core`'s own dual license unencumbered, unlike `ofxy`.
+- `ledgr` gains a dependency on `ofx-rs`; its MIT/Apache-2.0 licensing
+  keeps `ledgr`'s own dual license unencumbered, unlike `ofxy`.
 - Before relying on `ofx-rs` in production, we need a real sample OFX
   export from Barclays online banking to confirm it parses cleanly —
   `ofx-rs` is newer and less battle-tested than `ofxy`, and real-world bank

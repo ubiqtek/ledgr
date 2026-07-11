@@ -1,8 +1,5 @@
-[workspace]
-resolver = "2"
-members = ["ledgr-core", "ledgr-tui"]
-
-[workspace.package]
+[package]
+name = "ledgr"
 version = "0.1.0"
 edition = "2021"
 authors = ["Jim Barritt"]
@@ -12,8 +9,11 @@ description = "A TUI personal finance app: import bank/pension statements, build
 keywords = ["finance", "tui", "cli", "budget", "accounting"]
 categories = ["command-line-utilities", "finance"]
 
-[workspace.dependencies]
-ledgr-core = { path = "ledgr-core", version = "0.1.0" }
+[[bin]]
+name = "ledgr"
+path = "src/main.rs"
+
+[dependencies]
 rusqlite = { version = "0.31", features = ["bundled"] }
 chrono = { version = "0.4", features = ["serde"] }
 serde = { version = "1", features = ["derive"] }
@@ -23,6 +23,9 @@ csv = "1"
 ratatui = "0.28"
 crossterm = "0.28"
 directories = "5"
+
+[dev-dependencies]
+tempfile = "3"
 
 [profile.release]
 lto = true

@@ -1,5 +1,5 @@
-use ledgr_core::model::{Account, Transaction};
-use ledgr_core::Db;
+use crate::db::Db;
+use crate::model::{Account, Transaction};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Screen {

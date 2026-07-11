@@ -1,4 +1,8 @@
+mod analysis;
 mod app;
+mod db;
+mod import;
+mod model;
 mod ui;
 
 use app::App;
@@ -7,7 +11,7 @@ use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
 };
 use crossterm::{execute, ExecutableCommand};
-use ledgr_core::Db;
+use db::Db;
 use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
 use std::io::stdout;

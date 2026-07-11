@@ -13,29 +13,28 @@ machine. Early scaffold — not yet functional end-to-end.
 
 ```sh
 cargo build
-cargo run -p ledgr-tui
-cargo test                        # whole workspace
-cargo test -p ledgr-core          # one crate
-cargo test parses_generic_csv     # single test by name, any crate
+cargo run
+cargo test                        # whole crate
+cargo test parses_generic_csv     # single test by name
 ```
 
 ## Architecture
 
-Two-crate workspace:
-
-- **`ledgr-core`** — domain model, SQLite schema/migrations, statement
-  import, analysis. No TUI dependencies. Kept independent so a future web
-  frontend can reuse it.
-- **`ledgr-tui`** — thin `ratatui` + `crossterm` binary on top of
-  `ledgr-core`. Holds only UI state (`app.rs`) and rendering (`ui.rs`); all
-  persistence and business logic stays in `ledgr-core`.
+Single crate/binary (`ledgr`) for now — domain model, SQLite schema,
+statement import, and analysis all live alongside the TUI as modules
+under `src/`. This used to be a two-crate workspace (`ledgr-core` +
+`ledgr-tui`); it was merged so `cargo install ledgr` works via crates.io
+without needing a second published crate. See
+`doc/adr/0003-single-crate-package-ledgr.md`. Split it back into a
+library + binary if/when a web frontend needs to reuse the domain logic
+(`db`, `import`, `model`, `analysis`) without the TUI (`app.rs`, `ui.rs`).
 
 ### Storage
 
 SQLite via `rusqlite` (bundled feature — no system `sqlite3` needed).
-`Db::open`/`Db::open_in_memory` apply `ledgr-core/src/db/schema.sql` on
-every open using `CREATE TABLE/INDEX IF NOT EXISTS`, so schema application
-must stay idempotent (see `db::tests::schema_is_idempotent`).
+`Db::open`/`Db::open_in_memory` apply `src/db/schema.sql` on every open
+using `CREATE TABLE/INDEX IF NOT EXISTS`, so schema application must stay
+idempotent (see `db::tests::schema_is_idempotent`).
 
 Relationships that don't fit a strict tabular shape — transfers between
 accounts, category hierarchies, refund/reversal links — are modelled as
@@ -50,7 +49,7 @@ never floats, to avoid drift — see `amount_minor` on `Transaction` and
 ### Statement import
 
 Every supported bank/pension export format implements the
-`StatementParser` trait (`ledgr-core/src/import/mod.rs`):
+`StatementParser` trait (`src/import/mod.rs`):
 
 ```rust
 trait StatementParser {

@@ -431,27 +431,19 @@ dependencies = [
 ]
 
 [[package]]
-name = "ledgr-core"
+name = "ledgr"
 version = "0.1.0"
 dependencies = [
  "anyhow",
  "chrono",
+ "crossterm",
  "csv",
+ "directories",
+ "ratatui",
  "rusqlite",
  "serde",
  "tempfile",
  "thiserror",
-]
-
-[[package]]
-name = "ledgr-tui"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "crossterm",
- "directories",
- "ledgr-core",
- "ratatui",
 ]
 
 [[package]]

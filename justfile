@@ -8,13 +8,10 @@ build:
     cargo build
 
 run:
-    cargo run -p ledgr-tui
+    cargo run
 
 test:
     cargo test
-
-test-core:
-    cargo test -p ledgr-core
 
 fmt:
     cargo fmt

@@ -37,7 +37,7 @@ impl StatementParser for BarclaysOfxParser {
         let acct_id = bank_account.account_id().as_str();
         let last4 = &acct_id[acct_id.len().saturating_sub(4)..];
         let account_type = match bank_account.account_type() {
-            ofx_rs::types::AccountType::Checking => AccountType::Checking,
+            ofx_rs::types::AccountType::Checking => AccountType::Current,
             ofx_rs::types::AccountType::Savings | ofx_rs::types::AccountType::MoneyMarket => {
                 AccountType::Savings
             }
@@ -45,7 +45,7 @@ impl StatementParser for BarclaysOfxParser {
             _ => AccountType::Other,
         };
         let type_label = match account_type {
-            AccountType::Checking => "Current Account",
+            AccountType::Current => "Current Account",
             AccountType::Savings => "Savings Account",
             AccountType::CreditCard => "Credit Card",
             AccountType::Pension | AccountType::Investment | AccountType::Other => "Account",
@@ -108,11 +108,7 @@ impl StatementParser for BarclaysOfxParser {
 
                 let amount_minor = ofx_amount_to_minor(txn.amount());
 
-                let description = txn
-                    .name()
-                    .or(txn.memo())
-                    .unwrap_or_default()
-                    .to_string();
+                let description = clean_description(txn.name().or(txn.memo()).unwrap_or_default());
 
                 transactions.push(NewTransaction {
                     account_id,
@@ -129,6 +125,14 @@ impl StatementParser for BarclaysOfxParser {
         }
         Ok(transactions)
     }
+}
+
+/// Collapses whitespace (including the literal tab characters Barclays'
+/// OFX export embeds between the merchant name and its trailing "ON DD MON"
+/// suffix, which would otherwise jump to the next terminal tab stop and
+/// wreck column alignment) down to single spaces.
+fn clean_description(s: &str) -> String {
+    s.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 /// Converts an OFX amount (arbitrary-precision decimal) to signed minor
@@ -239,7 +243,7 @@ mod tests {
 
         assert_eq!(identity.name, "Barclays Current Account (...5678)");
         assert_eq!(identity.institution.as_deref(), Some("Barclays"));
-        assert_eq!(identity.account_type, AccountType::Checking);
+        assert_eq!(identity.account_type, AccountType::Current);
         assert_eq!(identity.currency, "GBP");
     }
 

@@ -136,7 +136,7 @@ mod tests {
             id: 1,
             name: "Barclays Current Account (...5678)".into(),
             institution: Some("Barclays".into()),
-            account_type: crate::model::AccountType::Checking,
+            account_type: crate::model::AccountType::Current,
             currency: "GBP".into(),
         }];
 

@@ -45,7 +45,7 @@ mod tests {
         db.insert_account(&NewAccount {
             name: "Current Account".into(),
             institution: None,
-            account_type: AccountType::Checking,
+            account_type: AccountType::Current,
             currency: "GBP".into(),
         })
         .expect("insert account")

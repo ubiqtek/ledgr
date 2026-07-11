@@ -5,7 +5,7 @@ pub type Id = i64;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AccountType {
-    Checking,
+    Current,
     Savings,
     CreditCard,
     Pension,
@@ -16,7 +16,7 @@ pub enum AccountType {
 impl AccountType {
     pub fn as_str(&self) -> &'static str {
         match self {
-            AccountType::Checking => "checking",
+            AccountType::Current => "current",
             AccountType::Savings => "savings",
             AccountType::CreditCard => "credit_card",
             AccountType::Pension => "pension",
@@ -27,7 +27,7 @@ impl AccountType {
 
     pub fn parse(s: &str) -> Option<Self> {
         Some(match s {
-            "checking" => AccountType::Checking,
+            "current" => AccountType::Current,
             "savings" => AccountType::Savings,
             "credit_card" => AccountType::CreditCard,
             "pension" => AccountType::Pension,

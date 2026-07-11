@@ -152,6 +152,7 @@ fn main() -> anyhow::Result<()> {
     out.execute(EnterAlternateScreen)?;
     let backend = CrosstermBackend::new(out);
     let mut terminal = Terminal::new(backend)?;
+    terminal.hide_cursor()?;
 
     let result = run(&mut terminal, &mut app);
 
@@ -166,26 +167,38 @@ fn run(
     terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>,
     app: &mut App,
 ) -> anyhow::Result<()> {
+    // Set when a lone `g` was just pressed, waiting to see if a second `g`
+    // follows (nvim's `gg` "go to top"); cleared on any other key.
+    let mut pending_g = false;
+
     while !app.should_quit {
         terminal.draw(|frame| ui::draw(frame, app))?;
+        // Visible list height (borders + status line taken off), used as the
+        // Ctrl-d/Ctrl-u page-scroll distance.
+        let page = terminal.size()?.height.saturating_sub(3).max(1) as i32;
 
         if event::poll(Duration::from_millis(200))? {
             if let Event::Key(key) = event::read()? {
                 if key.kind != KeyEventKind::Press {
                     continue;
                 }
+                let ctrl = key
+                    .modifiers
+                    .contains(crossterm::event::KeyModifiers::CONTROL);
+                let was_pending_g = pending_g;
+                pending_g = false;
                 match key.code {
+                    KeyCode::Char('g') if was_pending_g => app.select_first(),
+                    KeyCode::Char('g') => pending_g = true,
+                    KeyCode::Char('G') => app.select_last(),
+                    KeyCode::Char('c') if ctrl => app.should_quit = true,
+                    KeyCode::Char('d') if ctrl => app.move_selection(page),
+                    KeyCode::Char('u') if ctrl => app.move_selection(-page),
                     KeyCode::Char('q') | KeyCode::Esc => match app.screen {
-                        app::Screen::Transactions => app.back(),
                         app::Screen::Accounts => app.should_quit = true,
+                        app::Screen::Transactions | app::Screen::Help => app.back(),
                     },
-                    KeyCode::Char('c')
-                        if key
-                            .modifiers
-                            .contains(crossterm::event::KeyModifiers::CONTROL) =>
-                    {
-                        app.should_quit = true;
-                    }
+                    KeyCode::Char('?') => app.toggle_help(),
                     KeyCode::Down | KeyCode::Char('j') => app.move_selection(1),
                     KeyCode::Up | KeyCode::Char('k') => app.move_selection(-1),
                     KeyCode::Enter => {

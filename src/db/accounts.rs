@@ -77,14 +77,14 @@ mod tests {
             .insert_account(&NewAccount {
                 name: "Current Account".into(),
                 institution: Some("Some Bank".into()),
-                account_type: AccountType::Checking,
+                account_type: AccountType::Current,
                 currency: "GBP".into(),
             })
             .expect("insert account");
 
         let fetched = db.get_account(id).expect("get account").expect("found");
         assert_eq!(fetched.name, "Current Account");
-        assert_eq!(fetched.account_type, AccountType::Checking);
+        assert_eq!(fetched.account_type, AccountType::Current);
 
         let all = db.list_accounts().expect("list accounts");
         assert_eq!(all.len(), 1);
@@ -96,7 +96,7 @@ mod tests {
         let new = NewAccount {
             name: "Barclays Current Account".into(),
             institution: Some("Barclays".into()),
-            account_type: AccountType::Checking,
+            account_type: AccountType::Current,
             currency: "GBP".into(),
         };
 

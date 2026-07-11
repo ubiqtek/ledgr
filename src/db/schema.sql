@@ -13,7 +13,7 @@ CREATE TABLE IF NOT EXISTS accounts (
     name         TEXT NOT NULL,
     institution  TEXT,
     account_type TEXT NOT NULL CHECK (account_type IN (
-                     'checking', 'savings', 'credit_card', 'pension',
+                     'current', 'savings', 'credit_card', 'pension',
                      'investment', 'other'
                  )),
     currency     TEXT NOT NULL DEFAULT 'GBP',

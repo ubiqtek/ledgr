@@ -4,6 +4,8 @@ mod statements;
 mod status;
 mod transactions;
 
+pub use status::AccountStatus;
+
 use rusqlite::Connection;
 use std::path::Path;
 

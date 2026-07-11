@@ -43,7 +43,7 @@ pub fn import_inbox(db: &Db, inbox: &Inbox) -> anyhow::Result<ImportSummary> {
             None => db.find_or_create_account(&NewAccount {
                 name: "Barclays Current Account".into(),
                 institution: Some("Barclays".into()),
-                account_type: AccountType::Checking,
+                account_type: AccountType::Current,
                 currency: "GBP".into(),
             })?,
         };

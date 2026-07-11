@@ -1,11 +1,22 @@
 use crate::app::{App, Screen};
-use ratatui::layout::{Constraint, Direction, Layout, Rect};
+use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
-use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph};
+use ratatui::text::Line;
+use ratatui::widgets::{Block, Borders, Cell, Clear, Paragraph, Row, Table};
 use ratatui::Frame;
 
-pub fn draw(frame: &mut Frame, app: &App) {
+const SELECTED_STYLE: Style = Style::new()
+    .fg(Color::Black)
+    .bg(Color::White)
+    .add_modifier(Modifier::BOLD);
+
+pub fn draw(frame: &mut Frame, app: &mut App) {
+    // The transitions between screens use different widget layouts (e.g.
+    // Table columns vs. plain List rows), so a shorter cell can leave a
+    // previous frame's characters showing through unless the whole frame is
+    // cleared first.
+    frame.render_widget(Clear, frame.area());
+
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([Constraint::Min(3), Constraint::Length(1)])
@@ -14,82 +25,133 @@ pub fn draw(frame: &mut Frame, app: &App) {
     match app.screen {
         Screen::Accounts => draw_accounts(frame, app, chunks[0]),
         Screen::Transactions => draw_transactions(frame, app, chunks[0]),
+        Screen::Help => draw_help(frame, chunks[0]),
     }
     draw_status(frame, app, chunks[1]);
 }
 
-fn draw_accounts(frame: &mut Frame, app: &App, area: Rect) {
-    let items: Vec<ListItem> = if app.accounts.is_empty() {
-        vec![ListItem::new(
-            "No accounts yet. Import a statement to get started.",
-        )]
-    } else {
-        app.accounts
-            .iter()
-            .enumerate()
-            .map(|(i, account)| {
-                let label = format!(
-                    "{}  ({}{})",
-                    account.name,
-                    account.account_type.as_str(),
-                    account
-                        .institution
-                        .as_ref()
-                        .map(|inst| format!(", {inst}"))
-                        .unwrap_or_default()
-                );
-                style_item(label, i == app.selected_account)
-            })
-            .collect()
-    };
+fn draw_accounts(frame: &mut Frame, app: &mut App, area: Rect) {
+    let block = Block::default().title("Accounts").borders(Borders::ALL);
 
-    let list = List::new(items).block(Block::default().title("Accounts").borders(Borders::ALL));
-    frame.render_widget(list, area);
+    if app.accounts.is_empty() {
+        frame.render_widget(
+            Paragraph::new("No accounts yet. Import a statement to get started.").block(block),
+            area,
+        );
+        return;
+    }
+
+    let rows = app.accounts.iter().map(|status| {
+        let account = &status.account;
+        let balance = match status.balance_minor {
+            Some(minor) => crate::format_amount_minor(minor, &account.currency),
+            None => "unknown".to_string(),
+        };
+        // last_imported_at is an ISO 8601 UTC timestamp, e.g.
+        // "2026-07-11T16:53:10.605Z"; show date + hours:minutes, dropping
+        // seconds/fractional seconds and the "Z" as more precision than is
+        // useful in a column this narrow.
+        let last_imported = status
+            .last_imported_at
+            .as_deref()
+            .map(|ts| match ts.split_once('T') {
+                Some((date, time)) => format!("{date} {}", &time[..time.len().min(5)]),
+                None => ts.to_string(),
+            })
+            .unwrap_or_else(|| "never".to_string());
+        Row::new(vec![
+            Cell::from(account.name.clone()),
+            Cell::from(account.account_type.as_str()),
+            Cell::from(account.institution.clone().unwrap_or_default()),
+            Cell::from(Line::from(balance).alignment(Alignment::Right)),
+            Cell::from(last_imported),
+        ])
+    })
+    .collect::<Vec<_>>();
+
+    let table = Table::new(
+        rows,
+        [
+            Constraint::Length(30),
+            Constraint::Length(11),
+            Constraint::Length(14),
+            Constraint::Length(15),
+            Constraint::Length(16),
+        ],
+    )
+    .column_spacing(1)
+    .block(block)
+    .highlight_style(SELECTED_STYLE);
+
+    app.accounts_table_state.select(Some(app.selected_account));
+    frame.render_stateful_widget(table, area, &mut app.accounts_table_state);
 }
 
-fn draw_transactions(frame: &mut Frame, app: &App, area: Rect) {
-    let items: Vec<ListItem> = if app.transactions.is_empty() {
-        vec![ListItem::new("No transactions for this account yet.")]
-    } else {
-        app.transactions
-            .iter()
-            .enumerate()
-            .map(|(i, tx)| {
-                let amount = tx.amount_minor as f64 / 100.0;
-                let label = format!(
-                    "{}  {:>10.2} {}  {}",
-                    tx.posted_at, amount, tx.currency, tx.description
-                );
-                style_item(label, i == app.selected_transaction)
-            })
-            .collect()
-    };
-
+fn draw_transactions(frame: &mut Frame, app: &mut App, area: Rect) {
     let account_name = app
         .accounts
         .get(app.selected_account)
-        .map(|a| a.name.as_str())
+        .map(|s| s.account.name.as_str())
         .unwrap_or("Transactions");
-    let list = List::new(items).block(
-        Block::default()
-            .title(format!("Transactions \u{2014} {account_name}"))
-            .borders(Borders::ALL),
-    );
-    frame.render_widget(list, area);
+    let block = Block::default()
+        .title(format!("Transactions \u{2014} {account_name}"))
+        .borders(Borders::ALL);
+
+    if app.transactions.is_empty() {
+        frame.render_widget(
+            Paragraph::new("No transactions for this account yet.").block(block),
+            area,
+        );
+        return;
+    }
+
+    let rows = app.transactions.iter().map(|tx| {
+        let amount = tx.amount_minor as f64 / 100.0;
+        Row::new(vec![
+            Cell::from(tx.posted_at.clone()),
+            Cell::from(format!("{amount:>10.2}")),
+            Cell::from(tx.currency.clone()),
+            Cell::from(tx.description.clone()),
+        ])
+    })
+    .collect::<Vec<_>>();
+
+    let table = Table::new(
+        rows,
+        [
+            Constraint::Length(10),
+            Constraint::Length(10),
+            Constraint::Length(3),
+            Constraint::Fill(1),
+        ],
+    )
+    .column_spacing(1)
+    .block(block)
+    .highlight_style(SELECTED_STYLE);
+
+    app.transactions_table_state
+        .select(Some(app.selected_transaction));
+    frame.render_stateful_widget(table, area, &mut app.transactions_table_state);
 }
 
-fn style_item(label: String, selected: bool) -> ListItem<'static> {
-    if selected {
-        ListItem::new(Line::from(Span::styled(
-            label,
-            Style::default()
-                .fg(Color::Black)
-                .bg(Color::White)
-                .add_modifier(Modifier::BOLD),
-        )))
-    } else {
-        ListItem::new(label)
-    }
+fn draw_help(frame: &mut Frame, area: Rect) {
+    const BINDINGS: &[(&str, &str)] = &[
+        ("j / k, \u{2193} / \u{2191}", "Move selection"),
+        ("Ctrl-d / Ctrl-u", "Page down / up"),
+        ("gg / G", "Jump to top / bottom"),
+        ("Enter", "Open selected account"),
+        ("Esc / q", "Back (or quit from the accounts screen)"),
+        ("?", "Toggle this help screen"),
+        ("Ctrl-c", "Quit"),
+    ];
+    let lines: Vec<ratatui::text::Line> = BINDINGS
+        .iter()
+        .map(|(key, action)| ratatui::text::Line::from(format!("{key:<20} {action}")))
+        .collect();
+
+    let paragraph = Paragraph::new(lines)
+        .block(Block::default().title("Help").borders(Borders::ALL));
+    frame.render_widget(paragraph, area);
 }
 
 fn draw_status(frame: &mut Frame, app: &App, area: Rect) {

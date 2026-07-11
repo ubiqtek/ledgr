@@ -1,0 +1,21 @@
+[package]
+name = "ledgr-core"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Domain model, database, statement import, and analysis for ledgr."
+keywords.workspace = true
+categories.workspace = true
+
+[dependencies]
+rusqlite.workspace = true
+chrono.workspace = true
+serde.workspace = true
+anyhow.workspace = true
+thiserror.workspace = true
+csv.workspace = true
+
+[dev-dependencies]
+tempfile = "3"

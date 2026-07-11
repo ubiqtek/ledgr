@@ -1,0 +1,21 @@
+[package]
+name = "ledgr-tui"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Terminal UI for ledgr."
+keywords.workspace = true
+categories.workspace = true
+
+[[bin]]
+name = "ledgr"
+path = "src/main.rs"
+
+[dependencies]
+ledgr-core.workspace = true
+ratatui.workspace = true
+crossterm.workspace = true
+anyhow.workspace = true
+directories.workspace = true

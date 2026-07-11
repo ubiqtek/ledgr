@@ -1,0 +1,29 @@
+[workspace]
+resolver = "2"
+members = ["ledgr-core", "ledgr-tui"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+authors = ["Jim Barritt"]
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/ubiqtek/ledgr"
+description = "A TUI personal finance app: import bank/pension statements, build a local database, and analyze your finances."
+keywords = ["finance", "tui", "cli", "budget", "accounting"]
+categories = ["command-line-utilities", "finance"]
+
+[workspace.dependencies]
+ledgr-core = { path = "ledgr-core", version = "0.1.0" }
+rusqlite = { version = "0.31", features = ["bundled"] }
+chrono = { version = "0.4", features = ["serde"] }
+serde = { version = "1", features = ["derive"] }
+anyhow = "1"
+thiserror = "1"
+csv = "1"
+ratatui = "0.28"
+crossterm = "0.28"
+directories = "5"
+
+[profile.release]
+lto = true
+strip = true

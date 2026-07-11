@@ -18,6 +18,15 @@ cargo test                        # whole crate
 cargo test parses_generic_csv     # single test by name
 ```
 
+## Domain language
+
+The domain vocabulary lives in `doc/domain/ubiquitous-language.md`.
+**Do not introduce a new domain concept or term (in code, schema, or
+docs) without first consulting that doc and then agreeing the term with
+the user.** If a needed concept has no agreed name, propose one and ask
+— don't coin it unilaterally. When a term is agreed, added, or
+rejected, record it there with its provenance.
+
 ## Architecture
 
 Single crate/binary (`ledgr`) for now — domain model, SQLite schema,

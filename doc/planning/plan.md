@@ -2,9 +2,9 @@
 
 ## What's Next
 
-**Next:** Task 2 — Import de-duplication (Delta: Bank Statement Import) — decide + implement a de-dup strategy for `GenericCsvParser`-imported institutions, which have no stable per-transaction ID
-**Sub-doc:** (none)
-**Blockers:** None
+**Next:** Task 2 — Spend ledger schema and derivation (Delta: Spend Ledger)
+**Sub-doc:** doc/implementation-notes/spend-ledger-design.md
+**Blockers:** None — design open questions all resolved (2: Reimbursements and Refunds = sign-reversed spend; 3: spend only when money leaves the household; 5: user trying Barclaycard PDF export, tracked as Credit Card Statement Import Task 2)
 
 ## Summary
 
@@ -15,7 +15,12 @@
 | | [3. Account resolution and balance tracking](#task-3-account-resolution-and-balance-tracking) | ✓ DONE |
 | [Delta: Automatic Inbox Import](#delta-automatic-inbox-import) | [1. Inbox change notification](#task-1-inbox-change-notification) | TODO |
 | [Delta: Credit Card Statement Import](#delta-credit-card-statement-import) | [1. Credit card statement parser](#task-1-credit-card-statement-parser) | TODO |
-| [Delta: Amazon Order Import](#delta-amazon-order-import) | [1. Amazon order import](#task-1-amazon-order-import) | TODO |
+| | [2. Evaluate Barclaycard PDF export](#task-2-evaluate-barclaycard-pdf-export) | TODO |
+| [Delta: Amazon Order Import](#delta-amazon-order-import) | [1. Evaluate automation route — email scanning vs manual export](#task-1-evaluate-automation-route--email-scanning-vs-manual-export) | TODO |
+| | [2. Amazon order import](#task-2-amazon-order-import) | TODO |
+| [Delta: Spend Ledger](#delta-spend-ledger) | [1. Spend ledger design](#task-1-spend-ledger-design) | ✓ DONE |
+| | [2. Spend ledger schema and derivation](#task-2-spend-ledger-schema-and-derivation) | TODO |
+| | [3. Review and re-classification TUI](#task-3-review-and-re-classification-tui) | TODO |
 | [Delta: Spending Categorisation](#delta-spending-categorisation) | [1. Confirm Rebel Finance taxonomy](#task-1-confirm-rebel-finance-taxonomy) | IN PROGRESS |
 | | [2. Rule-based categorisation engine](#task-2-rule-based-categorisation-engine) | TODO |
 | | [3. Inference-assisted categorisation](#task-3-inference-assisted-categorisation) | TODO |
@@ -25,6 +30,7 @@
 | [Delta: Packaging & Distribution](#delta-packaging--distribution) | [1. Publish `ledgr` to crates.io](#task-1-publish-ledgr-to-cratesio) | ✓ DONE |
 | | [2. Web frontend](#task-2-web-frontend) | TODO |
 | [Delta: Live Open Banking (Enable Banking)](#delta-live-open-banking-enable-banking) | [1. Evaluate feasibility & security model](#task-1-evaluate-feasibility--security-model) | IN PROGRESS |
+| [Delta: Double-Entry Accounting](#delta-double-entry-accounting) | [1. Evaluate a double-entry model for ledgr](#task-1-evaluate-a-double-entry-model-for-ledgr) | TODO |
 
 Real-world goal driving the first four deltas: analyse monthly spending
 across current account, credit card, and Amazon orders.
@@ -172,14 +178,86 @@ remembering to run the command.
 ### Task 1: Credit card statement parser
 - TODO — parser for the user's credit card statement export, needed
   alongside the current account to see full monthly spending.
+- Format discovered 2026-07-11: Barclaycard exports CSV only
+  (`Date, Account/Card No, Amount, Subcategory, Memo`; DD/MM/YYYY
+  dates, UTF-8 BOM, thousands separators, embedded tabs/newlines in
+  memos, sign convention inverted vs bank statements, masked card
+  number usable as account identity, `Subcategory` distinguishes
+  Purchase / Payment received / Other). Data-quality constraint:
+  every amount is rounded to whole pounds — see the spend ledger
+  design doc.
+
+### Task 2: Evaluate Barclaycard PDF export
+- TODO — the CSV export rounds every amount to whole pounds, which is
+  not good enough for the spend ledger. The user will download a PDF
+  statement export instead; evaluate whether it carries penny-precise
+  amounts and is parseable, then decide the primary CC import format
+  (PDF vs rounded CSV).
 
 ## Delta: Amazon Order Import
 
-### Task 1: Amazon order import
-- TODO — import Amazon order history (format TBD — Amazon "Request my
-  data" export vs order history CSV) so Amazon purchases show up as
-  proper line items rather than one lump "Amazon" transaction per card
-  charge.
+Amazon order data is a form of spend enrichment (see "Spend Enrichment"
+in `doc/domain/ubiquitous-language.md`): a lump "AMAZON" card charge becomes
+proper line items with real product descriptions, the same "more
+informative source enriches the spend entry" pattern as transfer notes,
+just sourced from Amazon instead of a bank transfer. The user considers
+this a core enrichment worth automating, not a one-off manual chore.
+
+### Task 1: Evaluate automation route — email scanning vs manual export
+- TODO — two candidate routes, not yet compared:
+  1. **Email scanning** — parse Amazon order-confirmation emails
+     automatically (requires mail access — IMAP or a specific mail
+     provider's API; scope and privacy implications not yet assessed).
+     Preferred if feasible, since it needs no recurring manual step.
+  2. **Manual export** — Amazon "Request my data" export or the order
+     history CSV/page (format TBD), imported like any other statement.
+     Simpler, requires the user to periodically request/download it.
+- TODO — decide which to build first (or both, e.g. manual export as a
+  fallback for orders predating email-scanning setup).
+
+### Task 2: Amazon order import
+- TODO — parse the chosen format so Amazon purchases show up as proper
+  line items rather than one lump "Amazon" transaction per card charge.
+
+## Delta: Spend Ledger
+
+Derive a spend ledger — real-world spending to merchants and people —
+from the raw imported transactions, excluding internal transfers
+between household accounts (which would double-count purchases paid
+for by matching transfers). This is the layer that gets categorised
+and analysed; raw transactions stay immutable evidence. Design:
+`doc/implementation-notes/spend-ledger-design.md`. Decision trail:
+`doc/adr/0005-independent-spend-and-income-ledgers.md` (independent
+spend and income ledgers; income deferred). Supporting research:
+`doc/kb/ofx/structure.md` (OFX spec + observed Barclays NAME
+encodings that make transfer detection deterministic) and
+`doc/domain/household.md` ("Household" = the accounting entity).
+
+### Task 1: Spend ledger design
+- ✓ DONE — design session 2026-07-11: full design written to
+  `doc/implementation-notes/spend-ledger-design.md` (derived
+  `spend_entries` + `spend_entry_sources` provenance edge table,
+  classification metadata rule/matcher/manual + confidence with
+  manual-always-wins, transfer detection via household account
+  registry, spend enrichment from transfers onto spend entries,
+  double-entry compatibility mapping). ADR 0005 accepted. Open
+  questions 1 (household membership → optional config) and 4
+  (derivation runs as part of `ledgr import`, provisionally) decided;
+  2, 3, 5 explained and awaiting the user's confirmation.
+
+### Task 2: Spend ledger schema and derivation
+- TODO — implement the schema (`spend_entries`,
+  `spend_entry_sources`, `sort_code`/`account_number` columns on
+  `accounts`, drop redundant `transactions.category_id`), the
+  household-accounts config, the derivation pass (rules + transfer
+  pairing via `transaction_links`) wired into `ledgr import`, per the
+  design doc.
+
+### Task 3: Review and re-classification TUI
+- TODO — review queue screen for low-confidence/uncategorised spend
+  entries; single-key actions to mark internal transfer / not-spend,
+  set category, edit note; manual actions stamp
+  `classified_by='manual'`.
 
 ## Delta: Spending Categorisation
 
@@ -308,6 +386,21 @@ model) than adding a new `StatementParser`.
   warrants its own ADR given the architectural fork.
 - TODO — confirm Restricted Mode account-linking caps and Enable
   Banking's pricing before relying on it.
+
+## Delta: Double-Entry Accounting
+
+Future/exploratory. The user is considering introducing double-entry
+accounting at some point. The spend ledger design
+(`doc/implementation-notes/spend-ledger-design.md`, "Future:
+double-entry compatibility") records how the current derived-ledger
+model maps onto it (spend entries → expense-account postings,
+categories → chart of accounts, internal transfers → asset↔asset
+transactions, household accounts → asset/liability typing). Nothing
+should be built in a way that blocks this.
+
+### Task 1: Evaluate a double-entry model for ledgr
+- TODO — study Firefly III / beancount / GnuCash models; decide
+  whether and when to adopt; ADR if adopted.
 
 ## Checkpoint: Session 2026-07-11
 
@@ -664,6 +757,61 @@ stable per-transaction ID).
    `notify` crate) once higher-priority import/TUI work settles.
 4. Move on to Credit Card Statement Import once Bank Statement Import
    (Task 2) is fully done.
+
+## Checkpoint: Session 2026-07-11h
+
+**What was completed this session:**
+- Design session for the spend ledger: wrote
+  `doc/implementation-notes/spend-ledger-design.md` — raw transactions
+  stay immutable evidence; a derived `spend_entries` table (with
+  `spend_entry_sources` provenance links) holds real-world spending;
+  internal transfers between household accounts produce no entries;
+  classification carries rule/matcher/manual provenance + confidence,
+  manual always wins; derivation runs as part of `ledgr import`.
+- ADR 0005 `doc/adr/0005-independent-spend-and-income-ledgers.md`:
+  independent spend and income ledgers (income deferred), reversing an
+  initial single-table-with-kind decision after the naming difficulty
+  exposed that spend and income are different domains.
+- Researched the OFX spec properly and wrote `doc/kb/ofx/structure.md`:
+  full STMTTRN/TRNTYPE reference plus observed Barclays behaviour —
+  Barclays never emits XFER or BANKACCTTO; transfers are identified by
+  sort code + account number packed into the 32-char NAME field, and
+  both sides of a transfer carry the same user reference, making
+  internal-transfer detection and pairing deterministic.
+- Examined the real Barclaycard CSV export in the inbox: usable format
+  but every amount is rounded to whole pounds (all 205 rows) — recorded
+  as a data-quality constraint; parser details added to the Credit Card
+  Statement Import delta.
+- Started the domain docs: `doc/domain/ubiquitous-language.md` (terms
+  with provenance and status) and `doc/domain/household.md` (the
+  "Household" accounting-entity concept — alternatives considered,
+  Rebel Finance/economics evidence, adopted). Added a CLAUDE.md rule:
+  no new domain terms without consulting the ubiquitous language doc
+  and the user.
+- Scrubbed real account numbers, names, and amounts from all new docs
+  (repo may become public). NOTE: this plan file still contains real
+  account last-4 digits, account nicknames, balances, and a Google
+  Drive path with an email address — scrub before publishing.
+- Added the Double-Entry Accounting exploratory Delta and the Spend
+  Ledger Delta (design ✓ DONE).
+
+**State of the project:**
+The spend ledger is fully designed and decision-trailed (ADR 0005,
+ubiquitous language, OFX research) but not yet implemented — schema
+and derivation are the next build step. Import infrastructure is
+unchanged and solid. Three design open questions await the user:
+reimbursements as refund-of-spend, the sinking-fund convention, and
+whether a precise (non-rounded) Barclaycard export exists.
+
+**Immediate next priorities:**
+1. Confirm spend-ledger open questions 2, 3, 5 with the user.
+2. Implement the spend ledger schema + derivation pass (Spend Ledger
+   Task 2).
+3. Credit card CSV parser (Credit Card Statement Import Task 1) — the
+   spend ledger wants CC data; format is now known.
+4. Review/re-classification TUI (Spend Ledger Task 3).
+5. Generic-CSV de-dup strategy (Bank Statement Import Task 2) remains
+   the oldest open TODO.
 
 ## Implementation Notes
 

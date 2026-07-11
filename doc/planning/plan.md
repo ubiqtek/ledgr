@@ -2,52 +2,93 @@
 
 ## What's Next
 
-Start Delta 1, Task 1: implement a UK bank CSV statement parser under
+Waiting on an ADR from another session covering tech choices/design for
+bank statement processing. Once it's pushed, pull it, read it, and start
+Delta 1, Task 1: implement a real bank CSV statement parser under
 `ledgr-core::import`, following the existing `StatementParser` trait
 and `generic_csv.rs` as a reference.
+
+Rebel Finance research for Delta 4 is done — see
+`doc/kb/rebel-finance/research.md`. Once the user has the actual
+spreadsheet, confirm the 8 open questions listed there (exact default
+category enum, transfer-flagging mechanics, income categorisation, etc.)
+before finalising the Delta 4 taxonomy/schema.
 
 ## Summary
 
 | Delta | Status |
 |---|---|
-| [Statement Import](#delta-statement-import) | Not started |
-| [Categorisation](#delta-categorisation) | Not started |
+| [Bank Statement Import](#delta-bank-statement-import) | Not started (blocked on incoming ADR) |
+| [Credit Card Statement Import](#delta-credit-card-statement-import) | Not started |
+| [Amazon Order Import](#delta-amazon-order-import) | Not started |
+| [Spending Categorisation](#delta-spending-categorisation) | Not started (research in progress) |
+| [Other Statement Import](#delta-other-statement-import) | Not started |
 | [TUI Analysis Views](#delta-tui-analysis-views) | Not started |
 | [Packaging & Distribution](#delta-packaging--distribution) | Not started |
 
-## Delta: Statement Import
+Real-world goal driving the first four deltas: analyse monthly spending
+across current account, credit card, and Amazon orders.
 
-Parse real-world bank and pension/investment statement formats into the
-`ledgr-core` domain model via the `StatementParser` trait.
+## Delta: Bank Statement Import
 
-### Task 1: UK bank CSV parsers
+Parse a real download from the user's bank into the `ledgr-core` domain
+model via the `StatementParser` trait. Design informed by an ADR another
+session is writing (tech choices for statement processing) — pull and
+read it before starting.
 
-TODO — pick 2-3 common UK bank CSV export formats (e.g. Monzo, Starling,
-a high-street bank) and implement `StatementParser` for each.
+### Task 1: Bank CSV/OFX parser
 
-### Task 2: Pension/investment statement parser
+TODO — implement `StatementParser` for the user's actual bank export
+format (confirm format once a sample statement is available).
 
-TODO — decide format (PDF vs OFX) and implement a parser.
-
-### Task 3: Import de-duplication
+### Task 2: Import de-duplication
 
 TODO — ensure re-importing an overlapping statement doesn't duplicate
 transactions (edge tables for transfer/refund links already exist in
 `schema.sql`; de-dup logic should respect these).
 
-## Delta: Categorisation
+## Delta: Credit Card Statement Import
 
-Assign categories to transactions, first via rules, later via inference.
+TODO — parser for the user's credit card statement export, needed
+alongside the current account to see full monthly spending.
 
-### Task 1: Rule-based categorisation
+## Delta: Amazon Order Import
 
-TODO — design a simple rule format (merchant match, amount range, account)
-and apply it during import or as a post-processing pass.
+TODO — import Amazon order history (format TBD — Amazon "Request my
+data" export vs order history CSV) so Amazon purchases show up as
+proper line items rather than one lump "Amazon" transaction per card
+charge.
 
-### Task 2: Inference-assisted categorisation
+## Delta: Spending Categorisation
+
+Categorise transactions using the "Rebel Finance" method. Background
+research written to `doc/kb/rebel-finance/research.md`; the user can also
+obtain their actual spreadsheet to confirm/replace details we couldn't
+verify publicly.
+
+### Task 1: Confirm Rebel Finance taxonomy
+
+TODO — cross-check `doc/kb/rebel-finance/research.md` against the user's
+own spreadsheet once available; finalise the category list and rules.
+
+### Task 2: Rule-based categorisation engine
+
+TODO — design a rule format (merchant match, amount range, account) that
+implements the confirmed taxonomy, applied during import or as a
+post-processing pass.
+
+### Task 3: Inference-assisted categorisation
 
 TODO — explore once rule-based categorisation has enough real data to
 evaluate against.
+
+## Delta: Other Statement Import
+
+Lower-priority formats, deferred behind the four deltas above.
+
+### Task 1: Pension/investment statement parser
+
+TODO — decide format (PDF vs OFX) and implement a parser.
 
 ## Delta: TUI Analysis Views
 

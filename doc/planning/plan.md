@@ -2,7 +2,7 @@
 
 ## What's Next
 
-**Next:** Task 2 — Import de-duplication (Delta: Bank Statement Import) — implement per-transaction de-dup on Barclays `FITID` (via `external_id`) for the case a single file is re-imported under a different hash with an overlapping date range
+**Next:** Task 2 — Import de-duplication (Delta: Bank Statement Import) — decide + implement a de-dup strategy for `GenericCsvParser`-imported institutions, which have no stable per-transaction ID
 **Sub-doc:** (none)
 **Blockers:** None
 
@@ -13,6 +13,7 @@
 | [Delta: Bank Statement Import](#delta-bank-statement-import) | [1. Barclays OFX parser](#task-1-barclays-ofx-parser) | ✓ DONE |
 | | [2. Import de-duplication](#task-2-import-de-duplication) | IN PROGRESS |
 | | [3. Account resolution and balance tracking](#task-3-account-resolution-and-balance-tracking) | ✓ DONE |
+| [Delta: Automatic Inbox Import](#delta-automatic-inbox-import) | [1. Inbox change notification](#task-1-inbox-change-notification) | TODO |
 | [Delta: Credit Card Statement Import](#delta-credit-card-statement-import) | [1. Credit card statement parser](#task-1-credit-card-statement-parser) | TODO |
 | [Delta: Amazon Order Import](#delta-amazon-order-import) | [1. Amazon order import](#task-1-amazon-order-import) | TODO |
 | [Delta: Spending Categorisation](#delta-spending-categorisation) | [1. Confirm Rebel Finance taxonomy](#task-1-confirm-rebel-finance-taxonomy) | IN PROGRESS |
@@ -78,9 +79,49 @@ location for downloaded statements.
   file (`sha2`) and skips it if `statements.file_hash` already has that
   hash (the schema already had the `UNIQUE` column; it just needed
   wiring up).
-- TODO — per-transaction de-dup on Barclays `FITID` (via `external_id`)
-  for the case a single file is re-imported under a different hash (e.g.
-  re-saved) with an overlapping date range.
+- ✓ DONE — per-transaction de-dup on `external_id`: added a partial
+  unique index `idx_transactions_account_external_id` on
+  `transactions(account_id, external_id) WHERE external_id IS NOT NULL`
+  (`src/db/schema.sql`), so it only applies to formats that carry a
+  stable external ID (e.g. Barclays OFX's `FITID`) and leaves
+  `GenericCsvParser`-imported rows (`external_id` always `NULL`)
+  unaffected. `Db::insert_transaction` (`src/db/transactions.rs`) now
+  uses `INSERT OR IGNORE` and returns `Option<Id>` (`None` when the
+  external_id already exists for that account) instead of `Id`.
+  `import_inbox` (`src/import/pipeline.rs`) counts these as
+  `transactions_deduplicated` on a new `ImportSummary` field, separate
+  from `transactions_imported`. Covered by a new unit test in each of
+  `db/transactions.rs` and `import/pipeline.rs` (the latter simulates a
+  re-saved file — same FITIDs, different file_hash — asserting zero
+  duplicate rows land in the database). Not yet validated against a
+  real re-saved Barclays file; the user is going to test this by
+  importing a new real file.
+- ✓ DONE — validated per-transaction de-dup against real data: imported
+  a new real account (Barclays Savings, `...3693`, "Adventure Fund", 28
+  transactions) alongside a 7-day-overlap re-download of the existing
+  "Jims Premier Account" (`...1892`) file. All 20 overlapping
+  transactions in the overlap file were correctly caught as duplicates
+  (account's transaction count stayed at exactly 562, confirmed one
+  FITID directly in the database), while the new account's 28
+  transactions imported cleanly.
+- ✓ DONE — added a per-file import log: `import_inbox`
+  (`src/import/pipeline.rs`) now writes a `.log` file alongside each
+  processed statement in `processed/` (same timestamp-prefixed base
+  name, `.log` extension via `Path::with_extension`), with one
+  tab-separated line per transaction: `<external_id or "->\t<imported|
+  duplicate|error>\t<message or "->`. Per-transaction insert errors
+  (`Db::insert_transaction`) are now caught individually instead of
+  propagated with `?`, so one bad row logs as `error` with the DB error
+  message instead of aborting the rest of the file's import. Also
+  fixed `Inbox::mark_processed` (`src/inbox.rs`) to prefix moved files
+  with a `YYYYMMDDHHMMSS%3f-` millisecond timestamp, since banks reuse
+  the same filename for every download (e.g. `data.ofx`), which would
+  otherwise silently overwrite the previous copy in `processed/` — the
+  timestamp also makes the `.log`'s companion file's processing time
+  obvious at a glance. Two new unit tests added (log content/naming,
+  including the duplicate-status case); verified end-to-end against a
+  real re-saved Barclays file (all 20 duplicate transactions correctly
+  logged as `duplicate`). Test count now 37, all passing.
 - TODO — de-dup strategy for `GenericCsvParser`-imported institutions,
   which have no stable per-transaction ID.
 
@@ -110,6 +151,21 @@ location for downloaded statements.
 - ✓ DONE — added `ledgr status` CLI command (`src/main.rs`) printing
   per-account balance (with as-of date), transaction count, date range,
   and last-imported-at — this is what surfaced both bugs above.
+
+## Delta: Automatic Inbox Import
+
+Currently `ledgr import` must be run manually. Explore having new files
+in the inbox trigger an import automatically instead of the user
+remembering to run the command.
+
+### Task 1: Inbox change notification
+- TODO — evaluate launchd's `WatchPaths` key (a LaunchAgent plist that
+  runs `ledgr import` whenever the inbox directory changes) versus
+  embedding the `notify` crate (wraps macOS FSEvents) so `ledgr` itself
+  watches while running. Leaning towards `WatchPaths`: native, no
+  polling/cron, and doesn't require a long-running `ledgr` process.
+  Avoid a cron-based polling loop if a native change-notification
+  mechanism (FSEvents-backed) covers it.
 
 ## Delta: Credit Card Statement Import
 
@@ -518,6 +574,94 @@ remains the oldest open TODO in the plan.
    institutions, which have no stable per-transaction ID.
 3. Net worth / spending trend views (Task 2 of TUI Analysis Views) — the
    `balance_as_of` groundwork already exists in `src/db/balances.rs`.
+4. Move on to Credit Card Statement Import once Bank Statement Import
+   (Task 2) is fully done.
+
+## Checkpoint: Session 2026-07-11f
+
+**What was completed this session:**
+- Implemented per-transaction de-dup on `external_id` (e.g. Barclays
+  `FITID`): a partial unique index `idx_transactions_account_external_id`
+  on `transactions(account_id, external_id) WHERE external_id IS NOT NULL`
+  (`src/db/schema.sql`), `Db::insert_transaction` changed to
+  `INSERT OR IGNORE` returning `Option<Id>` (`src/db/transactions.rs`),
+  and `import_inbox` (`src/import/pipeline.rs`) now tracks a new
+  `transactions_deduplicated` count on `ImportSummary`, separate from
+  `transactions_imported`. Two new unit tests added (one in each of
+  `db/transactions.rs` and `import/pipeline.rs`); all 35 tests pass.
+- Discussed adding a Delta for automatically triggering `ledgr import`
+  when new files land in the inbox, instead of the user running the
+  command manually. Leaning towards macOS launchd `WatchPaths` (native
+  FSEvents-backed change notification via a LaunchAgent plist) over
+  embedding the `notify` crate or a cron polling loop — added as a new
+  "Automatic Inbox Import" Delta, not yet designed or implemented.
+
+**State of the project:**
+Bank Statement Import's de-dup story is now complete for formats that
+carry a stable per-transaction ID (Barclays OFX via FITID) — both
+whole-file (SHA-256 hash) and per-transaction (external_id) dedup are in
+place and unit-tested, though the per-transaction path is not yet
+validated against a real re-saved Barclays file (the user is going to
+test this manually by importing a new real file). The one remaining gap
+in Task 2 is a de-dup strategy for `GenericCsvParser`-imported
+institutions, which have no stable per-transaction ID to key off. A new
+"Automatic Inbox Import" Delta was scoped (not started) to remove the
+manual `ledgr import` step.
+
+**Immediate next priorities:**
+1. Decide + implement a de-dup strategy for `GenericCsvParser`-imported
+   institutions, which have no stable per-transaction ID.
+2. Net worth / spending trend views (Task 2 of TUI Analysis Views) — the
+   `balance_as_of` groundwork already exists in `src/db/balances.rs`.
+3. Design the Automatic Inbox Import mechanism (launchd `WatchPaths` vs
+   `notify` crate) once higher-priority import/TUI work settles.
+4. Move on to Credit Card Statement Import once Bank Statement Import
+   (Task 2) is fully done.
+
+## Checkpoint: Session 2026-07-11g
+
+**What was completed this session:**
+- Validated per-transaction de-dup against real data: imported a new
+  real Barclays Savings account (`...3693`, "Adventure Fund", 28
+  transactions) alongside a 7-day-overlap re-download of the existing
+  "Jims Premier Account" file. All 20 overlapping transactions were
+  correctly caught as duplicates; the account's transaction count
+  stayed at exactly 562 (confirmed by checking one FITID directly in
+  the database).
+- Added a per-file import log: `import_inbox` (`src/import/pipeline.rs`)
+  now writes a `.log` file next to each processed statement (same
+  timestamp-prefixed name, `.log` extension), one tab-separated line
+  per transaction (external_id, status — imported/duplicate/error,
+  message). Per-transaction insert errors are now caught individually
+  instead of aborting the whole file's import.
+- Fixed `Inbox::mark_processed` (`src/inbox.rs`) to prefix processed
+  filenames with a millisecond timestamp, since banks reuse the same
+  filename for every download and this was silently overwriting the
+  previous copy in `processed/`.
+- Two new unit tests added; verified end-to-end against a real
+  re-saved Barclays file (20 transactions all correctly logged as
+  `duplicate`). Test count now 37, all passing.
+- Cleaned up a synthetic test statement/file created during real-data
+  verification from both the real database and the real inbox
+  `processed/` folder (no stray transactions were created — the DELETE
+  only removed the harmless `statements` row).
+
+**State of the project:**
+Bank Statement Import's de-dup story (Task 2) is now fully validated
+end-to-end against real data for formats with a stable external ID
+(Barclays OFX via FITID) — whole-file and per-transaction dedup are
+both proven, plus a new audit trail (per-file `.log`) showing exactly
+what happened to every transaction in an import. The remaining gap is
+a de-dup strategy for `GenericCsvParser`-imported institutions (no
+stable per-transaction ID).
+
+**Immediate next priorities:**
+1. Decide + implement a de-dup strategy for `GenericCsvParser`-imported
+   institutions, which have no stable per-transaction ID.
+2. Net worth / spending trend views (Task 2 of TUI Analysis Views) — the
+   `balance_as_of` groundwork already exists in `src/db/balances.rs`.
+3. Design the Automatic Inbox Import mechanism (launchd `WatchPaths` vs
+   `notify` crate) once higher-priority import/TUI work settles.
 4. Move on to Credit Card Statement Import once Bank Statement Import
    (Task 2) is fully done.
 

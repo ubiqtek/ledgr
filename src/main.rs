@@ -44,8 +44,11 @@ fn run_import(db: Db) -> anyhow::Result<()> {
     let summary = import::import_inbox(&db, &inbox)?;
 
     println!(
-        "imported {} file(s), {} transaction(s); skipped {} file(s) already imported",
-        summary.files_imported, summary.transactions_imported, summary.files_skipped
+        "imported {} file(s), {} transaction(s); skipped {} file(s) already imported, {} transaction(s) already imported",
+        summary.files_imported,
+        summary.transactions_imported,
+        summary.files_skipped,
+        summary.transactions_deduplicated
     );
     println!("inbox: {}", config.inbox_dir.display());
     Ok(())

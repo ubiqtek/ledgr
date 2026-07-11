@@ -57,6 +57,14 @@ CREATE INDEX IF NOT EXISTS idx_transactions_account ON transactions(account_id);
 CREATE INDEX IF NOT EXISTS idx_transactions_posted_at ON transactions(posted_at);
 CREATE INDEX IF NOT EXISTS idx_transactions_category ON transactions(category_id);
 
+-- A statement re-imported under a different file hash (e.g. re-saved from
+-- the bank's website) must not duplicate transactions the FITID/external_id
+-- already identifies as the same one within an account. Partial (excludes
+-- NULL external_id) since formats like generic CSV carry no stable ID.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_transactions_account_external_id
+    ON transactions(account_id, external_id)
+    WHERE external_id IS NOT NULL;
+
 -- Balance "anchors" reported by the bank itself (OFX LEDGERBAL and
 -- equivalents), one per statement that carries one. The transaction list in
 -- a given statement often doesn't reach back to account opening, so a

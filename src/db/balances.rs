@@ -6,27 +6,30 @@ impl Db {
     /// Records a balance anchor reported by the bank itself (e.g. OFX
     /// `LEDGERBAL`) for `account_id` as of `as_of` (a date, `YYYY-MM-DD`).
     /// A no-op if a snapshot already exists for that exact account/date
-    /// (e.g. re-importing the same statement).
+    /// (e.g. re-importing the same file).
     pub fn insert_balance_snapshot(
         &self,
         account_id: Id,
-        statement_id: Option<Id>,
+        import_id: Option<Id>,
         balance_minor: i64,
         as_of: &str,
     ) -> rusqlite::Result<()> {
         self.conn().execute(
-            "INSERT OR IGNORE INTO balance_snapshots (account_id, statement_id, balance_minor, as_of)
+            "INSERT OR IGNORE INTO balance_snapshots (account_id, import_id, balance_minor, as_of)
              VALUES (?1, ?2, ?3, ?4)",
-            params![account_id, statement_id, balance_minor, as_of],
+            params![account_id, import_id, balance_minor, as_of],
         )?;
         Ok(())
     }
 
     /// The most recent balance anchor for an account, i.e. the balance as
-    /// reported by the most recently-dated statement import. Returns
-    /// `(balance_minor, as_of)`, or `None` if no statement for this account
+    /// reported by the most recently-dated import. Returns
+    /// `(balance_minor, as_of)`, or `None` if no import for this account
     /// has carried a balance snapshot yet.
-    pub fn latest_balance_snapshot(&self, account_id: Id) -> rusqlite::Result<Option<(i64, String)>> {
+    pub fn latest_balance_snapshot(
+        &self,
+        account_id: Id,
+    ) -> rusqlite::Result<Option<(i64, String)>> {
         self.conn()
             .query_row(
                 "SELECT balance_minor, as_of FROM balance_snapshots
@@ -101,6 +104,8 @@ mod tests {
             institution: None,
             account_type: AccountType::Current,
             currency: "GBP".into(),
+            sort_code: None,
+            account_number: None,
         })
         .expect("insert account")
     }
@@ -108,13 +113,13 @@ mod tests {
     fn transaction_on(db: &Db, account_id: Id, date: &str, amount_minor: i64) {
         db.insert_transaction(&NewTransaction {
             account_id,
-            statement_id: None,
+            import_id: None,
             posted_at: date.into(),
             amount_minor,
             currency: "GBP".into(),
             description: "test".into(),
             raw_description: None,
-            category_id: None,
+            trn_type: None,
             external_id: None,
         })
         .expect("insert transaction");
@@ -203,7 +208,8 @@ mod tests {
         let account_id = test_account(&db);
 
         assert_eq!(
-            db.balance_as_of(account_id, "2026-07-01").expect("balance_as_of"),
+            db.balance_as_of(account_id, "2026-07-01")
+                .expect("balance_as_of"),
             None
         );
     }

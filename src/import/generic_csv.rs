@@ -1,4 +1,4 @@
-use super::{ImportError, StatementParser};
+use super::{ImportError, ImportFileParser};
 use crate::model::{Id, NewTransaction};
 use std::path::Path;
 
@@ -10,7 +10,7 @@ pub struct GenericCsvParser {
     pub currency: String,
 }
 
-impl StatementParser for GenericCsvParser {
+impl ImportFileParser for GenericCsvParser {
     fn name(&self) -> &'static str {
         "Generic CSV"
     }
@@ -39,13 +39,13 @@ impl StatementParser for GenericCsvParser {
 
             transactions.push(NewTransaction {
                 account_id,
-                statement_id: None,
+                import_id: None,
                 posted_at,
                 amount_minor,
                 currency: self.currency.clone(),
                 description: description.clone(),
                 raw_description: Some(description),
-                category_id: None,
+                trn_type: None,
                 external_id: None,
             });
         }

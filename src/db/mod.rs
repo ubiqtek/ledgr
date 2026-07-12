@@ -1,6 +1,7 @@
 mod accounts;
 mod balances;
-mod statements;
+mod imports;
+mod spend;
 mod status;
 mod transactions;
 
@@ -31,8 +32,32 @@ impl Db {
 
     fn init(conn: Connection) -> rusqlite::Result<Self> {
         conn.pragma_update(None, "foreign_keys", true)?;
+        Self::migrate_statements_to_imports(&conn)?;
         conn.execute_batch(SCHEMA)?;
         Ok(Self { conn })
+    }
+
+    /// One-off migration for databases created before "statement" was
+    /// renamed to "import" (see doc/domain/ubiquitous-language.md). Renames
+    /// the `statements` table to `imports` and its referencing
+    /// `statement_id` columns to `import_id`, so `SCHEMA`'s
+    /// `CREATE TABLE IF NOT EXISTS imports` finds existing data rather than
+    /// creating an empty table alongside the old one. No-op on a fresh or
+    /// already-migrated database.
+    fn migrate_statements_to_imports(conn: &Connection) -> rusqlite::Result<()> {
+        let has_old_table: bool = conn.query_row(
+            "SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name = 'statements'",
+            [],
+            |row| row.get::<_, i64>(0),
+        )? > 0;
+        if !has_old_table {
+            return Ok(());
+        }
+        conn.execute_batch(
+            "ALTER TABLE statements RENAME TO imports;
+             ALTER TABLE transactions RENAME COLUMN statement_id TO import_id;
+             ALTER TABLE balance_snapshots RENAME COLUMN statement_id TO import_id;",
+        )
     }
 
     pub fn conn(&self) -> &Connection {

@@ -5,3 +5,5 @@
 - [3. Single crate, package `ledgr`](0003-single-crate-package-ledgr.md)
 - [4. Use XDG conventions for `ledgr`'s local files, not platform-native dirs](0004-xdg-conventions-for-local-files.md)
 - [5. Independent spend and income ledgers, derived from raw transactions](0005-independent-spend-and-income-ledgers.md)
+- [6. No account-type gate on spend derivation — scan every account uniformly](0006-no-account-type-gate-on-spend-derivation.md)
+- [7. Model assets and liabilities as accounts with (manual or imported) balance snapshots](0007-assets-and-liabilities-as-accounts-with-balance-snapshots.md)

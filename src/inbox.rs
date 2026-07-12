@@ -1,4 +1,4 @@
-//! The inbox is a directory ledgr watches for downloaded statement files.
+//! The inbox is a directory ledgr watches for downloaded import files.
 //! Files that have been imported are moved into a `processed` subdirectory
 //! inside it, so the next scan doesn't pick them up again.
 
@@ -89,11 +89,11 @@ mod tests {
         let inbox = Inbox::new(dir.path().to_path_buf());
         inbox.ensure_dirs().expect("ensure_dirs");
 
-        File::create(dir.path().join("statement.ofx")).expect("create file");
+        File::create(dir.path().join("import.ofx")).expect("create file");
         File::create(inbox.processed_dir().join("old.ofx")).expect("create file");
 
         let pending = inbox.pending_files().expect("pending_files");
-        assert_eq!(pending, vec![dir.path().join("statement.ofx")]);
+        assert_eq!(pending, vec![dir.path().join("import.ofx")]);
     }
 
     #[test]
@@ -102,11 +102,11 @@ mod tests {
         let inbox = Inbox::new(dir.path().to_path_buf());
         inbox.ensure_dirs().expect("ensure_dirs");
 
-        File::create(dir.path().join("statement.ofx")).expect("create file");
+        File::create(dir.path().join("import.ofx")).expect("create file");
         File::create(dir.path().join(".DS_Store")).expect("create file");
 
         let pending = inbox.pending_files().expect("pending_files");
-        assert_eq!(pending, vec![dir.path().join("statement.ofx")]);
+        assert_eq!(pending, vec![dir.path().join("import.ofx")]);
     }
 
     #[test]
@@ -115,7 +115,7 @@ mod tests {
         let inbox = Inbox::new(dir.path().to_path_buf());
         inbox.ensure_dirs().expect("ensure_dirs");
 
-        let path = dir.path().join("statement.ofx");
+        let path = dir.path().join("import.ofx");
         File::create(&path).expect("create file");
 
         let dest = inbox.mark_processed(&path).expect("mark_processed");
@@ -124,7 +124,7 @@ mod tests {
         assert!(dest.exists());
         let dest_name = dest.file_name().unwrap().to_str().unwrap();
         assert!(
-            dest_name.ends_with("-statement.ofx"),
+            dest_name.ends_with("-import.ofx"),
             "expected a timestamp-prefixed name, got {dest_name}"
         );
         assert_eq!(dest.parent(), Some(inbox.processed_dir().as_path()));
@@ -136,7 +136,7 @@ mod tests {
         let inbox = Inbox::new(dir.path().to_path_buf());
         inbox.ensure_dirs().expect("ensure_dirs");
 
-        let path = dir.path().join("statement.ofx");
+        let path = dir.path().join("import.ofx");
         File::create(&path).expect("create file");
         let first_dest = inbox.mark_processed(&path).expect("mark_processed");
 

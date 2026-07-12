@@ -55,13 +55,13 @@ Amounts are always signed integers in minor currency units (e.g. pence),
 never floats, to avoid drift — see `amount_minor` on `Transaction` and
 `import::generic_csv::parse_amount_minor`.
 
-### Statement import
+### Transaction import
 
 Every supported bank/pension export format implements the
-`StatementParser` trait (`src/import/mod.rs`):
+`ImportFileParser` trait (`src/import/mod.rs`):
 
 ```rust
-trait StatementParser {
+trait ImportFileParser {
     fn name(&self) -> &'static str;
     fn account_identity(&self, path: &Path) -> Result<Option<NewAccount>, ImportError> { Ok(None) }
     fn parse(&self, path: &Path, account_id: Id) -> Result<Vec<NewTransaction>, ImportError>;

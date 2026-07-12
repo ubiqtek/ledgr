@@ -27,18 +27,21 @@ One raw line as imported from the bank: immutable evidence, never
 edited or categorised directly. De-duplicated per account by
 `external_id` (OFX `FITID`). *Origin: banking domain.*
 
-### Statement — established, name under review
+### Import — established (renamed from "Statement")
 
-Currently: one imported file, recorded in the `statements` table so
-re-importing the same file is a no-op. The name was introduced by the
-assistant in the original schema without discussion, and it is not
-quite honest: what lands in the inbox are **exports/downloads** with
-arbitrary, user-chosen date ranges (OFX downloads, the Barclaycard
-CSV), not statements in the banking sense (a periodic document the
-bank issues). Candidate replacements: *export*, *download*,
-*import file*. Rename not yet decided — the concept (one imported
-file, hash-deduped) is sound, only the word is in question.
-*Origin: assistant-invented, 2026-07 schema.*
+One imported file, recorded in the `imports` table (was `statements`)
+so re-importing the same file is a no-op. Previously called
+"Statement" — introduced by the assistant in the original schema
+without discussion, and not quite honest: what lands in the inbox are
+**exports/downloads** with arbitrary, user-chosen date ranges (OFX
+downloads, the Barclaycard CSV), not statements in the banking sense
+(a periodic document the bank issues). "Import" was chosen over
+*export*/*download*/*import file* despite already naming the
+`ledgr import` command/run: one **import** is one file; running
+`ledgr import` processes a batch of zero or more imports in one run
+(`ImportSummary`) — coherent, not a collision. *Origin:
+assistant-invented, 2026-07 schema; renamed by the user, Delta:
+Statement/Import Naming Cleanup, 2026-07-12.*
 
 ### Inbox — established
 

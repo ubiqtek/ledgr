@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Config {
-    /// Directory ledgr scans for downloaded statement files to import.
+    /// Directory ledgr scans for downloaded import files.
     /// A `processed` subdirectory is created inside it automatically, and
     /// imported files are moved there so they aren't picked up again.
     pub inbox_dir: PathBuf,
@@ -22,6 +22,25 @@ pub struct Config {
     /// duplicating accounts on re-import.
     #[serde(default)]
     pub account_names: BTreeMap<String, String>,
+
+    /// Known-but-not-imported household members' accounts (e.g. a partner's),
+    /// so spend ledger derivation recognises transfers to them as internal
+    /// rather than spend. Imported accounts are household members
+    /// automatically and don't need listing here — see the "Account
+    /// registry" section of doc/implementation-notes/spend-ledger-design.md.
+    /// Hand-edit the config file to add one; no CLI command yet.
+    #[serde(default)]
+    pub household_accounts: Vec<HouseholdAccountRef>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HouseholdAccountRef {
+    pub sort_code: String,
+    pub account_number: String,
+    /// Free-text label for the user's own reference (e.g. "Partner's
+    /// account") — not used for matching.
+    #[serde(default)]
+    pub label: Option<String>,
 }
 
 impl Config {
@@ -42,6 +61,7 @@ impl Config {
             let default = Config {
                 inbox_dir: base_dirs()?.home_dir().join(".config/ledgr/inbox"),
                 account_names: BTreeMap::new(),
+                household_accounts: Vec::new(),
             };
             default.save(path)?;
             return Ok(default);
@@ -68,7 +88,10 @@ impl Config {
     /// Rewrites `name` on every account for which a display-name override is
     /// configured, matched by the last 4 digits embedded in the
     /// bank-generated name (e.g. `"...5678)"`).
-    pub fn apply_account_name_overrides<'a>(&self, accounts: impl IntoIterator<Item = &'a mut Account>) {
+    pub fn apply_account_name_overrides<'a>(
+        &self,
+        accounts: impl IntoIterator<Item = &'a mut Account>,
+    ) {
         if self.account_names.is_empty() {
             return;
         }
@@ -116,6 +139,7 @@ mod tests {
         Config {
             inbox_dir: inbox_dir.clone(),
             account_names: BTreeMap::new(),
+            household_accounts: Vec::new(),
         }
         .save(&path)
         .expect("save");
@@ -129,6 +153,7 @@ mod tests {
         let mut config = Config {
             inbox_dir: PathBuf::from("/tmp/inbox"),
             account_names: BTreeMap::new(),
+            household_accounts: Vec::new(),
         };
         config.set_account_name("5678", "Jim's Account");
 
@@ -138,6 +163,8 @@ mod tests {
             institution: Some("Barclays".into()),
             account_type: crate::model::AccountType::Current,
             currency: "GBP".into(),
+            sort_code: None,
+            account_number: None,
         }];
 
         config.apply_account_name_overrides(&mut accounts);

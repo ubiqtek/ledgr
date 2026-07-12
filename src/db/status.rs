@@ -5,7 +5,7 @@ use crate::model::{Account, AccountType};
 /// the date range covered, and when it was last imported into.
 ///
 /// `balance_minor` comes from the most recent balance anchor (e.g. OFX
-/// `LEDGERBAL`), not a sum of imported transactions — a statement's
+/// `LEDGERBAL`), not a sum of imported transactions — an import's
 /// transaction list often doesn't reach back to account opening, so summing
 /// it understates/misstates the real balance. See `Db::balance_as_of`.
 #[derive(Debug, Clone)]
@@ -25,10 +25,11 @@ impl Db {
     pub fn account_statuses(&self) -> rusqlite::Result<Vec<AccountStatus>> {
         let mut stmt = self.conn().prepare(
             "SELECT a.id, a.name, a.institution, a.account_type, a.currency,
+                    a.sort_code, a.account_number,
                     COUNT(t.id) AS tx_count,
                     MIN(t.posted_at),
                     MAX(t.posted_at),
-                    (SELECT MAX(s.imported_at) FROM statements s WHERE s.account_id = a.id)
+                    (SELECT MAX(s.imported_at) FROM imports s WHERE s.account_id = a.id)
              FROM accounts a
              LEFT JOIN transactions t ON t.account_id = a.id
              GROUP BY a.id
@@ -44,17 +45,24 @@ impl Db {
                     account_type: AccountType::parse(&account_type_str)
                         .unwrap_or(AccountType::Other),
                     currency: row.get(4)?,
+                    sort_code: row.get(5)?,
+                    account_number: row.get(6)?,
                 },
-                row.get::<_, i64>(5)?,
-                row.get::<_, Option<String>>(6)?,
-                row.get::<_, Option<String>>(7)?,
+                row.get::<_, i64>(7)?,
                 row.get::<_, Option<String>>(8)?,
+                row.get::<_, Option<String>>(9)?,
+                row.get::<_, Option<String>>(10)?,
             ))
         })?;
 
         rows.map(|row| {
-            let (account, transaction_count, earliest_transaction, latest_transaction, last_imported_at) =
-                row?;
+            let (
+                account,
+                transaction_count,
+                earliest_transaction,
+                latest_transaction,
+                last_imported_at,
+            ) = row?;
             let (balance_minor, balance_as_of) = match self.latest_balance_snapshot(account.id)? {
                 Some((balance, as_of)) => (Some(balance), Some(as_of)),
                 None => (None, None),
@@ -86,6 +94,8 @@ mod tests {
             institution: None,
             account_type: AccountType::Current,
             currency: "GBP".into(),
+            sort_code: None,
+            account_number: None,
         })
         .expect("insert account");
 
@@ -106,19 +116,21 @@ mod tests {
                 institution: Some("Barclays".into()),
                 account_type: AccountType::Current,
                 currency: "GBP".into(),
+                sort_code: None,
+                account_number: None,
             })
             .expect("insert account");
 
         for (date, amount) in [("2026-01-05", -500), ("2026-03-10", 2000)] {
             db.insert_transaction(&NewTransaction {
                 account_id,
-                statement_id: None,
+                import_id: None,
                 posted_at: date.into(),
                 amount_minor: amount,
                 currency: "GBP".into(),
                 description: "test".into(),
                 raw_description: None,
-                category_id: None,
+                trn_type: None,
                 external_id: None,
             })
             .expect("insert transaction");
@@ -137,7 +149,7 @@ mod tests {
     }
 
     #[test]
-    fn status_reports_last_imported_at_from_statements() {
+    fn status_reports_last_imported_at_from_imports() {
         let db = Db::open_in_memory().expect("open db");
         let account_id = db
             .insert_account(&NewAccount {
@@ -145,11 +157,13 @@ mod tests {
                 institution: Some("Barclays".into()),
                 account_type: AccountType::Current,
                 currency: "GBP".into(),
+                sort_code: None,
+                account_number: None,
             })
             .expect("insert account");
 
-        db.insert_statement(account_id, "/tmp/a.ofx", "hash-a", None, None)
-            .expect("insert statement");
+        db.insert_import(account_id, "/tmp/a.ofx", "hash-a", None, None)
+            .expect("insert import");
 
         let statuses = db.account_statuses().expect("account statuses");
         assert!(statuses[0].last_imported_at.is_some());

@@ -35,39 +35,42 @@ fn draw_accounts(frame: &mut Frame, app: &mut App, area: Rect) {
 
     if app.accounts.is_empty() {
         frame.render_widget(
-            Paragraph::new("No accounts yet. Import a statement to get started.").block(block),
+            Paragraph::new("No accounts yet. Import a file to get started.").block(block),
             area,
         );
         return;
     }
 
-    let rows = app.accounts.iter().map(|status| {
-        let account = &status.account;
-        let balance = match status.balance_minor {
-            Some(minor) => crate::format_amount_minor(minor, &account.currency),
-            None => "unknown".to_string(),
-        };
-        // last_imported_at is an ISO 8601 UTC timestamp, e.g.
-        // "2026-07-11T16:53:10.605Z"; show date + hours:minutes, dropping
-        // seconds/fractional seconds and the "Z" as more precision than is
-        // useful in a column this narrow.
-        let last_imported = status
-            .last_imported_at
-            .as_deref()
-            .map(|ts| match ts.split_once('T') {
-                Some((date, time)) => format!("{date} {}", &time[..time.len().min(5)]),
-                None => ts.to_string(),
-            })
-            .unwrap_or_else(|| "never".to_string());
-        Row::new(vec![
-            Cell::from(account.name.clone()),
-            Cell::from(account.account_type.as_str()),
-            Cell::from(account.institution.clone().unwrap_or_default()),
-            Cell::from(Line::from(balance).alignment(Alignment::Right)),
-            Cell::from(last_imported),
-        ])
-    })
-    .collect::<Vec<_>>();
+    let rows = app
+        .accounts
+        .iter()
+        .map(|status| {
+            let account = &status.account;
+            let balance = match status.balance_minor {
+                Some(minor) => crate::format_amount_minor(minor, &account.currency),
+                None => "unknown".to_string(),
+            };
+            // last_imported_at is an ISO 8601 UTC timestamp, e.g.
+            // "2026-07-11T16:53:10.605Z"; show date + hours:minutes, dropping
+            // seconds/fractional seconds and the "Z" as more precision than is
+            // useful in a column this narrow.
+            let last_imported = status
+                .last_imported_at
+                .as_deref()
+                .map(|ts| match ts.split_once('T') {
+                    Some((date, time)) => format!("{date} {}", &time[..time.len().min(5)]),
+                    None => ts.to_string(),
+                })
+                .unwrap_or_else(|| "never".to_string());
+            Row::new(vec![
+                Cell::from(account.name.clone()),
+                Cell::from(account.account_type.as_str()),
+                Cell::from(account.institution.clone().unwrap_or_default()),
+                Cell::from(Line::from(balance).alignment(Alignment::Right)),
+                Cell::from(last_imported),
+            ])
+        })
+        .collect::<Vec<_>>();
 
     let table = Table::new(
         rows,
@@ -105,16 +108,19 @@ fn draw_transactions(frame: &mut Frame, app: &mut App, area: Rect) {
         return;
     }
 
-    let rows = app.transactions.iter().map(|tx| {
-        let amount = tx.amount_minor as f64 / 100.0;
-        Row::new(vec![
-            Cell::from(tx.posted_at.clone()),
-            Cell::from(format!("{amount:>10.2}")),
-            Cell::from(tx.currency.clone()),
-            Cell::from(tx.description.clone()),
-        ])
-    })
-    .collect::<Vec<_>>();
+    let rows = app
+        .transactions
+        .iter()
+        .map(|tx| {
+            let amount = tx.amount_minor as f64 / 100.0;
+            Row::new(vec![
+                Cell::from(tx.posted_at.clone()),
+                Cell::from(format!("{amount:>10.2}")),
+                Cell::from(tx.currency.clone()),
+                Cell::from(tx.description.clone()),
+            ])
+        })
+        .collect::<Vec<_>>();
 
     let table = Table::new(
         rows,
@@ -149,8 +155,8 @@ fn draw_help(frame: &mut Frame, area: Rect) {
         .map(|(key, action)| ratatui::text::Line::from(format!("{key:<20} {action}")))
         .collect();
 
-    let paragraph = Paragraph::new(lines)
-        .block(Block::default().title("Help").borders(Borders::ALL));
+    let paragraph =
+        Paragraph::new(lines).block(Block::default().title("Help").borders(Borders::ALL));
     frame.render_widget(paragraph, area);
 }
 

@@ -53,7 +53,7 @@ import path.
 
 ## Decision
 
-Implement the Barclays `StatementParser` using OFX as the primary format,
+Implement the Barclays `ImportFileParser` using OFX as the primary format,
 via the `ofx-rs` crate, mapping `FITID` to `Transaction::external_id`.
 
 Keep the existing `GenericCsvParser` as the fallback path for institutions

@@ -1,7 +1,7 @@
-//! Scans the inbox for statement files, imports any not seen before, and
+//! Scans the inbox for import files, imports any not seen before, and
 //! moves each into `processed/` once handled.
 
-use super::{BarclaysOfxParser, GenericCsvParser, StatementParser};
+use super::{BarclaysOfxParser, GenericCsvParser, ImportFileParser};
 use crate::db::Db;
 use crate::inbox::Inbox;
 use crate::model::{AccountType, NewAccount};
@@ -17,7 +17,7 @@ pub struct ImportSummary {
 }
 
 /// One line of the per-file import log written alongside each processed
-/// statement, so the user can see exactly what happened to every
+/// import, so the user can see exactly what happened to every
 /// transaction in a file without digging through the database.
 struct LogEntry {
     external_id: Option<String>,
@@ -37,7 +37,11 @@ impl LogEntry {
 }
 
 fn write_import_log(log_path: &Path, entries: &[LogEntry]) -> std::io::Result<()> {
-    let body = entries.iter().map(LogEntry::to_line).collect::<Vec<_>>().join("\n");
+    let body = entries
+        .iter()
+        .map(LogEntry::to_line)
+        .collect::<Vec<_>>()
+        .join("\n");
     std::fs::write(log_path, body)
 }
 
@@ -48,7 +52,7 @@ pub fn import_inbox(db: &Db, inbox: &Inbox) -> anyhow::Result<ImportSummary> {
     for path in inbox.pending_files()? {
         let file_hash = hash_file(&path)?;
 
-        if db.find_statement_by_hash(&file_hash)?.is_some() {
+        if db.find_import_by_hash(&file_hash)?.is_some() {
             summary.files_skipped += 1;
             inbox.mark_processed(&path)?;
             continue;
@@ -71,13 +75,15 @@ pub fn import_inbox(db: &Db, inbox: &Inbox) -> anyhow::Result<ImportSummary> {
                 institution: Some("Barclays".into()),
                 account_type: AccountType::Current,
                 currency: "GBP".into(),
+                sort_code: None,
+                account_number: None,
             })?,
         };
 
-        let Some(statement_id) =
-            db.insert_statement(account_id, &path.to_string_lossy(), &file_hash, None, None)?
+        let Some(import_id) =
+            db.insert_import(account_id, &path.to_string_lossy(), &file_hash, None, None)?
         else {
-            // Another statement already claimed this hash between the check
+            // Another import already claimed this hash between the check
             // above and now; treat it as already imported.
             summary.files_skipped += 1;
             inbox.mark_processed(&path)?;
@@ -88,9 +94,9 @@ pub fn import_inbox(db: &Db, inbox: &Inbox) -> anyhow::Result<ImportSummary> {
         let mut imported = 0;
         let mut log_entries = Vec::with_capacity(transactions.len());
         for txn in &mut transactions {
-            txn.statement_id = Some(statement_id);
+            txn.import_id = Some(import_id);
             // Caught per-transaction (not `?`) so one bad row doesn't abort
-            // the rest of an otherwise-good statement file.
+            // the rest of an otherwise-good import file.
             match db.insert_transaction(txn) {
                 Ok(Some(_)) => {
                     imported += 1;
@@ -122,7 +128,7 @@ pub fn import_inbox(db: &Db, inbox: &Inbox) -> anyhow::Result<ImportSummary> {
         }
 
         if let Some((balance_minor, as_of)) = parser.balance_snapshot(&path)? {
-            db.insert_balance_snapshot(account_id, Some(statement_id), balance_minor, &as_of)?;
+            db.insert_balance_snapshot(account_id, Some(import_id), balance_minor, &as_of)?;
         }
 
         summary.transactions_imported += imported;
@@ -134,7 +140,7 @@ pub fn import_inbox(db: &Db, inbox: &Inbox) -> anyhow::Result<ImportSummary> {
     Ok(summary)
 }
 
-fn parser_for(path: &Path) -> Option<Box<dyn StatementParser>> {
+fn parser_for(path: &Path) -> Option<Box<dyn ImportFileParser>> {
     match path
         .extension()
         .and_then(|e| e.to_str())
@@ -205,7 +211,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let inbox = Inbox::new(dir.path().to_path_buf());
         inbox.ensure_dirs().expect("ensure_dirs");
-        std::fs::write(dir.path().join("statement.ofx"), SAMPLE_OFX).expect("write file");
+        std::fs::write(dir.path().join("import.ofx"), SAMPLE_OFX).expect("write file");
 
         let db = Db::open_in_memory().expect("open db");
         let summary = import_inbox(&db, &inbox).expect("import_inbox");
@@ -219,15 +225,24 @@ mod tests {
                 transactions_deduplicated: 0,
             }
         );
-        assert!(!dir.path().join("statement.ofx").exists());
+        assert!(!dir.path().join("import.ofx").exists());
         let mut processed = std::fs::read_dir(inbox.processed_dir())
             .expect("read processed dir")
-            .map(|e| e.expect("dir entry").file_name().to_string_lossy().into_owned())
+            .map(|e| {
+                e.expect("dir entry")
+                    .file_name()
+                    .to_string_lossy()
+                    .into_owned()
+            })
             .collect::<Vec<_>>();
         processed.sort();
-        assert_eq!(processed.len(), 2, "expected the statement and its .log: {processed:?}");
-        assert!(processed[0].ends_with("-statement.log"));
-        assert!(processed[1].ends_with("-statement.ofx"));
+        assert_eq!(
+            processed.len(),
+            2,
+            "expected the import and its .log: {processed:?}"
+        );
+        assert!(processed[0].ends_with("-import.log"));
+        assert!(processed[1].ends_with("-import.ofx"));
 
         let accounts = db.list_accounts().expect("list accounts");
         assert_eq!(accounts.len(), 1);
@@ -243,13 +258,13 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let inbox = Inbox::new(dir.path().to_path_buf());
         inbox.ensure_dirs().expect("ensure_dirs");
-        std::fs::write(dir.path().join("statement.ofx"), SAMPLE_OFX).expect("write file");
+        std::fs::write(dir.path().join("import.ofx"), SAMPLE_OFX).expect("write file");
 
         let db = Db::open_in_memory().expect("open db");
         import_inbox(&db, &inbox).expect("first import");
 
         // Drop the same file back into the inbox, as if re-downloaded.
-        std::fs::write(dir.path().join("statement.ofx"), SAMPLE_OFX).expect("write file again");
+        std::fs::write(dir.path().join("import.ofx"), SAMPLE_OFX).expect("write file again");
         let summary = import_inbox(&db, &inbox).expect("second import");
 
         assert_eq!(summary.files_imported, 0);
@@ -266,20 +281,23 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let inbox = Inbox::new(dir.path().to_path_buf());
         inbox.ensure_dirs().expect("ensure_dirs");
-        std::fs::write(dir.path().join("statement.ofx"), SAMPLE_OFX).expect("write file");
+        std::fs::write(dir.path().join("import.ofx"), SAMPLE_OFX).expect("write file");
 
         let db = Db::open_in_memory().expect("open db");
         import_inbox(&db, &inbox).expect("first import");
 
-        // Same statement, re-saved under a different filename/content (e.g.
+        // Same import, re-saved under a different filename/content (e.g.
         // an extra trailing newline) so it gets a different file_hash and
         // isn't caught by the whole-file dedup — but the FITID is unchanged.
         let re_saved = format!("{SAMPLE_OFX}\n");
-        std::fs::write(dir.path().join("statement-resaved.ofx"), re_saved)
+        std::fs::write(dir.path().join("import-resaved.ofx"), re_saved)
             .expect("write re-saved file");
         let summary = import_inbox(&db, &inbox).expect("second import");
 
-        assert_eq!(summary.files_imported, 1, "the re-saved file is not a whole-file dupe");
+        assert_eq!(
+            summary.files_imported, 1,
+            "the re-saved file is not a whole-file dupe"
+        );
         assert_eq!(summary.transactions_imported, 0);
         assert_eq!(summary.transactions_deduplicated, 1);
 
@@ -295,13 +313,13 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let inbox = Inbox::new(dir.path().to_path_buf());
         inbox.ensure_dirs().expect("ensure_dirs");
-        std::fs::write(dir.path().join("statement.ofx"), SAMPLE_OFX).expect("write file");
+        std::fs::write(dir.path().join("import.ofx"), SAMPLE_OFX).expect("write file");
 
         let db = Db::open_in_memory().expect("open db");
         import_inbox(&db, &inbox).expect("first import");
 
         let re_saved = format!("{SAMPLE_OFX}\n");
-        std::fs::write(dir.path().join("statement-resaved.ofx"), re_saved)
+        std::fs::write(dir.path().join("import-resaved.ofx"), re_saved)
             .expect("write re-saved file");
         import_inbox(&db, &inbox).expect("second import");
 
@@ -312,14 +330,14 @@ mod tests {
 
         let first_log = processed
             .iter()
-            .find(|p| p.to_string_lossy().ends_with("-statement.log"))
+            .find(|p| p.to_string_lossy().ends_with("-import.log"))
             .expect("log for first import");
         let first_contents = std::fs::read_to_string(first_log).expect("read log");
         assert_eq!(first_contents, "202607010001\timported\t-");
 
         let second_log = processed
             .iter()
-            .find(|p| p.to_string_lossy().ends_with("-statement-resaved.log"))
+            .find(|p| p.to_string_lossy().ends_with("-import-resaved.log"))
             .expect("log for second import");
         let second_contents = std::fs::read_to_string(second_log).expect("read log");
         assert_eq!(second_contents, "202607010001\tduplicate\t-");
@@ -330,7 +348,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let inbox = Inbox::new(dir.path().to_path_buf());
         inbox.ensure_dirs().expect("ensure_dirs");
-        std::fs::write(dir.path().join("statement.ofx"), SAMPLE_OFX).expect("write file");
+        std::fs::write(dir.path().join("import.ofx"), SAMPLE_OFX).expect("write file");
 
         let db = Db::open_in_memory().expect("open db");
         import_inbox(&db, &inbox).expect("import_inbox");

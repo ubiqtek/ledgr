@@ -85,7 +85,7 @@ movement.
 **Raw transactions are immutable evidence; the ledgers are derived.**
 
 ```
-statements ──▶ transactions (raw, never edited, deduped by FITID)
+imports ──▶ transactions (raw, never edited, deduped by FITID)
                     │
                     │  derivation pass (rules + transfer matching)
                     ▼
@@ -182,9 +182,10 @@ faster-payment transfer as `<sort code> <account no>` inside `NAME`
   between household members are recognised as internal rather than
   spend. Imported accounts are household members automatically; the
   config only needs the not-imported ones.
-- Mark which accounts are **spending accounts** (the current accounts
-  and the credit card). Real observed data confirms savings accounts
-  see transfers only.
+- No account-type pre-filter: derivation scans every account uniformly
+  regardless of type. Transfer pairing/reconciliation (rules 1-2 below)
+  is what keeps internal movement out of the ledger, not a check against
+  a fixed set of "spending account" types — see ADR 0006.
 
 ### Derivation rules (per raw transaction)
 
@@ -193,17 +194,34 @@ Evidence for these patterns: 939 real transactions analysed in the
 `TRNTYPE=XFER`; transfers arrive as `OTHER` and must be recognised
 from `NAME`.
 
-| Raw pattern | Classification |
-|---|---|
-| `NAME` starts `<sort code> <acct no>` and that account ∈ household accounts | **Internal transfer** — no ledger entry; pair with counterpart if imported (`transaction_links`) |
-| `NAME` starts `<sort code> <acct no>` and account unknown | Payment to an external account — **spend** if outbound, low confidence, review; inbound left for the income ledger |
-| `NAME` = `<PERSON> \t<ref> FT` (no account visible) | **Spend** to a person (window cleaner, family) if outbound; inbound: reimbursement (see open questions) |
-| Card payment (`ON <dd MMM> CPM`, `DIRECTDEBIT`, `PAYMENT`, `REPEATPMT` to a merchant) | **Spend** |
-| Card refund (`CRM`/`CRE`/`BCC` suffix, positive amount) | **Refund** — positive-amount spend entry, linked to the original entry via `transaction_links` `relation='refund'` when findable |
-| `DIRECTDEP`, other inbound credits from external parties | Income — **out of scope**, no spend entry; left untouched until the income ledger exists |
-| CC statement `Payment received` | Internal transfer (the credit side of a CC repayment from a current account) — no entry |
-| CC statement `Purchase` | **Spend** |
-| CC statement `Other` (e.g. Barclaycard Cashback) | Income — out of scope, review |
+Rules are evaluated **in this order**, top to bottom, first match wins.
+This matters because `TRNTYPE` alone is not a reliable discriminator —
+e.g. a standing order (`REPEATPMT`) into the user's own savings account
+would otherwise match the "card payment / DIRECTDEBIT / PAYMENT /
+REPEATPMT to a merchant" row below, misclassifying an internal transfer
+as spend. The `NAME`-prefix account check must run first, regardless of
+`TRNTYPE`, so it always wins the overlap.
+
+| # | Raw pattern | Classification |
+|---|---|---|
+| 1 | `NAME` starts `<sort code> <acct no>` and that account ∈ household accounts | **Internal transfer** — no ledger entry; pair with counterpart if imported (`transaction_links`) |
+| 2 | `NAME` starts `<sort code> <acct no>` and account unknown | Payment to an external account — **spend** if outbound, low confidence, review; inbound left for the income ledger |
+| 3 | `NAME` = `<PERSON> \t<ref> FT` (no account visible) | **Spend** to a person (window cleaner, family) if outbound; inbound: reimbursement (see open questions) |
+| 4 | Card payment (`ON <dd MMM> CPM`, `DIRECTDEBIT`, `PAYMENT`, `REPEATPMT` to a merchant) | **Spend** |
+| 5 | Card refund (`CRM`/`CRE`/`BCC` suffix, positive amount) | **Refund** — positive-amount spend entry, linked to the original entry via `transaction_links` `relation='refund'` when findable |
+| 6 | `DIRECTDEP`, other inbound credits from external parties | Income — **out of scope**, no spend entry; left untouched until the income ledger exists |
+| 7 | `TRNTYPE=CASH` (cash withdrawal) | **Out of scope for now** — cash leaves the tracked boundary but what happens to it afterwards is invisible; revisit if it becomes material (1/939 observed transactions) |
+| 8 | CC statement `Payment received` | Internal transfer (the credit side of a CC repayment from a current account) — no entry |
+| 9 | CC statement `Purchase` | **Spend** |
+| 10 | CC statement `Other` (e.g. Barclaycard Cashback) | Income — out of scope, review |
+
+Note on rows 1–3: `NAME` is hard-capped at 32 characters (see the OFX
+KB article), and the sort-code/account-number prefix eats into that
+budget, so the free-text reference portion can be truncated (e.g.
+"LAWNMOWER REPAIRS" arrives as "LAWNMOWER REPAI"). Reference-text
+matching — both the transfer-pairing tie-break below and spend
+enrichment — must tolerate truncation (prefix match) rather than
+require exact equality.
 
 Confidence: deterministic patterns (own-account match, card-payment
 suffix, direct debits) get high confidence; person payments and
@@ -344,7 +362,7 @@ nothing here should be built in a way that blocks it:
    needed (e.g. after rule changes without a new import).
 5. ~~Precise CC data~~ — **in hand**: the rounded CSV is not good
    enough; the user will try Barclaycard's PDF statement export
-   instead (task added to the Credit Card Statement Import delta).
+   instead (task added to the Credit Card Transaction Import delta).
 6. **Category taxonomy** — still tracked separately in the Spending
    Categorisation delta (Rebel Finance ~10 categories, user's
    spreadsheet to cross-check). The ledger design is taxonomy-agnostic:

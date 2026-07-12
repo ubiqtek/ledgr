@@ -5,20 +5,25 @@ use rusqlite::{params, OptionalExtension};
 impl Db {
     pub fn insert_account(&self, new: &NewAccount) -> rusqlite::Result<Id> {
         self.conn().execute(
-            "INSERT INTO accounts (name, institution, account_type, currency)
-             VALUES (?1, ?2, ?3, ?4)",
+            "INSERT INTO accounts (name, institution, account_type, currency, sort_code, account_number)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
             params![
                 new.name,
                 new.institution,
                 new.account_type.as_str(),
-                new.currency
+                new.currency,
+                new.sort_code,
+                new.account_number,
             ],
         )?;
         Ok(self.conn().last_insert_rowid())
     }
 
     /// Returns the existing account matching `institution`/`name`, or
-    /// creates one from `new` if none exists yet.
+    /// creates one from `new` if none exists yet. Backfills `sort_code`/
+    /// `account_number` on the existing row if `new` carries them and the
+    /// existing row doesn't yet (e.g. an account created before those
+    /// columns existed).
     pub fn find_or_create_account(&self, new: &NewAccount) -> rusqlite::Result<Id> {
         let existing = self
             .conn()
@@ -29,7 +34,15 @@ impl Db {
             )
             .optional()?;
         match existing {
-            Some(id) => Ok(id),
+            Some(id) => {
+                self.conn().execute(
+                    "UPDATE accounts SET sort_code = COALESCE(sort_code, ?1),
+                                          account_number = COALESCE(account_number, ?2)
+                     WHERE id = ?3",
+                    params![new.sort_code, new.account_number, id],
+                )?;
+                Ok(id)
+            }
             None => self.insert_account(new),
         }
     }
@@ -37,7 +50,7 @@ impl Db {
     pub fn get_account(&self, id: Id) -> rusqlite::Result<Option<Account>> {
         self.conn()
             .query_row(
-                "SELECT id, name, institution, account_type, currency
+                "SELECT id, name, institution, account_type, currency, sort_code, account_number
                  FROM accounts WHERE id = ?1",
                 params![id],
                 Self::row_to_account,
@@ -47,7 +60,7 @@ impl Db {
 
     pub fn list_accounts(&self) -> rusqlite::Result<Vec<Account>> {
         let mut stmt = self.conn().prepare(
-            "SELECT id, name, institution, account_type, currency
+            "SELECT id, name, institution, account_type, currency, sort_code, account_number
              FROM accounts ORDER BY name",
         )?;
         let rows = stmt.query_map([], Self::row_to_account)?;
@@ -62,6 +75,8 @@ impl Db {
             institution: row.get(2)?,
             account_type: AccountType::parse(&account_type_str).unwrap_or(AccountType::Other),
             currency: row.get(4)?,
+            sort_code: row.get(5)?,
+            account_number: row.get(6)?,
         })
     }
 }
@@ -79,6 +94,8 @@ mod tests {
                 institution: Some("Some Bank".into()),
                 account_type: AccountType::Current,
                 currency: "GBP".into(),
+                sort_code: None,
+                account_number: None,
             })
             .expect("insert account");
 
@@ -98,6 +115,8 @@ mod tests {
             institution: Some("Barclays".into()),
             account_type: AccountType::Current,
             currency: "GBP".into(),
+            sort_code: None,
+            account_number: None,
         };
 
         let first = db.find_or_create_account(&new).expect("first call");

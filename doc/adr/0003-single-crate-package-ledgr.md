@@ -42,7 +42,7 @@ Merge `ledgr-core` and `ledgr-tui` into a single crate, package name
   to reuse the domain logic without the TUI — should mostly be a
   mechanical extraction rather than a redesign.
 - Items that were previously part of a library's public API (e.g.
-  `StatementParser`, `NewAccount`) may trigger `dead_code` warnings until
+  `ImportFileParser`, `NewAccount`) may trigger `dead_code` warnings until
   something outside tests uses them, since they're no longer exported
   from a separate lib crate. This is expected to resolve naturally as
   Delta 1 (bank statement import) starts exercising them.

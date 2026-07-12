@@ -1,4 +1,4 @@
-use super::{ImportError, StatementParser};
+use super::{ImportError, ImportFileParser};
 use crate::model::{AccountType, Id, NewAccount, NewTransaction};
 use std::path::Path;
 
@@ -9,7 +9,7 @@ use std::path::Path;
 /// `doc/adr/0002-use-ofx-for-barclays-statement-import.md`.
 pub struct BarclaysOfxParser;
 
-impl StatementParser for BarclaysOfxParser {
+impl ImportFileParser for BarclaysOfxParser {
     fn name(&self) -> &'static str {
         "Barclays OFX"
     }
@@ -22,8 +22,8 @@ impl StatementParser for BarclaysOfxParser {
     /// `ACCTID` so re-importing the same account resolves to the same row.
     fn account_identity(&self, path: &Path) -> Result<Option<NewAccount>, ImportError> {
         let contents = std::fs::read_to_string(path)?;
-        let doc =
-            ofx_rs::parse(&contents).map_err(|e| ImportError::Parse(format!("invalid OFX: {e}")))?;
+        let doc = ofx_rs::parse(&contents)
+            .map_err(|e| ImportError::Parse(format!("invalid OFX: {e}")))?;
         let banking = doc
             .banking()
             .ok_or_else(|| ImportError::Parse("no banking statement in OFX file".into()))?;
@@ -35,6 +35,7 @@ impl StatementParser for BarclaysOfxParser {
 
         let bank_account = stmt.bank_account();
         let acct_id = bank_account.account_id().as_str();
+        let sort_code = bank_account.bank_id().as_str().to_string();
         let last4 = &acct_id[acct_id.len().saturating_sub(4)..];
         let account_type = match bank_account.account_type() {
             ofx_rs::types::AccountType::Checking => AccountType::Current,
@@ -56,6 +57,8 @@ impl StatementParser for BarclaysOfxParser {
             institution: Some("Barclays".into()),
             account_type,
             currency: stmt.currency_default().as_str().to_string(),
+            sort_code: Some(sort_code),
+            account_number: Some(acct_id.to_string()),
         }))
     }
 
@@ -65,8 +68,8 @@ impl StatementParser for BarclaysOfxParser {
     /// the same file, since `BANKTRANLIST` may only cover a recent window.
     fn balance_snapshot(&self, path: &Path) -> Result<Option<(i64, String)>, ImportError> {
         let contents = std::fs::read_to_string(path)?;
-        let doc =
-            ofx_rs::parse(&contents).map_err(|e| ImportError::Parse(format!("invalid OFX: {e}")))?;
+        let doc = ofx_rs::parse(&contents)
+            .map_err(|e| ImportError::Parse(format!("invalid OFX: {e}")))?;
         let banking = doc
             .banking()
             .ok_or_else(|| ImportError::Parse("no banking statement in OFX file".into()))?;
@@ -80,14 +83,18 @@ impl StatementParser for BarclaysOfxParser {
             return Ok(None);
         };
         let balance_minor = ofx_amount_to_minor(ledger_balance.amount());
-        let as_of = ledger_balance.as_of().as_offset_date_time().date().to_string();
+        let as_of = ledger_balance
+            .as_of()
+            .as_offset_date_time()
+            .date()
+            .to_string();
         Ok(Some((balance_minor, as_of)))
     }
 
     fn parse(&self, path: &Path, account_id: Id) -> Result<Vec<NewTransaction>, ImportError> {
         let contents = std::fs::read_to_string(path)?;
-        let doc =
-            ofx_rs::parse(&contents).map_err(|e| ImportError::Parse(format!("invalid OFX: {e}")))?;
+        let doc = ofx_rs::parse(&contents)
+            .map_err(|e| ImportError::Parse(format!("invalid OFX: {e}")))?;
 
         let banking = doc
             .banking()
@@ -112,13 +119,13 @@ impl StatementParser for BarclaysOfxParser {
 
                 transactions.push(NewTransaction {
                     account_id,
-                    statement_id: None,
+                    import_id: None,
                     posted_at,
                     amount_minor,
                     currency: currency.clone(),
                     description: description.clone(),
                     raw_description: Some(description),
-                    category_id: None,
+                    trn_type: Some(txn.transaction_type().to_string()),
                     external_id: Some(txn.fit_id().as_str().to_string()),
                 });
             }
@@ -208,6 +215,7 @@ mod tests {
         assert_eq!(txs[0].amount_minor, -2599);
         assert_eq!(txs[0].currency, "GBP");
         assert_eq!(txs[0].description, "TESCO STORES");
+        assert_eq!(txs[0].trn_type.as_deref(), Some("DEBIT"));
         assert_eq!(txs[0].external_id.as_deref(), Some("202607010001"));
 
         assert_eq!(txs[1].posted_at, "2026-07-02");
@@ -245,6 +253,8 @@ mod tests {
         assert_eq!(identity.institution.as_deref(), Some("Barclays"));
         assert_eq!(identity.account_type, AccountType::Current);
         assert_eq!(identity.currency, "GBP");
+        assert_eq!(identity.sort_code.as_deref(), Some("203040"));
+        assert_eq!(identity.account_number.as_deref(), Some("12345678"));
     }
 
     #[test]

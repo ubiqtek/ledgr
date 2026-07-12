@@ -3,10 +3,10 @@ use crate::model::Id;
 use rusqlite::{params, OptionalExtension};
 
 impl Db {
-    /// Records that a statement file has been imported. Returns `Ok(None)`
-    /// without inserting if a statement with the same `file_hash` already
+    /// Records that a file has been imported. Returns `Ok(None)`
+    /// without inserting if an import with the same `file_hash` already
     /// exists, so re-running an import over the same file is a no-op.
-    pub fn insert_statement(
+    pub fn insert_import(
         &self,
         account_id: Id,
         source_path: &str,
@@ -14,21 +14,21 @@ impl Db {
         period_start: Option<&str>,
         period_end: Option<&str>,
     ) -> rusqlite::Result<Option<Id>> {
-        if self.find_statement_by_hash(file_hash)?.is_some() {
+        if self.find_import_by_hash(file_hash)?.is_some() {
             return Ok(None);
         }
         self.conn().execute(
-            "INSERT INTO statements (account_id, source_path, file_hash, period_start, period_end)
+            "INSERT INTO imports (account_id, source_path, file_hash, period_start, period_end)
              VALUES (?1, ?2, ?3, ?4, ?5)",
             params![account_id, source_path, file_hash, period_start, period_end],
         )?;
         Ok(Some(self.conn().last_insert_rowid()))
     }
 
-    pub fn find_statement_by_hash(&self, file_hash: &str) -> rusqlite::Result<Option<Id>> {
+    pub fn find_import_by_hash(&self, file_hash: &str) -> rusqlite::Result<Option<Id>> {
         self.conn()
             .query_row(
-                "SELECT id FROM statements WHERE file_hash = ?1",
+                "SELECT id FROM imports WHERE file_hash = ?1",
                 params![file_hash],
                 |row| row.get(0),
             )
@@ -47,22 +47,24 @@ mod tests {
             institution: None,
             account_type: AccountType::Current,
             currency: "GBP".into(),
+            sort_code: None,
+            account_number: None,
         })
         .expect("insert account")
     }
 
     #[test]
-    fn insert_statement_then_find_by_hash() {
+    fn insert_import_then_find_by_hash() {
         let db = Db::open_in_memory().expect("open db");
         let account_id = test_account(&db);
 
         let id = db
-            .insert_statement(account_id, "/tmp/statement.ofx", "hash1", None, None)
-            .expect("insert statement")
+            .insert_import(account_id, "/tmp/import.ofx", "hash1", None, None)
+            .expect("insert import")
             .expect("not a duplicate");
 
-        assert_eq!(db.find_statement_by_hash("hash1").expect("find"), Some(id));
-        assert_eq!(db.find_statement_by_hash("missing").expect("find"), None);
+        assert_eq!(db.find_import_by_hash("hash1").expect("find"), Some(id));
+        assert_eq!(db.find_import_by_hash("missing").expect("find"), None);
     }
 
     #[test]
@@ -70,13 +72,13 @@ mod tests {
         let db = Db::open_in_memory().expect("open db");
         let account_id = test_account(&db);
 
-        db.insert_statement(account_id, "/tmp/statement.ofx", "hash1", None, None)
-            .expect("insert statement")
+        db.insert_import(account_id, "/tmp/import.ofx", "hash1", None, None)
+            .expect("insert import")
             .expect("not a duplicate");
 
         let second = db
-            .insert_statement(account_id, "/tmp/statement.ofx", "hash1", None, None)
-            .expect("insert statement");
+            .insert_import(account_id, "/tmp/import.ofx", "hash1", None, None)
+            .expect("insert import");
         assert_eq!(second, None);
     }
 }

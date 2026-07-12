@@ -45,6 +45,11 @@ pub struct Account {
     pub institution: Option<String>,
     pub account_type: AccountType,
     pub currency: String,
+    /// Sort code + account number, when the import format identifies its
+    /// own account (e.g. OFX `BANKACCTFROM`). Used by spend ledger
+    /// derivation to recognise transfer counterparties.
+    pub sort_code: Option<String>,
+    pub account_number: Option<String>,
 }
 
 /// Fields needed to create a new account; `id` is assigned by the database.
@@ -54,6 +59,8 @@ pub struct NewAccount {
     pub institution: Option<String>,
     pub account_type: AccountType,
     pub currency: String,
+    pub sort_code: Option<String>,
+    pub account_number: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -67,7 +74,7 @@ pub struct Category {
 pub struct Transaction {
     pub id: Id,
     pub account_id: Id,
-    pub statement_id: Option<Id>,
+    pub import_id: Option<Id>,
     /// ISO 8601 date, e.g. `2026-07-11`.
     pub posted_at: String,
     /// Signed amount in minor currency units (e.g. pence), to avoid float drift.
@@ -75,7 +82,10 @@ pub struct Transaction {
     pub currency: String,
     pub description: String,
     pub raw_description: Option<String>,
-    pub category_id: Option<Id>,
+    /// OFX `TRNTYPE` or equivalent, e.g. `"OTHER"`, `"DIRECTDEBIT"`. Never
+    /// reliable alone for identifying a transfer — see the OFX KB article —
+    /// but used by spend ledger derivation alongside `description`.
+    pub trn_type: Option<String>,
     pub external_id: Option<String>,
 }
 
@@ -83,13 +93,13 @@ pub struct Transaction {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NewTransaction {
     pub account_id: Id,
-    pub statement_id: Option<Id>,
+    pub import_id: Option<Id>,
     pub posted_at: String,
     pub amount_minor: i64,
     pub currency: String,
     pub description: String,
     pub raw_description: Option<String>,
-    pub category_id: Option<Id>,
+    pub trn_type: Option<String>,
     pub external_id: Option<String>,
 }
 
@@ -123,4 +133,87 @@ pub struct TransactionLink {
     pub relation: LinkRelation,
     /// Set when the link was inferred rather than user-confirmed.
     pub confidence: Option<f64>,
+}
+
+/// Provenance of a spend entry's classification (counterparty + category).
+/// See doc/implementation-notes/spend-ledger-design.md.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ClassifiedBy {
+    Rule,
+    Matcher,
+    Manual,
+}
+
+impl ClassifiedBy {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            ClassifiedBy::Rule => "rule",
+            ClassifiedBy::Matcher => "matcher",
+            ClassifiedBy::Manual => "manual",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        Some(match s {
+            "rule" => ClassifiedBy::Rule,
+            "matcher" => ClassifiedBy::Matcher,
+            "manual" => ClassifiedBy::Manual,
+            _ => return None,
+        })
+    }
+}
+
+/// One entry in the derived spend ledger — real-world spending to a merchant
+/// or person. Internal transfers between household accounts never produce
+/// one of these; see `TransactionLink` with `LinkRelation::Transfer`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SpendEntry {
+    pub id: Id,
+    pub occurred_on: String,
+    pub amount_minor: i64,
+    pub currency: String,
+    pub counterparty: Option<String>,
+    pub description: String,
+    pub note: Option<String>,
+    pub category_id: Option<Id>,
+    pub classified_by: ClassifiedBy,
+    pub confidence: Option<f64>,
+    pub rule_name: Option<String>,
+    pub classified_at: String,
+}
+
+/// Fields needed to create a new spend entry; `id` is assigned by the database.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NewSpendEntry {
+    pub occurred_on: String,
+    pub amount_minor: i64,
+    pub currency: String,
+    pub counterparty: Option<String>,
+    pub description: String,
+    pub note: Option<String>,
+    pub category_id: Option<Id>,
+    pub classified_by: ClassifiedBy,
+    pub confidence: Option<f64>,
+    pub rule_name: Option<String>,
+}
+
+/// Which raw transaction(s) a spend entry derives from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SpendEntrySourceRole {
+    /// The raw row the entry represents.
+    Source,
+    /// A matched transfer carrying the note (spend enrichment) — not
+    /// produced by the derivation pass yet, see the spend ledger design doc.
+    Annotation,
+}
+
+impl SpendEntrySourceRole {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            SpendEntrySourceRole::Source => "source",
+            SpendEntrySourceRole::Annotation => "annotation",
+        }
+    }
 }

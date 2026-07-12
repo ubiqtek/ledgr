@@ -2,6 +2,7 @@ mod analysis;
 mod app;
 mod config;
 mod db;
+mod derive;
 mod import;
 mod inbox;
 mod model;
@@ -35,9 +36,10 @@ fn data_dir_db_path() -> anyhow::Result<std::path::PathBuf> {
     Ok(dir.join("ledgr.db"))
 }
 
-/// Scans the configured inbox for statement files, imports any not seen
-/// before, and moves each into `processed/` once handled. Run via
-/// `ledgr import`.
+/// Scans the configured inbox for import files, imports any not seen
+/// before, moves each into `processed/` once handled, then runs the spend
+/// ledger derivation pass over any newly-imported (or previously
+/// unclassified) transactions. Run via `ledgr import`.
 fn run_import(db: Db) -> anyhow::Result<()> {
     let config = Config::load_or_init(&Config::default_path()?)?;
     let inbox = Inbox::new(config.inbox_dir.clone());
@@ -51,6 +53,20 @@ fn run_import(db: Db) -> anyhow::Result<()> {
         summary.transactions_deduplicated
     );
     println!("inbox: {}", config.inbox_dir.display());
+
+    let household_accounts: Vec<(String, String)> = config
+        .household_accounts
+        .iter()
+        .map(|a| (a.sort_code.clone(), a.account_number.clone()))
+        .collect();
+    let derivation = derive::derive_spend_entries(&db, &household_accounts)?;
+    println!(
+        "spend ledger: {} entr(y/ies) created, {} internal transfer(s) detected ({} paired), {} out of scope",
+        derivation.spend_entries_created,
+        derivation.transfers_detected,
+        derivation.transfers_paired,
+        derivation.out_of_scope
+    );
     Ok(())
 }
 
@@ -69,7 +85,10 @@ fn run_status(db: Db) -> anyhow::Result<()> {
 
     for status in &statuses {
         let account = &status.account;
-        let institution = account.institution.as_deref().unwrap_or("unknown institution");
+        let institution = account
+            .institution
+            .as_deref()
+            .unwrap_or("unknown institution");
         println!(
             "{} ({institution}) — {}, {}",
             account.name,

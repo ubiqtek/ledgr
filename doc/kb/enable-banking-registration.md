@@ -161,7 +161,7 @@ friction that live, pull-based sync would remove entirely.
   needs to fit ledgr's "nothing leaves the machine, but this one thing
   talks to a hosted aggregator" model. Worth its own ADR if pursued,
   since it's a bigger architectural fork than adding a new
-  `StatementParser`.
+  `ImportFileParser`.
 - Whether Restricted Mode has a cap on number of linked accounts (fine
   for one current account; matters if credit card is added later too).
 - Rate limits / costs for Restricted Mode — Enable Banking is

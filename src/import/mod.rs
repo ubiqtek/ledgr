@@ -1,6 +1,6 @@
-//! Statement import.
+//! Import.
 //!
-//! Every supported bank/pension export format gets its own `StatementParser`
+//! Every supported bank/pension export format gets its own `ImportFileParser`
 //! implementation. Adding a new institution's format means writing one new
 //! parser, not touching the database or TUI layers.
 
@@ -17,16 +17,16 @@ use std::path::Path;
 
 #[derive(Debug, thiserror::Error)]
 pub enum ImportError {
-    #[error("could not read statement file: {0}")]
+    #[error("could not read import file: {0}")]
     Io(#[from] std::io::Error),
-    #[error("could not parse statement: {0}")]
+    #[error("could not parse import: {0}")]
     Parse(String),
 }
 
-/// Parses a single downloaded statement file into transactions ready to
+/// Parses a single downloaded import file into transactions ready to
 /// insert for a given account. Implementations should not touch the
 /// database themselves — that keeps parsers trivially unit-testable.
-pub trait StatementParser {
+pub trait ImportFileParser {
     /// Human-readable name, e.g. `"Generic CSV"`.
     fn name(&self) -> &'static str;
 
@@ -40,7 +40,7 @@ pub trait StatementParser {
 
     /// If the file carries a bank-reported balance anchor (e.g. OFX
     /// `LEDGERBAL`), returns `(balance_minor, as_of)` — the transaction list
-    /// in a statement often doesn't reach back to account opening, so this
+    /// in an import often doesn't reach back to account opening, so this
     /// is needed to know the real balance rather than just summing
     /// transactions. `None` means the format carries no such anchor.
     fn balance_snapshot(&self, _path: &Path) -> Result<Option<(i64, String)>, ImportError> {

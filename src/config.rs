@@ -23,12 +23,14 @@ pub struct Config {
     #[serde(default)]
     pub account_names: BTreeMap<String, String>,
 
-    /// Known-but-not-imported household members' accounts (e.g. a partner's),
-    /// so spend ledger derivation recognises transfers to them as internal
-    /// rather than spend. Imported accounts are household members
-    /// automatically and don't need listing here — see the "Account
-    /// registry" section of doc/implementation-notes/spend-ledger-design.md.
-    /// Hand-edit the config file to add one; no CLI command yet.
+    /// Reference household accounts (e.g. a partner's) — known by sort
+    /// code/account number only, never imported, never given a balance or
+    /// transaction history — so spend ledger derivation recognises
+    /// transfers to them as internal rather than spend. Imported accounts
+    /// are household members automatically and don't need listing here.
+    /// See ADR 0008 and the "Account registry" section of
+    /// doc/implementation-notes/spend-ledger-design.md. Hand-edit the
+    /// config file to add one; no CLI command yet.
     #[serde(default)]
     pub household_accounts: Vec<HouseholdAccountRef>,
 }

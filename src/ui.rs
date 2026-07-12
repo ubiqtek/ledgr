@@ -62,8 +62,14 @@ fn draw_accounts(frame: &mut Frame, app: &mut App, area: Rect) {
                     None => ts.to_string(),
                 })
                 .unwrap_or_else(|| "never".to_string());
+            let last4 = account
+                .account_number
+                .as_deref()
+                .map(|n| n[n.len().saturating_sub(4)..].to_string())
+                .unwrap_or_else(|| "----".to_string());
             Row::new(vec![
                 Cell::from(account.name.clone()),
+                Cell::from(last4),
                 Cell::from(account.account_type.as_str()),
                 Cell::from(account.institution.clone().unwrap_or_default()),
                 Cell::from(Line::from(balance).alignment(Alignment::Right)),
@@ -76,6 +82,7 @@ fn draw_accounts(frame: &mut Frame, app: &mut App, area: Rect) {
         rows,
         [
             Constraint::Length(30),
+            Constraint::Length(6),
             Constraint::Length(11),
             Constraint::Length(14),
             Constraint::Length(15),

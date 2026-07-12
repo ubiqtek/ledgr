@@ -216,7 +216,7 @@ fn classify(
 ) -> Classification {
     // Rules 1-2: NAME starts "<sort code> <account no>".
     if let Some((sort, account, _rest)) = parse_account_prefix(description) {
-        return if household.contains(&(sort.to_string(), account.to_string())) {
+        return if household_contains(household, sort, account) {
             Classification::InternalTransfer {
                 counterpart_sort: sort.to_string(),
                 counterpart_account: account.to_string(),
@@ -230,6 +230,20 @@ fn classify(
         } else {
             Classification::OutOfScope
         };
+    }
+
+    // Rule 1b: NAME ends "<label> <sort code> <account no>" instead — the
+    // same account reference, but with a human label first (e.g. "ADVENTURE
+    // FUND 208794 33893693"). Only treated as internal transfer if the
+    // trailing pair actually resolves to a household account; otherwise
+    // falls through to the rules below rather than guessing.
+    if let Some((sort, account)) = parse_trailing_account_suffix(description) {
+        if household_contains(household, sort, account) {
+            return Classification::InternalTransfer {
+                counterpart_sort: sort.to_string(),
+                counterpart_account: account.to_string(),
+            };
+        }
     }
 
     // Rules 3-5: NAME suffix (card payment/refund, or person "FT" payment).
@@ -317,6 +331,37 @@ fn parse_account_prefix(description: &str) -> Option<(&str, &str, &str)> {
     } else {
         None
     }
+}
+
+/// Recognises Barclays' other `NAME` shape for a transfer: a human label
+/// followed by `<sort code> <account no>` at the *end* of the description
+/// (e.g. `"ADVENTURE FUND 208794 33893693"`), rather than at the start. The
+/// account number is sometimes truncated to 6 digits when the label pushes
+/// the whole `NAME` field past Barclays' length limit (e.g.
+/// `"SHARED BILLS ACCO 208794 231650"` — real account is `...23165086`, cut
+/// to `231650`) — `household_contains` handles matching a truncated account
+/// number against the full one on file. Returns `(sort_code, account_no)`,
+/// which may itself be truncated.
+fn parse_trailing_account_suffix(description: &str) -> Option<(&str, &str)> {
+    let tokens: Vec<&str> = description.split_whitespace().collect();
+    let account = *tokens.last()?;
+    let sort = *tokens.get(tokens.len().checked_sub(2)?)?;
+    let is_digits = |s: &str| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit());
+    if sort.len() == 6 && is_digits(sort) && (6..=8).contains(&account.len()) && is_digits(account)
+    {
+        Some((sort, account))
+    } else {
+        None
+    }
+}
+
+/// Household membership check tolerant of a `NAME`-truncated account number
+/// (see `parse_trailing_account_suffix`): matches if `account` is either the
+/// full account number on file or a prefix of it.
+fn household_contains(household: &HashSet<(String, String)>, sort: &str, account: &str) -> bool {
+    household
+        .iter()
+        .any(|(hs, ha)| hs == sort && (ha == account || ha.starts_with(account)))
 }
 
 /// Last whitespace-separated token, e.g. `"CPM"` in `"TESCO ON 09 JUL CPM"`.

@@ -35,7 +35,20 @@ impl ImportFileParser for BarclaysOfxParser {
 
         let bank_account = stmt.bank_account();
         let acct_id = bank_account.account_id().as_str();
-        let sort_code = bank_account.bank_id().as_str().to_string();
+        // OFX's own BANKID is a fixed Barclays server identifier (always
+        // "492900" in real exports, regardless of account), not the
+        // customer-facing sort code. The real sort code + account number are
+        // encoded together in ACCTID instead: 6-digit sort code followed by
+        // an 8-digit account number, e.g. "20879413941892" ->
+        // "208794" + "13941892" — confirmed by matching real transaction
+        // NAME fields (e.g. "202597 43442608 ...") against real account
+        // ACCTIDs. Falls back to no sort code for the (so-far unseen)
+        // case of a differently-shaped ACCTID rather than guessing.
+        let (sort_code, account_number) = if acct_id.len() == 14 {
+            (Some(acct_id[..6].to_string()), acct_id[6..].to_string())
+        } else {
+            (None, acct_id.to_string())
+        };
         let last4 = &acct_id[acct_id.len().saturating_sub(4)..];
         let account_type = match bank_account.account_type() {
             ofx_rs::types::AccountType::Checking => AccountType::Current,
@@ -57,8 +70,8 @@ impl ImportFileParser for BarclaysOfxParser {
             institution: Some("Barclays".into()),
             account_type,
             currency: stmt.currency_default().as_str().to_string(),
-            sort_code: Some(sort_code),
-            account_number: Some(acct_id.to_string()),
+            sort_code,
+            account_number: Some(account_number),
         }))
     }
 
@@ -170,8 +183,8 @@ mod tests {
 <STMTRS>
 <CURDEF>GBP</CURDEF>
 <BANKACCTFROM>
-<BANKID>203040</BANKID>
-<ACCTID>12345678</ACCTID>
+<BANKID>492900</BANKID>
+<ACCTID>20304012345678</ACCTID>
 <ACCTTYPE>CHECKING</ACCTTYPE>
 </BANKACCTFROM>
 <BANKTRANLIST>
@@ -254,6 +267,22 @@ mod tests {
         assert_eq!(identity.account_type, AccountType::Current);
         assert_eq!(identity.currency, "GBP");
         assert_eq!(identity.sort_code.as_deref(), Some("203040"));
+        assert_eq!(identity.account_number.as_deref(), Some("12345678"));
+    }
+
+    #[test]
+    fn account_identity_falls_back_to_no_sort_code_for_unexpected_acctid_shape() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("statement.ofx");
+        let ofx = SAMPLE_OFX.replace("<ACCTID>20304012345678</ACCTID>", "<ACCTID>12345678</ACCTID>");
+        std::fs::write(&path, ofx).expect("write file");
+
+        let identity = BarclaysOfxParser
+            .account_identity(&path)
+            .expect("account_identity")
+            .expect("Barclays OFX always identifies its account");
+
+        assert_eq!(identity.sort_code, None);
         assert_eq!(identity.account_number.as_deref(), Some("12345678"));
     }
 

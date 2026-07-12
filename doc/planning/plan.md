@@ -2,9 +2,124 @@
 
 ## What's Next
 
-**Next:** Delta: The Gap, Task 1 — minimal income ledger (`income_entries` + `income_entry_sources`), now that Task 3's assets/liabilities recording model is decided (ADR 0007). Task 4 (implementing that model) can run alongside or after Task 1/2.
+**Next:** Delta: The Gap, Task 2 — continue prototyping the monthly "total spend" shape (ad-hoc SQL against `spend_entries`, now fully trustworthy after all known transfer-detection gaps are resolved, reference household accounts are registered, and the real local database has been cleaned and re-derived) towards deciding what a "closing the books" monthly record should look like, before committing to a `ledgr` command/schema. Task 1 (minimal income ledger) is the next big piece after that; Task 4 (assets/liabilities as accounts, ADR 0007) can run alongside or after.
 **Sub-doc:** (none)
-**Blockers:** None currently blocking. One follow-up note (not a hard blocker): existing accounts' `sort_code`/`account_number` won't backfill until a genuinely new file is imported per account, so transfer detection has no real household data yet.
+**Blockers:** None currently.
+
+**2026-07-12 — `ledgr status` reformatted as tables; Shared Shopping
+Account corrected from reference to tracked:** `run_status`
+(`src/main.rs`) now prints both the real-accounts section (renamed
+**"Tracked Accounts"**, new domain term added to
+`doc/domain/ubiquitous-language.md`) and Household Reference Accounts
+as aligned tables via a new `print_table` helper, dropped the
+Institution/Type/sort-code columns (not needed), shortened account
+numbers to last-4-digits `(nnnn)` style, right-aligned the `Txns`
+column, and balance now shows just the amount (dropped the "(as of
+...)" annotation). While reviewing the reference table, the user
+flagged that **Shared Shopping Account** was miscategorised as a
+reference household account — it's one of the user's own accounts
+(same sort code, `208794`, as his other Barclays accounts) that simply
+hadn't had a statement imported yet, unlike Romina's accounts which
+genuinely never will be. Imported a real OFX export for it
+(`ACCTID` confirmed sort `208794`/account `...3394`, matching the
+config entry exactly): 24 transactions, £266.33 balance, 0 new spend
+entries (its activity was already correctly excluded as internal
+transfers via the reference-account config, so becoming a tracked
+account didn't change spend totals). Renamed it via `ledgr
+name-account 3394 "Shared Shopping Account"` and removed its now-
+redundant entry from `config.toml`'s `household_accounts` (household
+membership is now structural, via its own `accounts` row, same as any
+other tracked account). A stray zero-transaction "Barclays Current
+Account" row (id 5) was created as a side effect of `ledgr import`
+choking on the pending Barclaycard CSV's thousands-separator amounts
+(same known issue as before, see Task 2 below) before reaching the
+OFX file — cleaned up by hand (`DELETE FROM accounts WHERE id = 5`,
+confirmed 0 transactions attached first); worked around for this
+import by temporarily moving the CSV out of the inbox and back.
+Real `ledgr.db` backed up first
+(`ledgr.db.bak-20260712-preimport`). `doc/domain/ubiquitous-language.md`
+updated: **Reference Household Account**'s definition tightened to
+make explicit it's for accounts that will *never* be imported, not
+just "not yet imported" ones.
+**Follow-up resolved (same day):** the user found the correct export
+for Joint Annual Expense — this one's `ACCTID` (sort `208794`/account
+`03868915`) matched the registered number exactly, confirming the
+first download had genuinely been the wrong account, not a bad
+registration. Imported via the same CSV-out/CSV-back workaround (no
+stray account row this time, since the CSV was already out of the
+inbox before running `ledgr import`): 37 transactions, £4.66 balance,
+0 new spend entries. Renamed via `ledgr name-account 8915 "Joint
+Annual Expense"`, removed its now-redundant `household_accounts` entry
+from `config.toml`. `~/Downloads/annual-expenses-2026-07-12-WRONG-
+ACCOUNT.ofx` queued for manual deletion (`rm` blocked in this
+environment, command copied to clipboard). `ledgr.db` backed up first
+(`ledgr.db.bak-20260712-preimport2`). **Household Reference Accounts
+now correctly contains only Romina's two accounts** — the only ones
+that genuinely will never be imported; all four originally-registered
+entries have now been reviewed, two were miscategorised and are fixed.
+`spend_entries` still 690 throughout; 52 tests pass.
+
+**2026-07-12 — transfer-detection docs reframed around payment type
+(no logic change):** `doc/developer-docs/transfer-detection.md`
+referred to the two `NAME` encodings as "Shape 1"/"Shape 2" (later
+briefly "leading shape"/"trailing shape"). Corrected framing per the
+user: the document should lead with the real-world payment **types** —
+**manual funds transfer** (leading position in `NAME`) and
+**automated transfer** (direct debit or standing order; trailing
+position) — not the structural shape, since "shape" is just the
+technical detection mechanism, not the concept that matters. Either
+type can be internal (household account) or external (spend); the
+matching logic (sort code/account number against known household
+accounts, else spend if money is going out) was confirmed correct
+as-is, no code change — only doc framing changed. "Leading"/"trailing"
+retained only in the structural detail (the `NAME` position check
+itself, `Rule ordering`, `Known limitations`), not as the primary
+framing. Also trimmed narrative flourishes throughout per the user's
+request. No change to `doc/user-guide/transfer-detection.md` (already
+used plain "start"/"end" language) or
+`doc/domain/ubiquitous-language.md` (no new domain term introduced).
+
+**2026-07-12 — partner's account registered as a reference household
+account:** added Romina (wife)'s current account (sort `206325`, account
+`40531189`) to `~/.config/ledgr/config.toml`'s `household_accounts` as
+`"Romina (wife) Current account"`. Re-derived the 6 real transactions
+already referencing her account number (backed up DB first,
+`ledgr.db.bak-20260712*`) — all 6 correctly reclassified from spend to
+internal transfer, `spend_entries` dropped 705 → 699, no duplicate
+`transaction_links` from the reprocessing. Noticed in passing: a
+*different* account (sort `206325`, account truncated to `23308324`) also
+shows up in some standing-order descriptions (£14.99/month, landing in the
+Bills Account) — not one the user has given account details for yet, left
+unclassified/out-of-scope, not acted on; possibly another account of hers.
+Named and settled the concept as **Reference Household Account** — ADR
+`doc/adr/0008-reference-household-accounts.md`, recorded in
+`doc/domain/ubiquitous-language.md`. `ledgr status` now lists configured
+reference household accounts in their own section, explicitly labelled as
+carrying no balance/transaction data, so their absence from the main
+account list isn't mistaken for a bug.
+**Minor inefficiency noted, not urgent:** `pending_derivation_transactions()`
+(`src/db/spend.rs`) only excludes transactions that produced a
+`spend_entries` row — `InternalTransfer`/`OutOfScope` classifications never
+get a `spend_entry_sources` row, so every `ledgr import` run reprocesses
+every transfer and out-of-scope transaction from scratch, not just newly
+imported ones. Harmless today (idempotent — `transaction_links` has a
+`UNIQUE` constraint, confirmed no duplicates after two reprocessing runs
+this session) but will get slower as transaction volume grows; worth a
+"mark as considered" mechanism for non-spend classifications if it becomes
+noticeable.
+
+**Follow-up (same session):** the £14.99/month `23308324` account
+flagged above was confirmed by the user as also Romina's — added as a
+second reference household account. Relabelled both for clarity: sort
+`40531189` → **"Romina Primary Account"** (was "Romina (wife) Current
+account"), sort `23308324` → **"Romina Secondary Account"**. Re-derived
+the second account's 6 previously out-of-scope transactions (no
+spend_entries needed clearing — out-of-scope transactions are always
+still "pending", per the reprocessing behaviour noted above) — all 6
+now correctly excluded as internal transfers. `ledgr status`'s
+household-accounts section renamed to **"Household Reference
+Accounts"** and given a proper columnar layout (Label / Sort Code /
+Account Number, column-width computed from the longest label).
 
 ## Summary
 
@@ -16,6 +131,8 @@
 | [Delta: Automatic Inbox Import](#delta-automatic-inbox-import) | [1. Inbox change notification](#task-1-inbox-change-notification) | TODO |
 | [Delta: Credit Card Transaction Import](#delta-credit-card-transaction-import) | [1. Credit card statement parser](#task-1-credit-card-statement-parser) | TODO |
 | | [2. Evaluate Barclaycard PDF export](#task-2-evaluate-barclaycard-pdf-export) | TODO |
+| | [3. Import the user's partner's credit card](#task-3-import-the-users-partners-credit-card) | TODO |
+| | [4. Manual spend entries via a proxy account](#task-4-manual-spend-entries-via-a-proxy-account) | TODO |
 | [Delta: Amazon Order Import](#delta-amazon-order-import) | [1. Evaluate automation route — email scanning vs manual export](#task-1-evaluate-automation-route--email-scanning-vs-manual-export) | TODO |
 | | [2. Amazon order import](#task-2-amazon-order-import) | TODO |
 | [Delta: Spend Ledger](#delta-spend-ledger) | [1. Spend ledger design](#task-1-spend-ledger-design) | ✓ DONE |
@@ -37,6 +154,8 @@
 | [Delta: Double-Entry Accounting](#delta-double-entry-accounting) | [1. Evaluate a double-entry model for ledgr](#task-1-evaluate-a-double-entry-model-for-ledgr) | TODO |
 | [Delta: Statement/Import Naming Cleanup](#delta-statementimport-naming-cleanup) | [1. Agree the replacement term](#task-1-agree-the-replacement-term) | ✓ DONE |
 | | [2. Refactor to the agreed term](#task-2-refactor-to-the-agreed-term) | ✓ DONE |
+| [Delta: Payslip Import](#delta-payslip-import) | [1. Evaluate payslip format and scope](#task-1-evaluate-payslip-format-and-scope) | TODO |
+| [Delta: Regular Payments](#delta-regular-payments) | [1. Design regular payment recognition and labelling](#task-1-design-regular-payment-recognition-and-labelling) | TODO |
 
 Real-world goal driving the first four deltas: analyse monthly spending
 across current account, credit card, and Amazon orders.
@@ -199,6 +318,35 @@ remembering to run the command.
   statement export instead; evaluate whether it carries penny-precise
   amounts and is parseable, then decide the primary CC import format
   (PDF vs rounded CSV).
+
+### Task 3: Import the user's partner's credit card
+- TODO (2026-07-12) — the user will load his partner's credit card
+  statement as a normal Transaction Import (same parser as his own once
+  Task 1/2 land), but not her personal bank accounts — those aren't
+  going to be imported. This account will need registering as a
+  **household account** (like the user's own accounts) so payments
+  *to* her card from her own bank (i.e. her paying off her own card) are
+  recognised as internal, not spend — needs her card account's real
+  identity (masked card number, per Task 1's discovery) captured the
+  same way the user's own accounts are. Her spend on her own accounts
+  (uncaptured) is what Task 4 below covers.
+
+### Task 4: Manual spend entries via a proxy account
+- TODO (2026-07-12) — the user's partner's own spend (on her personal
+  bank accounts, which won't be imported) still needs to count towards
+  household spend/the Gap, entered manually on a rough cadence (e.g.
+  monthly: "spent £200 this month on food"). Design idea agreed with the
+  user: back a manual spend entry with a normal `Transaction` row on a
+  new **proxy account** (an `Account` with no real sort code/account
+  number, so it can never collide with or be mistaken for a real
+  account) rather than changing the spend-entry schema — keeps
+  `classified_by = 'manual'` (already in the schema's `CHECK`
+  constraint, unused so far) working through the existing
+  derivation/provenance model. New domain terms **Proxy Account** and
+  **Manual Spend Entry** recorded as candidates in
+  `doc/domain/ubiquitous-language.md`. Not yet designed: the actual
+  entry flow (CLI command vs TUI form), or whether proxy accounts need
+  their own `AccountType` variant.
 
 ## Delta: Amazon Order Import
 
@@ -366,6 +514,69 @@ scope — just enough to sum income, no categorisation.
   existing `ledgr status` pattern) versus a TUI view — lean CLI first
   since it's the fastest path to a usable number, TUI view can follow
   under TUI Analysis Views.
+- Prototyping session (2026-07-12): before building a "total spend"
+  command, ad-hoc-queried `spend_entries` grouped by month directly
+  against the real database — surfaced and fixed a real transfer-detection
+  bug in the process (see below) rather than building a command on top of
+  wrong numbers. Monthly spend totals (post-fix, real data): Jan £10,426,
+  Feb £9,215, Mar £7,598, Apr £6,117, May £6,562, Jun £6,078, Jul (partial)
+  £1,567. Not yet wired into a CLI command — the user wants to keep
+  ad-hoc-querying/prototyping the shape (including a possible
+  "closing the books" monthly record) before committing to schema/code for
+  this task.
+- **Real bug found and fixed:** the previously-flagged gap ("existing
+  accounts' `sort_code`/`account_number` won't backfill until a genuinely
+  new file is imported") turned out to hide a second, real bug once
+  investigated. `BarclaysOfxParser::account_identity()`
+  (`src/import/barclays_ofx.rs`) was storing OFX `BANKID` as `sort_code` —
+  but `BANKID` is a fixed Barclays OFX-server identifier (`492900` for
+  every account), not the customer-facing sort code. The real sort code +
+  account number are concatenated inside `ACCTID` itself (first 6 digits =
+  sort code, last 8 = account number) — confirmed by matching real
+  transaction `NAME` fields against real account numbers. Fixed the
+  parser to split `ACCTID` correctly. Also found transfers use a second
+  `NAME` shape ledgr's matcher didn't handle: `"<label> <sort> <account>"`
+  (label first) as well as the already-handled `"<sort> <account> <rest>"`
+  (label last) — sometimes with the account number truncated to 6 digits
+  when a long label pushes the `NAME` field past Barclays' length limit.
+  Added `parse_trailing_account_suffix()` + truncation-tolerant
+  `household_contains()` to `src/derive.rs`. Full write-up with real
+  (anonymised) examples: `doc/developer-docs/transfer-detection.md`;
+  user-facing explanation: `doc/user-guide/transfer-detection.md` (part of
+  a new `doc/user-guide/spend-analysis.md`). Real local `ledgr.db`
+  re-backfilled (`accounts.sort_code`/`account_number` corrected for all 4
+  real accounts) and the spend ledger fully re-derived from a clean slate
+  (`spend_entries`/`spend_entry_sources`/`transaction_links` cleared and
+  rebuilt via `ledgr import`) — backed up first
+  (`ledgr.db.bak-20260712124143`). Real impact: 85 previously-misclassified
+  internal transfers (led by a recurring `SHARED BILLS ACCO` transfer of
+  ~£3,415/month that had been inflating "spend" every month) now correctly
+  excluded — monthly spend dropped by roughly £3.4k-£5.5k/month across the
+  board (see corrected totals above). All 52 unit tests pass, including a
+  new one covering the `ACCTID` split's fallback-to-no-sort-code case for
+  an unexpected shape.
+- **Follow-up session (2026-07-12): two more reference household accounts
+  identified and registered.** During the leading/trailing `NAME` shape
+  verification work (matching every distinct sort-code/account-number pair
+  appearing in leading-shape transactions across the entire transaction
+  history against known household accounts), two additional accounts not
+  previously registered were identified: sort `208794`, account `33403394`
+  → **"Shared Shopping Account"** (confirmed by the user as a real shared
+  account, previously showing as an unresolved recurring monthly transfer of
+  £250, incorrectly counted as spend); sort `208794`, account `03868915` →
+  **"Joint Annual Expense"** (confirmed as a joint savings account for
+  shared costs, previously appearing 23 times across the transaction history
+  as an unidentified account, 2 of which had been incorrectly counted as
+  spend). Both added to `~/.config/ledgr/config.toml`'s `household_accounts`
+  list. Real local database backed up
+  (`~/.local/share/ledgr/ledgr.db.bak-20260712125314`), specific
+  misclassified `spend_entries` rows cleared, and `ledgr import` re-run to
+  re-derive them correctly as internal transfers — `spend_entries` count
+  dropped from 699 (after the earlier Romina-accounts fix) to 690 over these
+  two fixes. `ledgr status`'s "Household Reference Accounts" table now lists
+  4 accounts total: Romina Primary Account, Romina Secondary Account, Shared
+  Shopping Account, Joint Annual Expense. All 52 unit tests pass throughout;
+  `cargo build`/`cargo test` clean.
 
 ### Task 3: Discovery about recording assets and liabilities
 - ✓ DONE — decided: do **not** pivot to double-entry now. Extend the
@@ -589,6 +800,57 @@ agreed with the user before renaming anything.
   both `statement_id` columns on first open after upgrade, no-op on a
   fresh or already-migrated database (mirrors the pattern used for the
   `AccountType::Checking` → `Current` rename).
+
+## Delta: Payslip Import
+
+Future delta, raised 2026-07-12: the user wants to import his own full
+payslip, not just the net salary `DIRECTDEP` that shows up on the bank
+side — to see the full breakdown of where money comes from (gross pay,
+tax, NI) and what's being paid into his pension straight from payroll
+(never touches the bank account, so the current account/pension-account
+approach can't see it at all). Feeds both the income ledger (Delta: The
+Gap) and pension tracking (Other Transaction Import's still-TODO
+pension/investment parser) — likely needs coordinating with both rather
+than being fully independent.
+
+### Task 1: Evaluate payslip format and scope
+- TODO — decide the source format (PDF payslip export vs a payroll
+  provider's own download/API, format TBD) and what fields matter
+  (gross pay, tax, NI, pension contribution — employee and employer
+  portions — net pay). Not yet started.
+
+## Delta: Regular Payments
+
+Future delta, raised 2026-07-12: let the user label up individual
+recurring spend entries with a human name (e.g. "Jim's mobile
+network"), so that recognising and auto-categorising them becomes
+possible without waiting on general rule-based categorisation (Delta:
+Spending Categorisation, Task 2) to be fully designed — a regular
+payment is a narrower, higher-confidence case (same merchant, same-ish
+amount, recurring cadence) than general categorisation rules need to
+solve for. Two frequencies matter: **monthly** (most direct debits) and
+**yearly** (e.g. annual subscriptions/insurance) — cadence itself is
+probably useful signal for recognising a regular payment, not just for
+display. Regular payments aren't only direct debits from the bank —
+some come through the credit card (once Credit Card Transaction Import
+lands) as recurring card charges, so this can't be scoped to `TRNTYPE`
+alone; needs to work off the merchant/description pattern across both
+sources. New domain term **Regular Payment** — not yet formally
+recorded in `doc/domain/ubiquitous-language.md`, pending a design
+session (relationship to **Category** and `rule_name` needs deciding:
+is a regular payment its own concept that then implies a category, or
+just a categorisation rule with a friendlier UI?).
+
+### Task 1: Design regular payment recognition and labelling
+- TODO — not yet started. Open questions: how a regular payment is
+  matched (merchant/description pattern, cross-checked against
+  recurrence) vs a general categorisation rule; where the label is
+  stored (own table vs a `spend_entries` field); whether recognising
+  the *cadence* itself (monthly vs yearly) is worth surfacing to the
+  user (e.g. flagging when an expected monthly payment didn't occur);
+  how this interacts with Spending Categorisation's rule-based engine
+  once that exists — likely regular payments feed it rather than
+  duplicate it.
 
 ## Checkpoint: Session 2026-07-11
 
@@ -1185,22 +1447,115 @@ touches schema, code, and a wide set of docs.
 3. Delta: The Gap, Task 4 — implement assets/liabilities as accounts
    per ADR 0007 (new `AccountType` variants, manual balance-snapshot
    entry command).
-4. Delta: Statement/Import Naming Cleanup, Task 1 — agree the
-   replacement term with the user in a dedicated session.
-5. Credit card CSV parser (Credit Card Transaction Import Task 1) — still
+4. Credit card CSV parser (Credit Card Transaction Import Task 1) — still
    the oldest open TODO, also unlocks derivation rules 8-10.
+
+## Checkpoint: Session 2026-07-12b
+
+**What was completed this session:**
+- Delta: Statement/Import Naming Cleanup, both tasks — done in full.
+  Term agreed with the user: **"Import"** (rejected: *export*,
+  *download*, *import file*), despite already naming the `ledgr import`
+  command — one **import** is one file, `ledgr import` processes a
+  batch of them in one run (`ImportSummary`), confirmed coherent.
+- Renamed throughout: `statements` table → `imports`
+  (`src/db/schema.sql`), `statement_id` columns → `import_id`
+  (`transactions`, `balance_snapshots`), `Transaction`/
+  `NewTransaction.statement_id` → `import_id` (`src/model.rs`),
+  `Db::insert_statement`/`find_statement_by_hash` →
+  `insert_import`/`find_import_by_hash` (`src/db/statements.rs` →
+  `src/db/imports.rs`), delta names (Bank/Credit Card/Other "Statement
+  Import" → "Transaction Import" — "Transaction" chosen over plain
+  "Import" for delta names since ledgr may import non-transaction data,
+  e.g. balance-only pension reports).
+- Mid-session follow-up (prompted by the user after the first pass):
+  the parser trait was renamed `StatementParser` → `ImportParser`,
+  then refined a second time to **`ImportFileParser`** — more explicit
+  that it parses a single file, distinct from the batch-level
+  `ImportSummary`/`import_inbox()` run. Applied consistently across
+  `src/import/mod.rs`, `barclays_ofx.rs`, `generic_csv.rs`,
+  `pipeline.rs`, and doc references.
+- Generic English uses of "statement" (OFX statement response, "bank
+  statement", "PDF statement export") were deliberately left alone —
+  only the retired domain term and its code/schema identifiers were
+  renamed. Confirmed no `Statement`/`NewStatement` struct ever existed
+  (it was only a field/table name), correcting an inaccurate note in
+  the delta's original Task 2 description.
+- Real local `ledgr.db` migrated: new idempotent
+  `Db::migrate_statements_to_imports` step in `Db::init`
+  (`src/db/mod.rs`) renames the table and both FK columns on first open
+  after upgrade (`ALTER TABLE ... RENAME TO` / `RENAME COLUMN`,
+  supported by the bundled SQLite via `rusqlite` 0.31), no-op on a
+  fresh or already-migrated database — same pattern as the earlier
+  `AccountType::Checking` → `Current` migration. Verified against a
+  scratch copy before touching the real file (table renamed correctly,
+  `ledgr status` output unchanged, migration idempotent on a second
+  run), then backed up (`~/.local/share/ledgr/ledgr.db.bak-20260712122251`)
+  and applied for real — confirmed via `ledgr status` (4 real accounts,
+  correct balances) and `sqlite3 .tables` (`imports` present,
+  `statements` gone).
+- Updated `doc/domain/ubiquitous-language.md` (Statement → Import entry
+  with full provenance), ADRs 0002/0003/0007, `CLAUDE.md`'s trait
+  snippet, `doc/kb/enable-banking-registration.md`, and
+  `doc/implementation-notes/spend-ledger-design.md` for the renamed
+  code identifiers.
+- 51 unit tests still pass; `cargo clippy` clean (same pre-existing
+  dead-code warnings as before, nothing new).
+- One cleanup item deliberately left for the user: `src/db/statements.rs`
+  is now dead (superseded by `src/db/imports.rs`, not declared as a
+  module anywhere) but `rm` is blocked in this environment — the delete
+  command is queued on the clipboard rather than run automatically.
+
+**State of the project:**
+The "statement" vs "import" naming inconsistency flagged in the
+previous session is fully resolved across code, schema, the real
+database, and docs — no more mismatch between the domain-language doc
+and what the code actually says. Bank Transaction Import, Credit Card
+Transaction Import, and Other Transaction Import are now the delta
+names throughout the plan. Nothing else changed functionally this
+session; all prior functionality (import, dedup, derivation, TUI)
+is unaffected — this was a pure rename.
+
+**Immediate next priorities:**
+1. Delta: The Gap, Task 1 — minimal income ledger (`income_entries` +
+   `income_entry_sources`).
+2. Delta: The Gap, Task 2 — gap calculation (`ledgr gap` CLI).
+3. Delta: The Gap, Task 4 — implement assets/liabilities as accounts
+   per ADR 0007 (new `AccountType` variants, manual balance-snapshot
+   entry command).
+4. Credit card CSV parser (Credit Card Transaction Import Task 1) — still
+   the oldest open TODO, also unlocks derivation rules 8-10.
+5. Run the queued `rm src/db/statements.rs` (clipboard) to remove the
+   now-dead old module file.
 
 ## Implementation Notes
 
 - Single crate `ledgr` (binary also named `ledgr`) — domain model,
-  SQLite schema/migrations, statement import, and analysis sit alongside
-  the TUI as modules under `src/` (`db`, `import`, `model`, `analysis`,
-  `app`, `ui`, `main`). Previously a two-crate workspace; merged per
-  `doc/adr/0003-single-crate-package-ledgr.md` so `cargo install ledgr`
-  works via crates.io without a second published crate.
+  SQLite schema/migrations, transaction import, and analysis sit
+  alongside the TUI as modules under `src/` (`db`, `import`, `model`,
+  `analysis`, `app`, `ui`, `main`). Previously a two-crate workspace;
+  merged per `doc/adr/0003-single-crate-package-ledgr.md` so
+  `cargo install ledgr` works via crates.io without a second published
+  crate.
 - Storage: SQLite via bundled `rusqlite`. Non-tabular relationships
   (transfers, category hierarchies, refund/reversal links) are modelled
   as edge tables in `src/db/schema.sql` rather than a graph database.
-- New statement formats are added by implementing `ImportFileParser`
+- New import formats are added by implementing `ImportFileParser`
   in `src/import` (see `generic_csv.rs` for the existing example).
 - Project is an early scaffold — not yet functional end-to-end.
+
+## Checkpoint: Session 2026-07-12e
+
+**What was completed this session:**
+- Developer documentation written and revised: `doc/developer-docs/ofx-format.md` (new, lightweight sketch of OFX file format — envelope, `BANKTRANLIST`, `STMTTRN` block structure and five fields) and `doc/developer-docs/transfer-detection.md` (new, technical notes on how ledgr detects internal transfers from Barclays OFX `NAME` fields). Transfer-detection doc went through several rounds of revision based on user feedback: real account sort codes and transaction descriptions initially mistakenly used as "anonymised" examples were caught by the user, verified against the real database and config, and replaced with fully fabricated examples matching real data shape/length. All Rust code snippets removed from transfer-detection.md at the user's request (refocused on data/behaviour, not implementation). Barclays' own published abbreviation reference (`FT` = "Funds Transfer") verified and sourced; OFX `NAME` field's 32-character cap confirmed as an OFX standard (`GenericNameType`, `maxLength="32"`) via XSD schema reference. Full `STMTTRN` block examples (all 5 fields) added for leading-shape, trailing-shape, and truncation cases. Refined theory (proposed by user, verified against real data): leading `NAME` shape (`<sort> <account> <reference> FT`) is used for one-off manual Faster Payments, while trailing shape (`<label> <sort> <account>`) is used for recurring standing orders/direct debits — shape doesn't directly determine this, reference/label *length* does (short reference leaves room for an `FT`/`STO` marker; long label consumes the 32-char budget and pushes both account number and marker out). Verified by cross-checking every distinct sort-code/account-number pair in leading-shape transactions against known accounts: zero false positives, all resolved to genuine accounts. Process lesson: when writing "anonymised" examples from real data, cross-check the final doc text against real values before considering done, not just intend to anonymise.
+- User-facing documentation written: `doc/user-guide/spend-analysis.md` and `doc/user-guide/transfer-detection.md` (new, non-technical explanations of spend ledger and transfer detection concepts for a general reader, cross-linked to each other and to the developer-docs technical versions).
+- Two more reference household accounts identified (during the leading-shape verification work above) and registered: sort `208794`, account `33403394` → "Shared Shopping Account" (confirmed real shared account, previously an unresolved recurring £250/month transfer, incorrectly counted as spend); sort `208794`, account `03868915` → "Joint Annual Expense" (confirmed joint savings account, appeared 23 times in transaction history as unidentified, 2 misclassified as spend). Both added to `~/.config/ledgr/config.toml`. Real database re-derived after clearing misclassified rows — `spend_entries` count dropped from 699 to 690 over this session's fixes. `ledgr status`'s "Household Reference Accounts" table now shows 4 accounts total.
+
+**State of the project:**
+Transfer-detection gaps are now fully closed: all four reference household accounts are registered (Romina Primary/Secondary, Shared Shopping, Joint Annual Expense), the real local database is clean and correctly re-derived (690 spend entries, 163 out of scope), and developer/user documentation is complete. The `spend_entries` data is now fully trustworthy for analysis. Delta: The Gap Task 2 (gap calculation / prototyping the monthly total-spend shape) is unblocked and can proceed on real, clean data.
+
+**Immediate next priorities:**
+1. Continue Delta: The Gap, Task 2 — prototype the monthly "total spend" shape via ad-hoc SQL and decide on the "closing the books" monthly record structure before committing to a CLI command/schema.
+2. Delta: The Gap, Task 1 — minimal income ledger (`income_entries` + `income_entry_sources`).
+3. Delta: The Gap, Task 4 — implement assets/liabilities as accounts per ADR 0007 (new `AccountType` variants, manual balance-snapshot entry command).
+4. Credit card CSV parser (Credit Card Transaction Import Task 1) — still the oldest open TODO, also unlocks derivation rules 8-10.

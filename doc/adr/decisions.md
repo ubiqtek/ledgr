@@ -7,3 +7,4 @@
 - [5. Independent spend and income ledgers, derived from raw transactions](0005-independent-spend-and-income-ledgers.md)
 - [6. No account-type gate on spend derivation — scan every account uniformly](0006-no-account-type-gate-on-spend-derivation.md)
 - [7. Model assets and liabilities as accounts with (manual or imported) balance snapshots](0007-assets-and-liabilities-as-accounts-with-balance-snapshots.md)
+- [8. Reference household accounts — config-only, never imported, no balance data](0008-reference-household-accounts.md)

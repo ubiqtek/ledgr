@@ -120,6 +120,14 @@ against the real exports:
 | `<MERCHANT> \tON <dd MMM> BCC` | Card credit (e.g. online refund) | `AMZNMktplace \tON 16 MAR BCC` |
 | `<MERCHANT> <COUNTRY>\tAMOUNT IN <CCY>\t<amount>` | Foreign-currency card payment, original amount embedded | `PIZZA RESTAURANT NORWAY\tAMOUNT IN NOK` |
 
+The trailing abbreviations above match Barclays' own published statement
+abbreviations reference: `FT` = Funds Transfer, `CPM` = contactless
+payment, `CRE` = credit payment, `BCC` = Connect card payment, `STO` =
+standing order. `FT` in particular is Barclays' umbrella term covering
+both own-account transfers and person-to-person Faster Payments — the
+same marker for both, which is why `NAME` content (not `TRNTYPE`, which
+is `OTHER` for both) is what has to distinguish them.
+
 Critical observation for transfer pairing: **both sides of an
 own-account transfer carry the same reference**, each naming the *other*
 account. E.g. (fictional accounts) account A shows

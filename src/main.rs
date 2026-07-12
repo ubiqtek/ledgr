@@ -75,47 +75,149 @@ fn run_import(db: Db) -> anyhow::Result<()> {
 /// `ledgr status`.
 fn run_status(db: Db) -> anyhow::Result<()> {
     let mut statuses = db.account_statuses()?;
-    if statuses.is_empty() {
+    let config = Config::load_or_init(&Config::default_path()?)?;
+
+    if statuses.is_empty() && config.household_accounts.is_empty() {
         println!("no accounts yet — run `ledgr import` first");
         return Ok(());
     }
 
-    let config = Config::load_or_init(&Config::default_path()?)?;
     config.apply_account_name_overrides(statuses.iter_mut().map(|s| &mut s.account));
 
-    for status in &statuses {
-        let account = &status.account;
-        let institution = account
-            .institution
-            .as_deref()
-            .unwrap_or("unknown institution");
-        println!(
-            "{} ({institution}) — {}, {}",
-            account.name,
-            account.account_type.as_str(),
-            account.currency
-        );
-        match (status.balance_minor, &status.balance_as_of) {
-            (Some(balance), Some(as_of)) => println!(
-                "  balance:       {} (as of {as_of})",
-                format_amount_minor(balance, &account.currency)
-            ),
-            _ => println!("  balance:       unknown (no balance data imported yet)"),
-        }
-        println!("  transactions:  {}", status.transaction_count);
-        match (&status.earliest_transaction, &status.latest_transaction) {
-            (Some(earliest), Some(latest)) => {
-                println!("  date range:    {earliest} to {latest}")
-            }
-            _ => println!("  date range:    (no transactions)"),
-        }
-        println!(
-            "  last imported: {}",
-            status.last_imported_at.as_deref().unwrap_or("never")
+    if !statuses.is_empty() {
+        println!("Tracked Accounts:");
+        println!();
+
+        let mut rows: Vec<Vec<String>> = statuses
+            .iter()
+            .map(|status| {
+                let account = &status.account;
+                let balance = match status.balance_minor {
+                    Some(balance) => format_amount_minor(balance, &account.currency),
+                    None => "unknown".to_string(),
+                };
+                let date_range = match (&status.earliest_transaction, &status.latest_transaction) {
+                    (Some(earliest), Some(latest)) => format!("{earliest} to {latest}"),
+                    _ => "(no transactions)".to_string(),
+                };
+                vec![
+                    account.name.clone(),
+                    last4(&account.account_number),
+                    balance,
+                    status.transaction_count.to_string(),
+                    date_range,
+                    status.last_imported_at.clone().unwrap_or_else(|| "never".to_string()),
+                ]
+            })
+            .collect();
+        align_decimal_column(&mut rows, 2);
+
+        print_table(
+            &["Name", "Account", "Balance", "Txns", "Date Range", "Last Imported"],
+            &rows,
+            &[3],
         );
         println!();
     }
+
+    if !config.household_accounts.is_empty() {
+        println!("Household Reference Accounts (no balance/transaction data — for transfer detection only):");
+        println!();
+
+        let rows: Vec<Vec<String>> = config
+            .household_accounts
+            .iter()
+            .map(|account| {
+                vec![
+                    account.label.clone().unwrap_or_else(|| "(no label)".to_string()),
+                    last4_str(&account.account_number),
+                ]
+            })
+            .collect();
+
+        print_table(&["Label", "Account"], &rows, &[]);
+        println!();
+    }
+
     Ok(())
+}
+
+/// Last 4 digits of an optional sort code/account number, `"(1289)"`, or
+/// `"-"` when absent — full digits aren't needed to eyeball which account is
+/// which, and shortening avoids the columns dominating the table's width.
+fn last4(value: &Option<String>) -> String {
+    value.as_deref().map(last4_str).unwrap_or_else(|| "-".to_string())
+}
+
+fn last4_str(value: &str) -> String {
+    if value.len() > 4 {
+        format!("({})", &value[value.len() - 4..])
+    } else {
+        value.to_string()
+    }
+}
+
+/// Left-pads every cell in a column with spaces so their `.` characters line
+/// up (e.g. `"7.47 GBP"` and `"3106.58 GBP"` both end up with their decimal
+/// point in the same screen column). Cells with no `.` (e.g. "unknown") are
+/// left as-is.
+fn align_decimal_column(rows: &mut [Vec<String>], col: usize) {
+    let max_int_len = rows
+        .iter()
+        .filter_map(|row| row[col].find('.'))
+        .max()
+        .unwrap_or(0);
+    for row in rows.iter_mut() {
+        if let Some(dot) = row[col].find('.') {
+            let pad = max_int_len - dot;
+            if pad > 0 {
+                row[col] = format!("{}{}", " ".repeat(pad), row[col]);
+            }
+        }
+    }
+}
+
+/// Prints a left-aligned table: a header row, then one row per data row,
+/// with each column padded to the widest cell (header or data) in that
+/// column. The last column is left unpadded to avoid trailing whitespace.
+/// Columns whose index appears in `right_aligned` are right-aligned instead
+/// of left-aligned (e.g. a numeric count column).
+fn print_table(headers: &[&str], rows: &[Vec<String>], right_aligned: &[usize]) {
+    let widths: Vec<usize> = headers
+        .iter()
+        .enumerate()
+        .map(|(i, header)| {
+            rows.iter()
+                .map(|row| row[i].len())
+                .chain(std::iter::once(header.len()))
+                .max()
+                .unwrap_or(header.len())
+        })
+        .collect();
+
+    let format_row = |cells: &[String]| -> String {
+        cells
+            .iter()
+            .zip(&widths)
+            .enumerate()
+            .map(|(i, (cell, width))| {
+                if i == cells.len() - 1 {
+                    cell.clone()
+                } else if right_aligned.contains(&i) {
+                    format!("{cell:>width$}")
+                } else {
+                    format!("{cell:<width$}")
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("  ")
+    };
+
+    let header_cells: Vec<String> = headers.iter().map(|h| h.to_string()).collect();
+    println!("  {}", format_row(&header_cells));
+    for row in rows {
+        println!("  {}", format_row(row));
+    }
 }
 
 /// Sets the display name shown for the account whose bank-generated name

@@ -58,6 +58,7 @@ mod tests {
                 raw_description: None,
                 trn_type: Some("OTHER".into()),
                 external_id: None,
+                notes: None,
             })
             .expect("insert transaction");
         }

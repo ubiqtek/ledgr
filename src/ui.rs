@@ -66,6 +66,7 @@ fn draw_accounts(frame: &mut Frame, app: &mut App, area: Rect) {
                 .account_number
                 .as_deref()
                 .map(|n| n[n.len().saturating_sub(4)..].to_string())
+                .or_else(|| status.card_last4.clone())
                 .unwrap_or_else(|| "----".to_string());
             Row::new(vec![
                 Cell::from(account.name.clone()),

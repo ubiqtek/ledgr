@@ -11,8 +11,8 @@ impl Db {
         let rows = self.conn().execute(
             "INSERT OR IGNORE INTO transactions
                 (account_id, import_id, posted_at, amount_minor, currency,
-                 description, raw_description, trn_type, external_id)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                 description, raw_description, trn_type, external_id, notes)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
             params![
                 new.account_id,
                 new.import_id,
@@ -23,6 +23,7 @@ impl Db {
                 new.raw_description,
                 new.trn_type,
                 new.external_id,
+                new.notes,
             ],
         )?;
         Ok((rows > 0).then(|| self.conn().last_insert_rowid()))
@@ -34,7 +35,7 @@ impl Db {
     ) -> rusqlite::Result<Vec<Transaction>> {
         let mut stmt = self.conn().prepare(
             "SELECT id, account_id, import_id, posted_at, amount_minor, currency,
-                    description, raw_description, trn_type, external_id
+                    description, raw_description, trn_type, external_id, notes
              FROM transactions
              WHERE account_id = ?1
              ORDER BY posted_at DESC, id DESC",
@@ -55,6 +56,7 @@ impl Db {
             raw_description: row.get(7)?,
             trn_type: row.get(8)?,
             external_id: row.get(9)?,
+            notes: row.get(10)?,
         })
     }
 }
@@ -88,6 +90,7 @@ mod tests {
             raw_description: Some("TESCO STORES 1234".into()),
             trn_type: None,
             external_id: None,
+            notes: None,
         })
         .expect("insert transaction");
 
@@ -122,6 +125,7 @@ mod tests {
             raw_description: Some("TESCO STORES 1234".into()),
             trn_type: None,
             external_id: Some("FIT123".into()),
+            notes: None,
         };
         let first = db.insert_transaction(&txn).expect("insert transaction");
         assert!(first.is_some());

@@ -140,6 +140,7 @@ impl ImportFileParser for BarclaysOfxParser {
                     raw_description: Some(description),
                     trn_type: Some(txn.transaction_type().to_string()),
                     external_id: Some(txn.fit_id().as_str().to_string()),
+                    notes: None,
                 });
             }
         }
@@ -274,7 +275,10 @@ mod tests {
     fn account_identity_falls_back_to_no_sort_code_for_unexpected_acctid_shape() {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("statement.ofx");
-        let ofx = SAMPLE_OFX.replace("<ACCTID>20304012345678</ACCTID>", "<ACCTID>12345678</ACCTID>");
+        let ofx = SAMPLE_OFX.replace(
+            "<ACCTID>20304012345678</ACCTID>",
+            "<ACCTID>12345678</ACCTID>",
+        );
         std::fs::write(&path, ofx).expect("write file");
 
         let identity = BarclaysOfxParser

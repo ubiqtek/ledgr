@@ -4,15 +4,17 @@
 //! implementation. Adding a new institution's format means writing one new
 //! parser, not touching the database or TUI layers.
 
+mod barclaycard_pdf;
 mod barclays_ofx;
 mod generic_csv;
 mod pipeline;
 
+pub use barclaycard_pdf::BarclaycardPdfParser;
 pub use barclays_ofx::BarclaysOfxParser;
 pub use generic_csv::GenericCsvParser;
 pub use pipeline::import_inbox;
 
-use crate::model::{Id, NewAccount, NewTransaction};
+use crate::model::{CardIdentity, Id, NewAccount, NewTransaction};
 use std::path::Path;
 
 #[derive(Debug, thiserror::Error)]
@@ -35,6 +37,17 @@ pub trait ImportFileParser {
     /// means the format carries no account identity of its own (e.g. a
     /// generic CSV) and the caller must supply one.
     fn account_identity(&self, _path: &Path) -> Result<Option<NewAccount>, ImportError> {
+        Ok(None)
+    }
+
+    /// For formats with no stable account-identity field at all — e.g. a
+    /// credit card statement export, which only ever exposes a maskable
+    /// last-4 card number that changes on reissue (see
+    /// doc/kb/barclaycard/pdf-export-structure.md) — returns the observed
+    /// card identity instead. Mutually exclusive with `account_identity` in
+    /// practice: a format implements one or the other, never both. `None`
+    /// means this format doesn't carry this kind of identity either.
+    fn card_identity(&self, _path: &Path) -> Result<Option<CardIdentity>, ImportError> {
         Ok(None)
     }
 

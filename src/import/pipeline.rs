@@ -1,7 +1,7 @@
 //! Scans the inbox for import files, imports any not seen before, and
 //! moves each into `processed/` once handled.
 
-use super::{BarclaysOfxParser, GenericCsvParser, ImportFileParser};
+use super::{BarclaycardPdfParser, BarclaysOfxParser, GenericCsvParser, ImportFileParser};
 use crate::db::Db;
 use crate::inbox::Inbox;
 use crate::model::{AccountType, NewAccount};
@@ -64,20 +64,26 @@ pub fn import_inbox(db: &Db, inbox: &Inbox) -> anyhow::Result<ImportSummary> {
         };
 
         // Formats that identify their own account (e.g. OFX's BANKACCTFROM)
-        // resolve to that specific account. Formats that don't (e.g. a
-        // generic CSV, which carries no account identity of its own) fall
-        // back to a single default account until multi-institution/format
-        // account matching exists (see doc/planning/plan.md).
-        let account_id = match parser.account_identity(&path)? {
-            Some(identity) => db.find_or_create_account(&identity)?,
-            None => db.find_or_create_account(&NewAccount {
+        // resolve to that specific account. Formats with no stable identity
+        // field at all (e.g. a credit card PDF export, which only exposes a
+        // maskable last-4 card number) instead resolve by card-number
+        // history — see Db::find_or_create_credit_card_account. Formats
+        // with neither (e.g. a generic CSV) fall back to a single default
+        // account until multi-institution/format account matching exists
+        // (see doc/planning/plan.md).
+        let account_id = if let Some(identity) = parser.account_identity(&path)? {
+            db.find_or_create_account(&identity)?
+        } else if let Some(card) = parser.card_identity(&path)? {
+            db.find_or_create_credit_card_account(&card)?
+        } else {
+            db.find_or_create_account(&NewAccount {
                 name: "Barclays Current Account".into(),
                 institution: Some("Barclays".into()),
                 account_type: AccountType::Current,
                 currency: "GBP".into(),
                 sort_code: None,
                 account_number: None,
-            })?,
+            })?
         };
 
         let Some(import_id) =
@@ -151,6 +157,7 @@ fn parser_for(path: &Path) -> Option<Box<dyn ImportFileParser>> {
         Some("csv") => Some(Box::new(GenericCsvParser {
             currency: "GBP".into(),
         })),
+        Some("pdf") => Some(Box::new(BarclaycardPdfParser)),
         _ => None,
     }
 }

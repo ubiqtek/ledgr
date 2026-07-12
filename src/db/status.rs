@@ -7,7 +7,10 @@ use crate::model::{Account, AccountType};
 /// `balance_minor` comes from the most recent balance anchor (e.g. OFX
 /// `LEDGERBAL`), not a sum of imported transactions — an import's
 /// transaction list often doesn't reach back to account opening, so summing
-/// it understates/misstates the real balance. See `Db::balance_as_of`.
+/// it understates/misstates the real balance. See `Db::balance_as_of`. For a
+/// `CreditCard` account it's negated (a card statement reports the amount
+/// owed as a positive figure, but that's a liability, not an asset) so
+/// consumers get assets-positive/liabilities-negative for free, per ADR 0007.
 #[derive(Debug, Clone)]
 pub struct AccountStatus {
     pub account: Account,
@@ -17,6 +20,10 @@ pub struct AccountStatus {
     pub earliest_transaction: Option<String>,
     pub latest_transaction: Option<String>,
     pub last_imported_at: Option<String>,
+    /// Last 4 digits of the account's current card number, for account
+    /// types with no bank sort code/account number (e.g. `CreditCard`,
+    /// whose identity comes from `account_card_numbers` instead).
+    pub card_last4: Option<String>,
 }
 
 impl Db {
@@ -64,8 +71,20 @@ impl Db {
                 last_imported_at,
             ) = row?;
             let (balance_minor, balance_as_of) = match self.latest_balance_snapshot(account.id)? {
-                Some((balance, as_of)) => (Some(balance), Some(as_of)),
+                Some((balance, as_of)) => {
+                    let balance = if account.account_type == AccountType::CreditCard {
+                        -balance
+                    } else {
+                        balance
+                    };
+                    (Some(balance), Some(as_of))
+                }
                 None => (None, None),
+            };
+            let card_last4 = if account.account_number.is_none() {
+                self.card_number_history(account.id)?.into_iter().next()
+            } else {
+                None
             };
             Ok(AccountStatus {
                 account,
@@ -75,6 +94,7 @@ impl Db {
                 earliest_transaction,
                 latest_transaction,
                 last_imported_at,
+                card_last4,
             })
         })
         .collect()
@@ -132,6 +152,7 @@ mod tests {
                 raw_description: None,
                 trn_type: None,
                 external_id: None,
+                notes: None,
             })
             .expect("insert transaction");
         }

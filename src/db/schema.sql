@@ -65,7 +65,11 @@ CREATE TABLE IF NOT EXISTS transactions (
     -- disambiguate direct debits/standing orders/cash/income patterns for
     -- spend ledger derivation.
     trn_type         TEXT,
-    external_id      TEXT
+    external_id      TEXT,
+    -- Catch-all for import-format detail that doesn't fit any field above
+    -- (e.g. a credit card statement's line-item extras). Unpopulated by
+    -- most parsers; nullable so it costs nothing when unused.
+    notes            TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_transactions_account ON transactions(account_id);
@@ -95,6 +99,27 @@ CREATE TABLE IF NOT EXISTS balance_snapshots (
 );
 
 CREATE INDEX IF NOT EXISTS idx_balance_snapshots_account ON balance_snapshots(account_id, as_of);
+
+-- Every last-4-digits card number ever seen for a credit card account,
+-- with when it was first observed. A card's number changes on reissue
+-- (lost/stolen, expiry) with nothing in a statement export tying the old
+-- and new numbers together automatically — see
+-- doc/kb/barclaycard/pdf-export-structure.md — so this is a manually
+-- confirmed history, not an inferred one: a fresh last4 with no existing
+-- match becomes a brand new account until a human links it to an
+-- existing one. Ordering by first_seen DESC gives the "current" number.
+-- A last4 identifies at most one account at a time (UNIQUE on last4 alone,
+-- not per-account) so that Db::link_card_number can reassign a last4 away
+-- from a wrongly-auto-created account onto the correct one when a human
+-- confirms a reissue.
+CREATE TABLE IF NOT EXISTS account_card_numbers (
+    id         INTEGER PRIMARY KEY,
+    account_id INTEGER NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+    last4      TEXT NOT NULL UNIQUE,
+    first_seen TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_account_card_numbers_account ON account_card_numbers(account_id);
 
 -- Generic edge table linking two transactions: transfer pairs between
 -- accounts, refunds against an original charge, suspected duplicates, etc.

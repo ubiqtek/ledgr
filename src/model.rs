@@ -63,6 +63,23 @@ pub struct NewAccount {
     pub account_number: Option<String>,
 }
 
+/// A credit card account's identity as observed in one import — the only
+/// stable-ish thing a statement export carries, which isn't very stable at
+/// all (see doc/kb/barclaycard/pdf-export-structure.md): the last 4 digits
+/// of the card number change on reissue, and nothing in the export ties an
+/// old number to a new one. Used instead of `NewAccount`/`account_identity`
+/// (which assumes a name/number that's stable across re-imports) for
+/// formats where that assumption doesn't hold.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CardIdentity {
+    pub institution: String,
+    /// e.g. "Barclaycard Rewards" — the card product, not unique to one
+    /// customer (shared BIN range), only useful for a display name.
+    pub product_label: String,
+    pub last4: String,
+    pub currency: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Category {
     pub id: Id,
@@ -87,6 +104,8 @@ pub struct Transaction {
     /// but used by spend ledger derivation alongside `description`.
     pub trn_type: Option<String>,
     pub external_id: Option<String>,
+    /// Catch-all for import-format detail that doesn't fit any field above.
+    pub notes: Option<String>,
 }
 
 /// Fields needed to create a new transaction; `id` is assigned by the database.
@@ -101,6 +120,7 @@ pub struct NewTransaction {
     pub raw_description: Option<String>,
     pub trn_type: Option<String>,
     pub external_id: Option<String>,
+    pub notes: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

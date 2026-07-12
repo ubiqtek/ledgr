@@ -100,20 +100,38 @@ fn run_status(db: Db) -> anyhow::Result<()> {
                     (Some(earliest), Some(latest)) => format!("{earliest} to {latest}"),
                     _ => "(no transactions)".to_string(),
                 };
+                let account_column = match &account.account_number {
+                    Some(account_number) => last4_str(account_number),
+                    None => status
+                        .card_last4
+                        .as_deref()
+                        .map(|last4| format!("({last4})"))
+                        .unwrap_or_else(|| "-".to_string()),
+                };
                 vec![
                     account.name.clone(),
-                    last4(&account.account_number),
+                    account_column,
                     balance,
                     status.transaction_count.to_string(),
                     date_range,
-                    status.last_imported_at.clone().unwrap_or_else(|| "never".to_string()),
+                    status
+                        .last_imported_at
+                        .clone()
+                        .unwrap_or_else(|| "never".to_string()),
                 ]
             })
             .collect();
         align_decimal_column(&mut rows, 2);
 
         print_table(
-            &["Name", "Account", "Balance", "Txns", "Date Range", "Last Imported"],
+            &[
+                "Name",
+                "Account",
+                "Balance",
+                "Txns",
+                "Date Range",
+                "Last Imported",
+            ],
             &rows,
             &[3],
         );
@@ -129,7 +147,10 @@ fn run_status(db: Db) -> anyhow::Result<()> {
             .iter()
             .map(|account| {
                 vec![
-                    account.label.clone().unwrap_or_else(|| "(no label)".to_string()),
+                    account
+                        .label
+                        .clone()
+                        .unwrap_or_else(|| "(no label)".to_string()),
                     last4_str(&account.account_number),
                 ]
             })
@@ -146,7 +167,10 @@ fn run_status(db: Db) -> anyhow::Result<()> {
 /// `"-"` when absent — full digits aren't needed to eyeball which account is
 /// which, and shortening avoids the columns dominating the table's width.
 fn last4(value: &Option<String>) -> String {
-    value.as_deref().map(last4_str).unwrap_or_else(|| "-".to_string())
+    value
+        .as_deref()
+        .map(last4_str)
+        .unwrap_or_else(|| "-".to_string())
 }
 
 fn last4_str(value: &str) -> String {

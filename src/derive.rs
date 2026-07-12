@@ -434,12 +434,7 @@ mod tests {
     #[test]
     fn classifies_a_payment_to_an_unknown_account_as_low_confidence_spend() {
         let household = HashSet::new();
-        let result = classify(
-            "609934 11112222 RENT FT",
-            Some("OTHER"),
-            -75000,
-            &household,
-        );
+        let result = classify("609934 11112222 RENT FT", Some("OTHER"), -75000, &household);
         assert_eq!(
             result,
             Classification::Spend {
@@ -490,12 +485,7 @@ mod tests {
     #[test]
     fn classifies_an_outbound_person_payment_as_spend() {
         let household = HashSet::new();
-        let result = classify(
-            "J SMITH WINDOW CLEAN FT",
-            Some("OTHER"),
-            -2500,
-            &household,
-        );
+        let result = classify("J SMITH WINDOW CLEAN FT", Some("OTHER"), -2500, &household);
         assert_eq!(
             result,
             Classification::Spend {
@@ -509,12 +499,7 @@ mod tests {
     #[test]
     fn classifies_an_inbound_person_payment_as_a_reimbursement() {
         let household = HashSet::new();
-        let result = classify(
-            "J SMITH CONCERT TICKET FT",
-            Some("OTHER"),
-            3000,
-            &household,
-        );
+        let result = classify("J SMITH CONCERT TICKET FT", Some("OTHER"), 3000, &household);
         assert_eq!(
             result,
             Classification::Spend {
@@ -576,6 +561,7 @@ mod tests {
             raw_description: None,
             trn_type: Some("OTHER".into()),
             external_id: None,
+            notes: None,
         })
         .expect("insert transaction");
 
@@ -614,6 +600,7 @@ mod tests {
             raw_description: None,
             trn_type: Some("OTHER".into()),
             external_id: None,
+            notes: None,
         })
         .expect("insert transaction");
 
@@ -659,6 +646,7 @@ mod tests {
             raw_description: None,
             trn_type: Some("OTHER".into()),
             external_id: None,
+            notes: None,
         })
         .expect("insert bills-side transaction");
         db.insert_transaction(&NewTransaction {
@@ -671,6 +659,7 @@ mod tests {
             raw_description: None,
             trn_type: Some("OTHER".into()),
             external_id: None,
+            notes: None,
         })
         .expect("insert spending-side transaction");
 
@@ -712,6 +701,7 @@ mod tests {
             raw_description: None,
             trn_type: Some("OTHER".into()),
             external_id: None,
+            notes: None,
         })
         .expect("insert transaction");
 

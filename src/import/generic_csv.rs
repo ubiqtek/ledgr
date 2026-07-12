@@ -47,6 +47,7 @@ impl ImportFileParser for GenericCsvParser {
                 raw_description: Some(description),
                 trn_type: None,
                 external_id: None,
+                notes: None,
             });
         }
         Ok(transactions)

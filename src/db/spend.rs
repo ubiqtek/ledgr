@@ -21,7 +21,8 @@ impl Db {
     pub fn pending_derivation_transactions(&self) -> rusqlite::Result<Vec<Transaction>> {
         let mut stmt = self.conn().prepare(
             "SELECT t.id, t.account_id, t.import_id, t.posted_at, t.amount_minor,
-                    t.currency, t.description, t.raw_description, t.trn_type, t.external_id
+                    t.currency, t.description, t.raw_description, t.trn_type, t.external_id,
+                    t.notes
              FROM transactions t
              LEFT JOIN spend_entry_sources s
                     ON s.transaction_id = t.id AND s.role = 'source'

@@ -121,6 +121,7 @@ mod tests {
             raw_description: None,
             trn_type: None,
             external_id: None,
+            notes: None,
         })
         .expect("insert transaction");
     }

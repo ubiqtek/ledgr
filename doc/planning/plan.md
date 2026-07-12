@@ -2,7 +2,7 @@
 
 ## What's Next
 
-**Next:** Delta: The Gap, Task 2 — continue prototyping the monthly "total spend" shape (ad-hoc SQL against `spend_entries`, now fully trustworthy after all known transfer-detection gaps are resolved, reference household accounts are registered, and the real local database has been cleaned and re-derived) towards deciding what a "closing the books" monthly record should look like, before committing to a `ledgr` command/schema. Task 1 (minimal income ledger) is the next big piece after that; Task 4 (assets/liabilities as accounts, ADR 0007) can run alongside or after.
+**Next:** Delta: Credit Card Transaction Import, Task 5 — match credit card payments to bank-side transfers (date+amount matching and/or card-number-prefix detection) so bill payments stop leaking into spend. Delta: The Gap, Task 2 (monthly "total spend" shape) remains the task after that.
 **Sub-doc:** (none)
 **Blockers:** None currently.
 
@@ -58,6 +58,12 @@ now correctly contains only Romina's two accounts** — the only ones
 that genuinely will never be imported; all four originally-registered
 entries have now been reviewed, two were miscategorised and are fixed.
 `spend_entries` still 690 throughout; 52 tests pass.
+**Follow-up (same day):** decimal points in the Tracked Accounts
+`Balance` column now line up — added `align_decimal_column` (`src/
+main.rs`), which left-pads each balance string with spaces so every
+`.` lands in the same screen column (e.g. `7.47 GBP` and `3106.58
+GBP` align on their decimals), applied before handing rows to
+`print_table`. 52 tests pass.
 
 **2026-07-12 — transfer-detection docs reframed around payment type
 (no logic change):** `doc/developer-docs/transfer-detection.md`
@@ -129,10 +135,11 @@ Account Number, column-width computed from the longest label).
 | | [2. Import de-duplication](#task-2-import-de-duplication) | IN PROGRESS |
 | | [3. Account resolution and balance tracking](#task-3-account-resolution-and-balance-tracking) | ✓ DONE |
 | [Delta: Automatic Inbox Import](#delta-automatic-inbox-import) | [1. Inbox change notification](#task-1-inbox-change-notification) | TODO |
-| [Delta: Credit Card Transaction Import](#delta-credit-card-transaction-import) | [1. Credit card statement parser](#task-1-credit-card-statement-parser) | TODO |
-| | [2. Evaluate Barclaycard PDF export](#task-2-evaluate-barclaycard-pdf-export) | TODO |
+| [Delta: Credit Card Transaction Import](#delta-credit-card-transaction-import) | [1. Credit card statement parser](#task-1-credit-card-statement-parser) | IN PROGRESS |
+| | [2. Evaluate Barclaycard PDF export](#task-2-evaluate-barclaycard-pdf-export) | ✓ DONE |
 | | [3. Import the user's partner's credit card](#task-3-import-the-users-partners-credit-card) | TODO |
 | | [4. Manual spend entries via a proxy account](#task-4-manual-spend-entries-via-a-proxy-account) | TODO |
+| | [5. Match credit card payments to bank-side transfers](#task-5-match-credit-card-payments-to-bank-side-transfers) | TODO |
 | [Delta: Amazon Order Import](#delta-amazon-order-import) | [1. Evaluate automation route — email scanning vs manual export](#task-1-evaluate-automation-route--email-scanning-vs-manual-export) | TODO |
 | | [2. Amazon order import](#task-2-amazon-order-import) | TODO |
 | [Delta: Spend Ledger](#delta-spend-ledger) | [1. Spend ledger design](#task-1-spend-ledger-design) | ✓ DONE |
@@ -142,6 +149,7 @@ Account Number, column-width computed from the longest label).
 | | [2. Gap calculation](#task-2-gap-calculation) | TODO |
 | | [3. Discovery about recording assets and liabilities](#task-3-discovery-about-recording-assets-and-liabilities) | ✓ DONE |
 | | [4. Implement assets and liabilities as accounts](#task-4-implement-assets-and-liabilities-as-accounts) | TODO |
+| [Delta: Mortgage Tracking](#delta-mortgage-tracking) | [1. Design the mortgage domain model](#task-1-design-the-mortgage-domain-model) | TODO |
 | [Delta: Spending Categorisation](#delta-spending-categorisation) | [1. Confirm Rebel Finance taxonomy](#task-1-confirm-rebel-finance-taxonomy) | IN PROGRESS |
 | | [2. Rule-based categorisation engine](#task-2-rule-based-categorisation-engine) | TODO |
 | | [3. Inference-assisted categorisation](#task-3-inference-assisted-categorisation) | TODO |
@@ -301,8 +309,55 @@ remembering to run the command.
 ## Delta: Credit Card Transaction Import
 
 ### Task 1: Credit card statement parser
-- TODO — parser for the user's credit card statement export, needed
-  alongside the current account to see full monthly spending.
+- ✓ DONE (2026-07-12 session) — built and validated `BarclaycardPdfParser`
+  (`src/import/barclaycard_pdf.rs`), parsing the Barclaycard PDF
+  "Transactions" export (chosen over the CSV — see Task 2 below) via
+  `pdf_extract::extract_text` + regex over the normalized text.
+  Order-tolerant transaction regex handles both `<date> <type>` and the
+  reversed `<type> <date>` that `pdf-extract` occasionally produces (a
+  real quirk, not hypothetical — confirmed against the real export).
+  Also strips "Page N of M" footers that can land mid-transaction across
+  a page break. Validated end-to-end against a real 205-transaction
+  Barclaycard export in a scratch-only inbox (never touched the real
+  `ledgr.db`, real PDF never committed): all 205 transactions imported
+  with correct signs (`Purchase` = money out; `Payment received`/`Other`
+  = money in), correct account identity, and a balance snapshot matching
+  the export's stated current balance exactly (£613.73).
+- ✓ DONE — imported for real: real `ledgr.db` now has **Barclaycard**
+  as a tracked account (205 transactions, £613.73 balance, matching the
+  scratch validation exactly). `ledgr status` confirms it alongside the
+  other 6 tracked accounts.
+- New schema: `account_card_numbers` table (`src/db/schema.sql`) records
+  every last-4-digits card number ever seen per account, since a
+  statement export carries no stable account identity — only a masked
+  last4 that changes on reissue (see
+  `doc/kb/barclaycard/pdf-export-structure.md`). `last4` is globally
+  unique (not per-account), so `Db::link_card_number`
+  (`src/db/cards.rs`) can reassign a last4 away from a wrongly
+  auto-created duplicate account onto the correct one once a human
+  confirms a reissue — nothing is ever inferred automatically.
+  `Db::find_or_create_credit_card_account` resolves a `CardIdentity`
+  (new `src/model.rs` struct) to an account via this history instead of
+  `find_or_create_account`'s institution+name matching (which would
+  spawn a new account on every reissue). `AccountType::CreditCard`
+  already existed in the schema/model, unused until now — no new account
+  type needed.
+- New generic `notes` column added to `transactions`
+  (`src/db/schema.sql`, `src/model.rs`) as a catch-all for import-format
+  detail that doesn't fit existing fields. Not yet populated by any
+  parser (including this one) — `description`/`raw_description`/
+  `trn_type` turned out sufficient for the PDF's fields after all.
+- Known gaps, left as-is for now: (1) no per-transaction de-duplication
+  across an overlapping re-export — same open problem as
+  `GenericCsvParser`, only whole-file hash dedup applies; (2) the sign
+  assumed for the `Other` type tag (always money in) is based on a small
+  sample (only ever seen as Barclaycard Cashback); (3) one real
+  transaction's description was found truncated (`"British"` instead of
+  "British Triathlon, Loughborough") due to a page break splitting the
+  description *after* the amount marker rather than before it — a
+  different case from the page-footer-stripping already handled; amount
+  and sign were still correct, only the description text was
+  incomplete.
 - Format discovered 2026-07-11: Barclaycard exports CSV only
   (`Date, Account/Card No, Amount, Subcategory, Memo`; DD/MM/YYYY
   dates, UTF-8 BOM, thousands separators, embedded tabs/newlines in
@@ -313,11 +368,13 @@ remembering to run the command.
   design doc.
 
 ### Task 2: Evaluate Barclaycard PDF export
-- TODO — the CSV export rounds every amount to whole pounds, which is
-  not good enough for the spend ledger. The user will download a PDF
-  statement export instead; evaluate whether it carries penny-precise
-  amounts and is parseable, then decide the primary CC import format
-  (PDF vs rounded CSV).
+- ✓ DONE (2026-07-12 session) — the PDF export is penny-precise
+  (unlike the CSV, which rounds to whole pounds) and reliably
+  text-extractable via `pdf_extract`. Decided: **PDF is the primary
+  credit card import format**, CSV deprioritised/dropped. Full
+  structure write-up, including card-number (PAN) structure/reissue
+  research prompted by the user sharing a real card number mid-session,
+  in `doc/kb/barclaycard/pdf-export-structure.md`.
 
 ### Task 3: Import the user's partner's credit card
 - TODO (2026-07-12) — the user will load his partner's credit card
@@ -348,6 +405,27 @@ remembering to run the command.
   entry flow (CLI command vs TUI form), or whether proxy accounts need
   their own `AccountType` variant.
 
+### Task 5: Match credit card payments to bank-side transfers
+- TODO — with the credit card account now real and importable (Task 1),
+  credit card payments still need excluding from spend the same way
+  inter-bank transfers are (see `derive.rs`'s existing transfer
+  pairing). Two ideas discussed, not yet built:
+  1. **Date + exact amount matching** between a bank-side outgoing
+     payment and the card's `"PAYMENT, THANK YOU"` row — verified
+     working against real June 2026 data (two payments matched to the
+     penny and the day). Doesn't depend on the card number at all, so
+     immune to reissue.
+  2. **Card-number-prefix detection** — bank-side transfer descriptions
+     to a credit card carry a truncated form of the card's PAN (e.g.
+     `MR JAMES BARRITT 49291328548900`, missing the last 2 digits — see
+     `doc/kb/barclaycard/pdf-export-structure.md`). The user proposed a
+     function to detect "looks like the first N digits of a card
+     number" in a transaction description, and — since there is
+     currently only one registered Barclaycard — assuming any such match
+     refers to it without needing an exact/current number. Not yet
+     designed in detail (how the "only one card" assumption degrades
+     once Task 3 adds the partner's card too).
+
 ## Delta: Amazon Order Import
 
 Amazon order data is a form of spend enrichment (see "Spend Enrichment"
@@ -368,6 +446,18 @@ this a core enrichment worth automating, not a one-off manual chore.
      Simpler, requires the user to periodically request/download it.
 - TODO — decide which to build first (or both, e.g. manual export as a
   fallback for orders predating email-scanning setup).
+- **Gmail access explored 2026-07-12 (doc-only, nothing built):** this
+  Claude Code environment has no Gmail/mail integration configured today —
+  no MCP server, no IMAP. Two setup paths discussed for the email-scanning
+  route: (a) a Gmail MCP server (OAuth-based, needs a Google Cloud project +
+  Gmail API enabled + OAuth credentials), or (b) direct IMAP (app password or
+  OAuth2 IMAP), which would mean writing a small ledgr-side mail-fetching
+  module since no existing tool/skill covers it. **Recommendation, not yet
+  actioned:** avoid granting broad whole-inbox read access for this — set up
+  a Gmail filter that forwards/labels Amazon order-confirmation emails only,
+  so any future scanning integration touches a narrow, purpose-specific
+  slice of mail rather than the full inbox. Narrows the privacy/scope
+  question flagged above considerably before it needs answering in full.
 
 ### Task 2: Amazon order import
 - TODO — parse the chosen format so Amazon purchases show up as proper
@@ -589,15 +679,48 @@ scope — just enough to sum income, no categorisation.
   concrete build.
 
 ### Task 4: Implement assets and liabilities as accounts
-- TODO — per ADR 0007: add new `AccountType` variants for the house,
-  mortgage, and pension (exact categorisation/naming TBD at
-  implementation time); add a manual balance-snapshot entry path (new
-  CLI command + `Db` method) for accounts with no automated feed (the
-  house always; the pension whenever a report isn't being parsed);
-  mortgage/pension statement imports, if/when a format exists, reuse
-  `ImportFileParser::balance_snapshot()` like any other institution —
-  no new mechanism. Net worth: latest balance per account, summed with
-  assets positive / liabilities negative by account type.
+- TODO — per ADR 0007: add new `AccountType` variants for the house and
+  pension (exact categorisation/naming TBD at implementation time); add
+  a manual balance-snapshot entry path (new CLI command + `Db` method)
+  for accounts with no automated feed (the house always; the pension
+  whenever a report isn't being parsed); a pension statement import, if/
+  when a format exists, reuses `ImportFileParser::balance_snapshot()`
+  like any other institution — no new mechanism. Net worth: latest
+  balance per account, summed with assets positive / liabilities
+  negative by account type. **Mortgage deliberately excluded from this
+  Task** — split out into its own Delta (see Delta: Mortgage Tracking
+  below) once the user recognised it as a small domain of its own
+  (interest rates, split/tranched parts of the mortgage, terms changing
+  over time), not just another balance-snapshot account like the house
+  or pension.
+
+## Delta: Mortgage Tracking
+
+Split out from Delta: The Gap, Task 4 (2026-07-12) once the user
+recognised a mortgage isn't just another asset/liability balance
+snapshot: it has its own small domain — one or more parts/tranches, each
+with its own interest rate (fixed or tracker), a rate period with an end
+date, and a repayment schedule — that changes discontinuously over time
+(a fix ending, a product switch, overpayments). A single `balance_minor`
+snapshot per account (as planned for the house/pension in Delta: The
+Gap, Task 4) can't represent any of that. Scope, schema, and whether
+this needs its own tables (e.g. a `mortgage_parts` or `mortgage_terms`
+edge concept) not yet designed.
+
+### Task 1: Design the mortgage domain model
+- TODO — work out what a mortgage actually needs to record: how many
+  parts/tranches it can have, what changes about each part over time
+  (rate, rate type, rate-end date, term end, balance), and how that
+  differs from a simple balance-snapshot account. Check
+  `doc/domain/ubiquitous-language.md` and agree any new domain terms
+  (e.g. "mortgage part"/"tranche"/"rate period") with the user before
+  introducing them, per this project's ubiquitous-language rule. Decide
+  whether this fits the existing `accounts` + `balance_snapshots`
+  machinery (ADR 0007) with extension, or needs a genuinely new
+  mechanism — an ADR either way, given the architectural weight.
+- TODO — once designed, decide the data-entry route: the user's mortgage
+  provider may or may not offer a statement/export to parse; likely
+  manual entry (similar to the house) is the starting point regardless.
 
 ## Delta: Spending Categorisation
 
@@ -851,315 +974,6 @@ just a categorisation rule with a friendlier UI?).
   how this interacts with Spending Categorisation's rule-based engine
   once that exists — likely regular payments feed it rather than
   duplicate it.
-
-## Checkpoint: Session 2026-07-11
-
-**What was completed this session:**
-- Built a config + inbox mechanism (new, not previously in the plan):
-  `src/config.rs` (`Config.inbox_dir`, TOML at
-  `~/Library/Application Support/dev.ledgr.ledgr/config.toml`,
-  auto-created on first run) and `src/inbox.rs` (`Inbox` ensures
-  `<inbox_dir>/processed/` exists, lists pending files, moves processed
-  files).
-- Implemented `BarclaysOfxParser` (`src/import/barclays_ofx.rs`) using
-  `ofx-rs`, mapping `FITID` → `external_id`, converting amounts via
-  `rust_decimal`.
-- Implemented `src/import/pipeline.rs::import_inbox()` tying
-  config/inbox/parser/db together: SHA-256 whole-file de-dup against
-  `statements.file_hash`, parser selection by extension, account
-  resolution via new `Db::find_or_create_account`, moves processed files.
-- Wired up as a headless `ledgr import` CLI command in `main.rs` (no
-  `clap`, manual `env::args()` check).
-- Added `Db::insert_import` / `Db::find_import_by_hash`
-  (`src/db/imports.rs`) and `Db::find_or_create_account`
-  (`src/db/accounts.rs`).
-- Ran a full round-trip smoke test with an isolated `HOME`: synthetic
-  OFX file → imported → moved to `processed/` → re-import correctly
-  skipped as a duplicate. All 18 unit tests pass.
-- Kicked off background research (separate from the ledgr codebase) into
-  "open banking as an API/MCP bridge" as a possible startup idea —
-  report written to a scratchpad file, not part of this repo.
-
-**State of the project:**
-Barclays OFX import is code-complete and unit-tested but not yet
-validated against a real Barclays file — that's the immediate blocker,
-waiting on the user's download. The inbox/config/pipeline
-infrastructure is generic enough to support the next statement formats
-(credit card, pension) once their parsers exist. The TUI still only has
-the original Accounts → Transactions scaffold; import is CLI-only for
-now, not wired into the TUI.
-
-**Immediate next priorities:**
-1. Validate `BarclaysOfxParser` against a real Barclays OFX export once
-   downloaded; fix any real-world parsing gaps.
-2. Once validated, run a real `ledgr import` against the user's actual
-   inbox/Google Drive folder and confirm transactions look correct.
-3. Decide whether/how to surface import status in the TUI itself
-   (currently CLI-only).
-4. Move on to Credit Card Transaction Import once Bank Transaction Import is
-   fully validated.
-
-## Checkpoint: Session 2026-07-11b
-
-**What was completed this session:**
-- Reviewed a Gemini-generated doc about using Enable Banking for live
-  Open Banking API access to Barclays, found it contained inaccuracies
-  (misleading "bypass KYB" framing, wrong fixed 90-day consent claim).
-- Verified against Enable Banking's real documentation (Quick Start,
-  Control Panel, API reference, FAQ) and rewrote
-  `doc/kb/enable-banking-registration.md` with corrected, sourced
-  information: the real "Restricted Mode (Account Linking)" tier
-  (personal accounts, no KYB required), correct JWT structure (exp up
-  to 24h not 1h), the real AIS flow (`/aspsps` → `/auth` → `/sessions`
-  → `/accounts/{id}/transactions`), and correct consent lifetime
-  (per-ASPSP `valid_until`, typically up to 180 days).
-- Added a new "Live Open Banking (Enable Banking)" Delta to the plan to
-  track this as an explicit, lower-priority exploratory thread
-  alongside the main OFX import work.
-
-**State of the project:**
-No code changes this session — this was documentation/research only.
-Bank Transaction Import (Barclays OFX) remains the active priority,
-still blocked on the user downloading a real OFX export. The Enable
-Banking exploration is parked as a documented option for live account
-access, not yet decided whether to pursue.
-
-**Immediate next priorities:**
-1. Validate `BarclaysOfxParser` against a real Barclays OFX export once
-   downloaded; fix any real-world parsing gaps.
-2. Once validated, run a real `ledgr import` against the user's actual
-   inbox/Google Drive folder and confirm transactions look correct.
-3. Decide whether/how to surface import status in the TUI itself
-   (currently CLI-only).
-4. Move on to Credit Card Transaction Import once Bank Transaction Import is
-   fully validated.
-5. Separately, if pursuing live Open Banking: confirm Barclays'
-   `maximum_consent_validity`, decide on local key/session storage, and
-   write an ADR before writing any code against Enable Banking.
-
-## Checkpoint: Session 2026-07-11c
-
-**What was completed this session:**
-- Moved `ledgr`'s config file to an XDG-style path,
-  `~/.config/ledgr/config.toml` (was
-  `~/Library/Application Support/dev.ledgr.ledgr/config.toml`), so it
-  can be symlinked into a dotfiles repo. Recorded as
-  `doc/adr/0004-xdg-config-location.md`. `src/config.rs` now uses
-  `directories::BaseDirs::home_dir()` instead of `ProjectDirs`. The
-  SQLite data dir (`ledgr.db`) is unaffected — only the config path
-  moved.
-- Set the real `inbox_dir` in `~/.config/ledgr/config.toml` to the
-  user's Google Drive folder
-  (`.../GoogleDrive-jim.barritt@gmail.com/My Drive/_ledgr_inbox`).
-- Ran `ledgr import` against 3 real Barclays OFX exports the user
-  dropped into that folder. Result: 939 transactions imported across
-  2026-01-02 to 2026-07-10, 0 files skipped, every transaction has a
-  non-null `external_id` (FITID). Spot-checked descriptions and
-  pence-denominated amounts look correct. `BarclaysOfxParser` is now
-  validated against real data — Task 1 of Bank Transaction Import marked
-  done.
-- Also this session (documentation-only, before the above): reviewed
-  and corrected `doc/kb/enable-banking-registration.md` (a
-  Gemini-generated doc on using Enable Banking for live Open Banking
-  API access) against Enable Banking's real docs, added a Security
-  implications section and a note on the painful manual Barclays OFX
-  download UX, and added a new "Live Open Banking (Enable Banking)"
-  Delta to the plan to track it as a lower-priority exploratory thread.
-
-**State of the project:**
-Bank Transaction Import is now functionally proven end-to-end against
-real data: config → inbox → parser → de-duped import → SQLite, using
-the user's actual Barclays exports. 939 real transactions are now in
-the local database. Only per-transaction/generic-CSV de-dup refinement
-remains before this delta is fully done. The TUI still hasn't caught up
-— it only shows the original Accounts → Transactions scaffold and
-doesn't yet browse the newly-imported real data.
-
-**Immediate next priorities:**
-1. Implement per-transaction de-dup on Barclays `FITID` (via
-   `external_id`) so re-importing a re-saved/renamed file with
-   overlapping dates doesn't duplicate transactions.
-2. Decide + implement a de-dup strategy for `GenericCsvParser`-imported
-   institutions, which have no stable per-transaction ID.
-3. Build out the TUI transaction list view so the 939 imported
-   transactions are actually browsable, not just sitting in SQLite.
-4. Move on to Credit Card Transaction Import once Bank Transaction Import
-   (Task 2) is fully done.
-
-## Checkpoint: Session 2026-07-11d
-
-**What was completed this session:**
-- Added `ledgr status` CLI command (`src/main.rs`) — this surfaced two
-  real bugs in the "validated" Barclays OFX import from the previous
-  checkpoint.
-- Bug 1: all 3 real OFX files had been collapsing into one hardcoded
-  "Barclays Current Account" instead of 3 separate real accounts.
-  Fixed by adding `ImportFileParser::account_identity()`
-  (`src/import/mod.rs`), implemented in `BarclaysOfxParser`
-  (`src/import/barclays_ofx.rs`) by reading OFX `BANKACCTFROM`/`ACCTID`.
-  `pipeline.rs` now resolves the account per file instead of always
-  using the hardcoded one. `CLAUDE.md`'s documented trait snippet
-  updated to match. Real DB reset and re-imported: 3 correctly
-  separated accounts (562/162/215 transactions).
-- Bug 2: displayed balance was `SUM(transactions)`, which didn't match
-  reality for 2 of 3 accounts because a statement's transaction window
-  doesn't necessarily reach back to account opening (confirmed via
-  manual cross-check that the parsing itself was correct — only the
-  window was incomplete). Fixed by adding a `balance_snapshots` table
-  (`schema.sql`) and `src/db/balances.rs`
-  (`insert_balance_snapshot`/`latest_balance_snapshot`/`balance_as_of`)
-  to treat bank-reported balances (OFX `LEDGERBAL`) as anchors,
-  reconstructing balance at any date from the nearest anchor plus
-  transactions — built generally to support future balance-history/
-  trend views. New `ImportFileParser::balance_snapshot()`;
-  `BarclaysOfxParser` reads OFX `LEDGERBAL`. Real balances now match
-  each file's `LEDGERBAL` exactly.
-- Small fix: `Inbox::pending_files()` (`src/inbox.rs`) now ignores
-  dotfiles (e.g. `.DS_Store`, which Google Drive/Finder leaves in
-  synced folders) instead of counting/reporting them as skipped.
-- Consolidated config+data location into one broadened ADR,
-  `doc/adr/0004-xdg-conventions-for-local-files.md` (renamed from the
-  narrower `0004-xdg-config-location.md`). Database now also at
-  `~/.local/share/ledgr/ledgr.db` (was
-  `~/Library/Application Support/dev.ledgr.ledgr/ledgr.db`),
-  `data_dir_db_path()` in `src/main.rs` updated. Both config and DB
-  migrated by hand for the real local install.
-- Added a "Destructive commands" section to the user's global
-  `CLAUDE.md` (outside this repo): since `rm` is blocked in this
-  environment, copy `rm` commands to the clipboard via `pbcopy` instead
-  of working around the block.
-- Test count grew from 18 to 32, all passing.
-
-**State of the project:**
-Bank Transaction Import is now genuinely correct against real data, not
-just "imports without crashing" — account separation and balances both
-verified against the source OFX files' own reported values (`ACCTID`,
-`LEDGERBAL`). The balance-anchor infrastructure (`balance_as_of`) is
-generic enough to directly support the still-TODO net worth/trend view
-work later. Only per-transaction/generic-CSV de-dup refinement remains
-before Bank Transaction Import is fully done. The TUI still hasn't caught
-up — no browsing of the real transaction/balance data yet.
-
-**Immediate next priorities:**
-1. Implement per-transaction de-dup on Barclays `FITID` (via
-   `external_id`) so re-importing a re-saved/renamed file with
-   overlapping dates doesn't duplicate transactions.
-2. Decide + implement a de-dup strategy for `GenericCsvParser`-imported
-   institutions, which have no stable per-transaction ID.
-3. Build out the TUI transaction list view so the real imported data is
-   browsable, not just sitting in SQLite.
-4. Consider wiring `ledgr status`/balance data into a TUI view — the
-   `balance_as_of` groundwork is already there.
-5. Move on to Credit Card Transaction Import once Bank Transaction Import
-   (Task 2) is fully done.
-
-## Checkpoint: Session 2026-07-11e
-
-**What was completed this session:**
-- Added a `ledgr name-account <last-4-digits> "<name>"` CLI command and a
-  new `account_names` map in `Config` (`src/config.rs`) so the user can
-  give accounts their own display names instead of Barclays' own naming,
-  without risking `find_or_create_account`'s dedup matching (used the
-  real accounts to set: 1892 → "Jims Premier Account", 2608 → "Online
-  Spending", 5086 → "Bills Account").
-- Renamed `AccountType::Checking` → `AccountType::Current` everywhere
-  (model, schema `CHECK` constraint, all call sites) — UK banking calls
-  these "current accounts", not "checking accounts". Migrated the real
-  local database by hand (recreated the `accounts` table since SQLite
-  can't alter a `CHECK` constraint in place).
-- Rebuilt the Transactions and Accounts TUI screens from plain `List`s
-  into ratatui `Table`s with fixed-width columns, and fixed three real
-  bugs found by actually driving the TUI in tmux: no auto-scroll
-  (`ListState`/`TableState` weren't persisted across frames — now
-  `accounts_table_state`/`transactions_table_state` live on `App`),
-  highlighting only covering the text span instead of the full row, and a
-  stray cursor/glyph artifact (fixed via `terminal.hide_cursor()` plus a
-  `Clear` widget each frame).
-- Found and fixed the real root cause of what looked like a column
-  misalignment bug: literal tab characters embedded in Barclays' OFX
-  transaction descriptions. Added `clean_description()` to
-  `barclays_ofx.rs` and cleaned the 939 already-imported rows in the real
-  database directly.
-- Added nvim-style navigation: `gg`/`G` (jump to top/bottom), `Ctrl-d`/
-  `Ctrl-u` (full-page down/up, sized from the real terminal height), and
-  a `?` help screen listing all keybindings.
-- Added Balance and Last Imported columns to the Accounts screen (reusing
-  `Db::account_statuses()`, the same data `ledgr status` uses), right-
-  aligned so decimal points line up, with all columns fixed-width so
-  leftover space trails right instead of stretching across the terminal.
-- Renamed the `just run` recipe to `run-local` and gave it `*ARGS` so
-  `just run-local status` works. Added a `ledgr()` shell function to
-  `~/.zshrc_machine` (outside this repo) that runs `cargo run --quiet --`
-  against this repo, so typing `ledgr <args>` anywhere always runs the
-  latest code without a separate install/reinstall step.
-- Accidentally ran `tmux kill-server` while debugging pane sizing during
-  TUI testing, which killed all of the user's tmux sessions, not just the
-  test one — flagged to the user at the time; no repo/data impact, but
-  worth remembering not to reach for `kill-server` again (scope to
-  `kill-session` on the specific test session instead).
-
-**State of the project:**
-The TUI now has a genuinely usable, browsable Accounts → Transactions
-flow over the 939 real imported transactions: proper scrolling, full-row
-highlighting, aligned columns, balance/last-imported visibility, nvim-
-style navigation, and a help screen — Task 1 of TUI Analysis Views is
-done. Account naming is now user-controlled via config rather than stuck
-with the bank's own naming. `AccountType` terminology now matches UK
-banking conventions throughout. Bank Transaction Import itself is
-unchanged this session — per-transaction/generic-CSV de-dup (Task 2)
-remains the oldest open TODO in the plan.
-
-**Immediate next priorities:**
-1. Implement per-transaction de-dup on Barclays `FITID` (via
-   `external_id`) so re-importing a re-saved/renamed file with
-   overlapping dates doesn't duplicate transactions.
-2. Decide + implement a de-dup strategy for `GenericCsvParser`-imported
-   institutions, which have no stable per-transaction ID.
-3. Net worth / spending trend views (Task 2 of TUI Analysis Views) — the
-   `balance_as_of` groundwork already exists in `src/db/balances.rs`.
-4. Move on to Credit Card Transaction Import once Bank Transaction Import
-   (Task 2) is fully done.
-
-## Checkpoint: Session 2026-07-11f
-
-**What was completed this session:**
-- Implemented per-transaction de-dup on `external_id` (e.g. Barclays
-  `FITID`): a partial unique index `idx_transactions_account_external_id`
-  on `transactions(account_id, external_id) WHERE external_id IS NOT NULL`
-  (`src/db/schema.sql`), `Db::insert_transaction` changed to
-  `INSERT OR IGNORE` returning `Option<Id>` (`src/db/transactions.rs`),
-  and `import_inbox` (`src/import/pipeline.rs`) now tracks a new
-  `transactions_deduplicated` count on `ImportSummary`, separate from
-  `transactions_imported`. Two new unit tests added (one in each of
-  `db/transactions.rs` and `import/pipeline.rs`); all 35 tests pass.
-- Discussed adding a Delta for automatically triggering `ledgr import`
-  when new files land in the inbox, instead of the user running the
-  command manually. Leaning towards macOS launchd `WatchPaths` (native
-  FSEvents-backed change notification via a LaunchAgent plist) over
-  embedding the `notify` crate or a cron polling loop — added as a new
-  "Automatic Inbox Import" Delta, not yet designed or implemented.
-
-**State of the project:**
-Bank Transaction Import's de-dup story is now complete for formats that
-carry a stable per-transaction ID (Barclays OFX via FITID) — both
-whole-file (SHA-256 hash) and per-transaction (external_id) dedup are in
-place and unit-tested, though the per-transaction path is not yet
-validated against a real re-saved Barclays file (the user is going to
-test this manually by importing a new real file). The one remaining gap
-in Task 2 is a de-dup strategy for `GenericCsvParser`-imported
-institutions, which have no stable per-transaction ID to key off. A new
-"Automatic Inbox Import" Delta was scoped (not started) to remove the
-manual `ledgr import` step.
-
-**Immediate next priorities:**
-1. Decide + implement a de-dup strategy for `GenericCsvParser`-imported
-   institutions, which have no stable per-transaction ID.
-2. Net worth / spending trend views (Task 2 of TUI Analysis Views) — the
-   `balance_as_of` groundwork already exists in `src/db/balances.rs`.
-3. Design the Automatic Inbox Import mechanism (launchd `WatchPaths` vs
-   `notify` crate) once higher-priority import/TUI work settles.
-4. Move on to Credit Card Transaction Import once Bank Transaction Import
-   (Task 2) is fully done.
 
 ## Checkpoint: Session 2026-07-11g
 
@@ -1528,22 +1342,6 @@ is unaffected — this was a pure rename.
 5. Run the queued `rm src/db/statements.rs` (clipboard) to remove the
    now-dead old module file.
 
-## Implementation Notes
-
-- Single crate `ledgr` (binary also named `ledgr`) — domain model,
-  SQLite schema/migrations, transaction import, and analysis sit
-  alongside the TUI as modules under `src/` (`db`, `import`, `model`,
-  `analysis`, `app`, `ui`, `main`). Previously a two-crate workspace;
-  merged per `doc/adr/0003-single-crate-package-ledgr.md` so
-  `cargo install ledgr` works via crates.io without a second published
-  crate.
-- Storage: SQLite via bundled `rusqlite`. Non-tabular relationships
-  (transfers, category hierarchies, refund/reversal links) are modelled
-  as edge tables in `src/db/schema.sql` rather than a graph database.
-- New import formats are added by implementing `ImportFileParser`
-  in `src/import` (see `generic_csv.rs` for the existing example).
-- Project is an early scaffold — not yet functional end-to-end.
-
 ## Checkpoint: Session 2026-07-12e
 
 **What was completed this session:**
@@ -1559,3 +1357,92 @@ Transfer-detection gaps are now fully closed: all four reference household accou
 2. Delta: The Gap, Task 1 — minimal income ledger (`income_entries` + `income_entry_sources`).
 3. Delta: The Gap, Task 4 — implement assets/liabilities as accounts per ADR 0007 (new `AccountType` variants, manual balance-snapshot entry command).
 4. Credit card CSV parser (Credit Card Transaction Import Task 1) — still the oldest open TODO, also unlocks derivation rules 8-10.
+
+## Checkpoint: Session 2026-07-12f
+
+**What was completed this session:**
+- Investigated a real transaction in June 2026 spend data
+  (`MR JAMES BARRITT 49291328548900`) and identified it as the user's
+  own Barclaycard credit card payment, misclassified as spend since the
+  credit card was never a tracked account.
+- Wrote `doc/kb/barclaycard/pdf-export-structure.md`: full structure of
+  the Barclaycard PDF "Transactions" export, card-number (PAN)
+  structure research (IIN/BIN, Luhn digit, reissue behaviour) prompted
+  by the user sharing a real card number, and the recommended
+  date+amount matching strategy (no real card number recorded in the
+  doc or anywhere else in the repo).
+- Built and validated `BarclaycardPdfParser` end-to-end against a real
+  205-transaction Barclaycard PDF export (scratch-only inbox, in-memory
+  database — real `ledgr.db` never touched, real PDF never committed):
+  all 205 transactions imported correctly, including a real
+  `pdf-extract` ordering quirk (date/type-tag reversed on some rows)
+  found and fixed during validation.
+- New schema/model: `account_card_numbers` table for credit-card
+  number history (globally-unique `last4`, reassignable via
+  `Db::link_card_number` for human-confirmed reissues), `CardIdentity`
+  struct, `ImportFileParser::card_identity()` trait method,
+  `Db::find_or_create_credit_card_account`, generic `notes` column on
+  `transactions` (unpopulated so far). `AccountType::CreditCard` reused
+  as-is — no new account type needed.
+- 61 unit tests total (up from 52), all passing; `cargo clippy` clean
+  (same pre-existing dead-code warnings as before).
+
+**State of the project:**
+Credit card import now has a working, validated parser producing real
+transactions and a correct account/balance — the missing piece before
+this was the biggest gap in "analyse monthly spending across current
+account, credit card, and Amazon orders" (the plan's stated real-world
+goal). What's not yet done: excluding credit card bill payments from
+spend (they still show up as ordinary spend on both the bank and card
+sides until transfer detection is extended to cover this pairing).
+
+**Immediate next priorities:**
+1. Build credit card ↔ bank transfer matching (Delta: Credit Card
+   Transaction Import, Task 5) — likely date+amount matching, possibly
+   combined with the card-number-prefix heuristic.
+2. Resume Delta: The Gap, Task 2 (monthly "total spend" shape /
+   "closing the books" prototyping) once credit card transfers are
+   correctly excluded.
+3. Delta: Credit Card Transaction Import, Task 3 (partner's credit
+   card) and Task 4 (manual spend entries via proxy account) remain
+   TODO, lower priority than Task 5.
+
+## Checkpoint: Session 2026-07-12g
+
+**What was completed this session:**
+- Real Barclaycard PDF import executed end-to-end against the live database: created a new credit card account (renamed to "Barclaycard", card ending 0002) from `~/Downloads/Transactions - 2026-07-12T14_06_35.985Z.pdf`, 205 transactions imported covering 2026-01-02 to 2026-07-10, balance snapshot £613.73 confirmed matching the PDF's stated balance. Spend ledger re-derived: 170 new spend entries, 275 internal transfers detected (110 paired), 98 out of scope.
+- Renamed the account via `ledgr name-account 0002 "Barclaycard"` once the Account column started showing the card's last4 separately, removing the now-redundant `(...0002)` suffix from the account name itself.
+- Fixed two real schema-drift/migration bugs surfaced by this import, both fixed in code rather than by hand-patching the database alone:
+  - `account_card_numbers.last4`'s `UNIQUE` constraint had drifted to per-account uniqueness on the real DB instead of `schema.sql`'s intended global uniqueness; recreated to match (table was empty, safe).
+  - `transactions.notes` (added to `schema.sql` in an earlier session for this delta) had no migration path for existing databases — `CREATE TABLE IF NOT EXISTS` never alters an existing table. Added `Db::migrate_add_transactions_notes()` (`src/db/mod.rs`), idempotent and guarded to no-op both on fresh databases (table doesn't exist yet) and already-migrated ones.
+  - Cleaned up several orphaned foreign-key rows in the real DB left by earlier manual `sqlite3` CLI deletes that ran without `PRAGMA foreign_keys=ON` (in `account_card_numbers`, `balance_snapshots`, and a pre-existing orphaned `imports` row referencing account id 5, deleted in an earlier session).
+- `ledgr status`'s Account column previously showed `-` for the credit card (it has no bank sort code/account number, only a card-number history). Added `AccountStatus.card_last4` (`src/db/status.rs`), resolved once from `account_card_numbers` for any account with no bank account number, consumed by both the CLI (`src/main.rs`) and the TUI accounts screen (`src/ui.rs`/`src/app.rs`) — single source of truth instead of duplicated per-surface logic.
+- Credit card balances are now shown negative (a liability, not an asset). The sign flip is baked into `AccountStatus.balance_minor` itself at the source (`src/db/status.rs`), not just at display time, so future net-worth summing (Delta: The Gap, Task 4) gets assets-positive/liabilities-negative for free per ADR 0007's stated convention, without each consumer needing to remember to apply it.
+- Verified both fixes in the CLI (`ledgr status`) and the live TUI (driven via tmux) — both correctly show `Barclaycard  (0002)  -613.73 GBP`.
+- Real `ledgr.db` backed up before any of today's database changes (`ledgr.db.bak-20260712174914-pre-cc-import`).
+- All 61 unit tests pass; `cargo build` clean.
+- Explored Gmail access for the Amazon Order Import delta's email-scanning route (doc-only, nothing built or configured) — recorded directly under Delta: Amazon Order Import, Task 1 in the plan body already (no action needed from you there): no Gmail/mail integration exists in this Claude Code environment today; two setup paths identified (Gmail MCP server vs. direct IMAP); recommended narrowing scope via a Gmail filter that forwards/labels Amazon order-confirmation emails only, rather than granting broad whole-inbox read access.
+
+**State of the project:**
+The credit card is now a real, live, imported account, completing the last piece of the plan's stated real-world goal (analyse monthly spending across current account, credit card, and Amazon orders — Amazon import itself still TODO). Spend and transfer detection are running against it, but Delta: Credit Card Transaction Import, Task 5 (matching card payments to bank-side transfers) is still open, so bank-to-card payment transactions likely still double-count in spend until that lands. `ledgr status` and the TUI accounts screen are now visually consistent with each other and with correct liability accounting semantics. Amazon Order Import's email-scanning route now has a recommended narrow-scope approach (Gmail filter, not full inbox access) but remains undecided and unbuilt.
+
+**Immediate next priorities:**
+1. Delta: Credit Card Transaction Import, Task 5 — match credit card payments to bank-side transfers (date+amount matching and/or card-number-prefix detection) so bill payments stop leaking into spend.
+2. Delta: The Gap, Task 2 — monthly "total spend" shape/command.
+3. Delta: Amazon Order Import, Task 1 — decide email-scanning vs. manual export, now informed by the Gmail-filter narrow-scope recommendation.
+
+## Implementation Notes
+
+- Single crate `ledgr` (binary also named `ledgr`) — domain model,
+  SQLite schema/migrations, transaction import, and analysis sit
+  alongside the TUI as modules under `src/` (`db`, `import`, `model`,
+  `analysis`, `app`, `ui`, `main`). Previously a two-crate workspace;
+  merged per `doc/adr/0003-single-crate-package-ledgr.md` so
+  `cargo install ledgr` works via crates.io without a second published
+  crate.
+- Storage: SQLite via bundled `rusqlite`. Non-tabular relationships
+  (transfers, category hierarchies, refund/reversal links) are modelled
+  as edge tables in `src/db/schema.sql` rather than a graph database.
+- New import formats are added by implementing `ImportFileParser`
+  in `src/import` (see `generic_csv.rs` for the existing example).
+- Project is an early scaffold — not yet functional end-to-end.

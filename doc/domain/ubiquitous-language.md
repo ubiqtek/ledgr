@@ -146,6 +146,17 @@ export for it was actually imported — it was always importable, just
 hadn't been yet). Listed separately from real accounts in `ledgr
 status`. Distinct from a **proxy account**, which exists to hold
 *manual spend entries*, not just to mark household membership.
+Optionally carries a `name` (the household member's full name, e.g.
+`"ROMINA SCARAMAGLI"`) used to recognise a person-to-person `NAME`
+field that carries no sort code/account number at all — Barclays shows
+these as either the full name (paying them, your saved payee nickname)
+or `"<Surname> <first initial>"` (them paying you, the sender name
+Faster Payments echoes back); see `derive::matches_household_member_name`.
+Discovered 2026-07-12: a `Manual Funds Transfer` from/to a household
+member sometimes carries no account digits to match on at all, so the
+sort code/account number check alone missed it, misclassifying it as
+`reimbursement`/`person_payment` (a rule intended for genuine external
+people) instead of an internal transfer.
 *Origin: the user, 2026-07-12; decision trail: ADR 0008.*
 
 ### Manual Funds Transfer — candidate
@@ -156,9 +167,11 @@ the destination's sort code/account number appearing at the *start* of
 `NAME` (`parse_account_prefix` in `src/derive.rs`), usually followed by
 a Barclays `FT` marker. Can be an **internal transfer** (household
 account) or **spend** (external account) — the transfer/payment
-distinction is decided solely by matching the sort code/account number
-against known household accounts, never by whether the transfer was
-manual or automated. *Origin: the user, 2026-07-12, reviewing
+distinction is decided by matching the sort code/account number (or,
+when the `NAME` carries no digits at all, the household member's
+registered `name` — see **Reference Household Account** above) against
+known household accounts, never by whether the transfer was manual or
+automated. *Origin: the user, 2026-07-12, reviewing
 `doc/developer-docs/transfer-detection.md`.*
 
 ### Automated Transfer — candidate

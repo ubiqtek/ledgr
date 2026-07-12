@@ -43,6 +43,16 @@ pub struct HouseholdAccountRef {
     /// account") — not used for matching.
     #[serde(default)]
     pub label: Option<String>,
+    /// The household member's full name (e.g. `"ROMINA SCARAMAGLI"`), used
+    /// to recognise a person-to-person `NAME` field that carries no sort
+    /// code/account number at all — Barclays shows these as either the full
+    /// name (when you're paying them, from your saved payee nickname) or
+    /// `"<Surname> <First initial>"` (when they're paying you, the sender
+    /// name Faster Payments echoes back) — see
+    /// `crate::derive::matches_household_member_name`. `None` means this
+    /// entry is only matched by sort code/account number, as before.
+    #[serde(default)]
+    pub name: Option<String>,
 }
 
 impl Config {

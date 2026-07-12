@@ -2,9 +2,168 @@
 
 ## What's Next
 
-**Next:** Delta: Credit Card Transaction Import, Task 5 — match credit card payments to bank-side transfers (date+amount matching and/or card-number-prefix detection) so bill payments stop leaking into spend. Delta: The Gap, Task 2 (monthly "total spend" shape) remains the task after that.
+**Next:** Delta: The Gap, Task 2 — Income and Gap columns on the new Monthly Gap TUI screen (see below), which needs Task 1 (minimal income ledger) first before a real Gap (income − spend) number is possible. Also outstanding from today: the leader-key (`<space>`) top-level navigation scheme discussed but not yet built (needs the fixed-hierarchy `back()` replaced with a real navigation-history stack so `Esc` always returns to whatever screen was actually open before, not a hardcoded parent), and merchant-name normalisation (raw descriptions like `"SUBWAY 55626-0"` → canonical `"Subway"`) — flagged as needed but deliberately deferred, not designed yet.
 **Sub-doc:** (none)
 **Blockers:** None currently.
+
+**2026-07-12 — spend entry notes: schema field wired up (CLI + TUI):**
+prompted by an unrecognised real merchant, `"MARTS MEHAZEPE"` (£30, 30 May)
+— web search found nothing, and the user confirmed their bank app shows
+the same garbled name, so it's a genuine (if obscure) small trader rather
+than an export artefact. `spend_entries.note` already existed in the
+schema but nothing wrote to it. New `Db::set_spend_entry_note(id, note)`
+(`src/db/spend.rs`) sets or (given `None`) clears it, deliberately leaving
+`classified_by`/`confidence`/`rule_name` untouched — a note is an
+annotation, not a reclassification.
+- **CLI:** `ledgr note <spend-entry-id> "<text>"` (empty text clears).
+  Built specifically so this is scriptable/assistant-usable without the
+  TUI, not just a TUI feature — the user's explicit ask.
+- **TUI:** `n` on the spend drill-down (`Screen::MonthSpend`) opens a
+  centred popup editor (new `App::note_edit: Option<String>`,
+  `start_editing_note`/`cancel_editing_note`/`commit_note`); while active,
+  the main event loop (`main.rs`) routes all keys to text
+  input/backspace/Enter-to-save/Esc-to-cancel instead of navigation. A
+  note renders inline in the Description cell as `<description>  📝
+  <note>`.
+- Verified the full round trip against the real database: set a note via
+  `ledgr note 541 "..."` on the real `MARTS MEHAZEPE` entry, confirmed via
+  direct SQL that the exact query `spend_entries_for_month` uses returns
+  it correctly. Live TUI visual confirmation was width-limited in this
+  session's tmux sandbox (an attached 120-column client clamps all new
+  tmux sessions to that width regardless of the `-x` flag requested,
+  leaving too little room in the Description column to show the appended
+  note text alongside the existing Rule/Account columns) — data-layer
+  correctness confirmed directly instead; worth a quick look on the user's
+  own (wider) terminal to see it visually. 71 tests pass throughout (no
+  new tests added — this was thin plumbing over an existing schema field,
+  verified by hand/SQL rather than needing new unit coverage); `cargo
+  clippy` clean.
+
+**2026-07-12 — Account column added to the Monthly Gap spend drill-down:**
+the user wants to verify spend against which account it actually came
+from (e.g. confirming a card payment landed on the right side). Found
+`spend_entries` carries no `account_id` at all — only derivable via
+`spend_entry_sources` (`role = 'source'`) back to `transactions.account_id`.
+`Db::spend_entries_for_month` (`src/db/spend.rs`) now joins through to
+return each entry's `account_id` alongside it (new `SpendEntryWithAccount`
+in `model.rs`) — deliberately the raw id, not a display name, so the TUI
+resolves the name through `app.accounts` (which already carries the
+user's account-name overrides from `config.toml`) rather than a second,
+divergent name lookup. New "Account" column in `draw_month_spend`
+(`ui.rs`). Verified live via tmux against the real database — e.g. showed
+that a set of `card_payment`-classified Subway/Morrisons entries sat on
+Jims Premier Account (the bank side) while `fallback`-classified Amazon
+entries sat on Online Spending, exactly the kind of cross-check the user
+wanted. 71 tests pass, `cargo clippy` clean.
+
+**2026-07-12 — sticky column headers on the Monthly Gap drill-down; real
+bug found and fixed: household members with no account digits in `NAME`
+were misclassified as reimbursement/person-payment spend instead of
+internal transfer:** the Monthly Gap spend drill-down's table now has a
+persistent header row (`Table::header`, `ui.rs`) that stays visible while
+scrolling — verified via tmux (`Ctrl-d` page-down, header still shown).
+While eyeballing the drill-down for audit purposes, the user spotted
+`"SCARAMAGLI R AMAZON OASIS FT"` classified `reimbursement` — plausible on
+its face (inbound money, `FT` suffix) but wrong: the payer is Romina
+(household member, already registered as a **Reference Household
+Account**), so it should have been an internal transfer, not spend offset
+by a reimbursement. Investigated and found the root cause: this `NAME`
+field carries **no sort code/account number at all** — just the person's
+name — so the existing digit-based household matching
+(`parse_account_prefix`/`parse_trailing_account_suffix`) never had
+anything to match against, and it fell through to the generic person-`FT`
+rule (intended for genuine external people, not family). Confirmed via the
+real data this affected **both directions** symmetrically: money *to* Romina
+(`"ROMINA SCARAMAGLI SHORTS FT"`, `person_payment`; `"ROMINA SCARAMAGLI
+DEPOSIT LAKES"`, `fallback` — no `FT` suffix at all) has exactly the same
+no-digits problem as money *from* her — 6 real transactions total
+misclassified as spend across Jan–Jul.
+- **Fix:** `HouseholdAccountRef` (`config.rs`) gains an optional `name`
+  field (e.g. `"ROMINA SCARAMAGLI"`) — deliberately a new field, not a
+  repurposed `label` (which stays purely cosmetic; overloading it would let
+  an innocent rename silently break transfer detection). New
+  `derive::matches_household_member_name` recognises both `NAME` shapes
+  Barclays uses for a person payment from one registered full name: the
+  full name (paying them — the sender's saved payee nickname) or `"<Surname>
+  <first initial>"` (them paying you — the sender name Faster Payments
+  echoes back), matched on a whole-word prefix so a coincidentally similar
+  name (real example found in the data: `"ARIA SCARAMAGLI-RE CHASE BGC"`,
+  an unrelated person) isn't wrongly matched. Wired in as a new early rule
+  in `classify()` (rule 1c, before the FT/card-payment rules — a household
+  member's name always wins over guessing reimbursement/person-payment),
+  checked regardless of `NAME` suffix so it also catches the no-`FT`-suffix
+  case. `derive_spend_entries`'s signature simplified to take
+  `&[HouseholdAccountRef]` directly (was a separately-built
+  `Vec<(String, String)>` tuple list) so both the digit-based household set
+  and the new name list build from the same config data; `main.rs`'s
+  `run_import` updated accordingly. 3 new unit tests (inbound name match,
+  outbound name match, similar-but-different-name non-match). 71 tests
+  pass (up from 68); `cargo clippy` clean.
+- `doc/domain/ubiquitous-language.md`'s **Reference Household Account**
+  entry extended to document the optional `name` field and why digit-only
+  matching missed this case; **Manual Funds Transfer**'s entry corrected
+  (it previously said the transfer/spend distinction is decided "solely"
+  by sort code/account number — no longer accurate now name matching
+  exists as a second path).
+- **Real data reclassified:** registered `name = "ROMINA SCARAMAGLI"` on
+  her Primary Account entry in `~/.config/ledgr/config.toml`. Real
+  `ledgr.db` backed up first
+  (`ledgr.db.bak-20260712225217-pre-name-match`); cleared the 6
+  misclassified `spend_entries` rows (transaction ids 226, 218, 185, 144,
+  115, 38) and re-ran `ledgr import` — all 6 now correctly excluded as
+  internal transfers (0 new spend entries created, 279 internal transfers
+  detected). Verified the monthly total deltas match exactly what removing
+  those 6 transactions' amounts should produce, month by month. Confirmed
+  no false positive: `"ARIA SCARAMAGLI-RE CHASE BGC"` (a different,
+  unrelated person, already correctly out-of-scope) stayed untouched.
+  Monthly spend totals now: Jan £9,516.02, Feb £8,925.51, Mar £6,332.28,
+  Apr £5,276.14, May £6,687.18, Jun £5,439.65, Jul (partial) £1,458.90.
+
+**2026-07-12 — Monthly Gap TUI screen scaffolded (Spend column only), plus
+a per-month spend drill-down:** design discussion decided this is a
+**Monthly Gap screen** (one row per month, newest first), not a generic
+"Spend" screen — fits the existing `Screen` enum pattern (`app.rs`) as a
+peer of `Accounts`/`Transactions`, reachable via a new `m` key from
+Accounts. Income/Gap columns deliberately deferred until Task 1 lands;
+today's build only has Spend. Checked against the Rebel Finance research
+(`doc/kb/rebel-finance/research.md`) first — nothing there contradicts a
+monthly cadence for the gap (their own Spending Tracker/Net Worth Tracker
+templates are month-by-month, and "gap" has no other cadence specified in
+the material), so proceeded without needing a new ubiquitous-language term.
+- New `Db::monthly_spend_totals()` (`src/db/spend.rs`) groups
+  `spend_entries` by `substr(occurred_on, 1, 7)` (plain string prefix,
+  since `occurred_on` is already `YYYY-MM-DD` — no need for `strftime`),
+  summing net (spend entries negative, refunds positive) per month. New
+  `MonthlySpend` model struct (`src/model.rs`).
+- Pressing Enter on a selected month drills into a new `Screen::MonthSpend`
+  showing every individual `spend_entries` row for that month (date,
+  amount, counterparty, description, **and the classification rule name**
+  e.g. `card_payment`/`fallback`/`person_payment`) — deliberately a flat
+  transaction list rather than merchant-grouping, per the user: the goal
+  right now is auditing (spotting anything that isn't real spend that
+  slipped through derivation), and showing the rule name directly serves
+  that by making `"fallback"`-classified (low-confidence) entries visible
+  at a glance without needing a separate confidence column. Merchant
+  grouping (useful for spotting spending anomalies, as it was during the
+  transfer-detection bug hunt) may still be worth adding later as a second
+  mode on this same screen — explicitly left as future ad-hoc design, not
+  decided now. New `Db::spend_entries_for_month()` (`src/db/spend.rs`),
+  `Screen::MonthSpend` navigation (`app.rs`), `draw_month_spend`
+  (`ui.rs`).
+- Verified end-to-end against the real database via tmux (no project
+  `run` skill existed for this TUI yet): `m` opens Monthly Gap showing 7
+  real months (Jul £1,568.90 down to Jan £9,516.02, matching the earlier
+  ad-hoc-query prototyping), Enter on a month drills into its real spend
+  entries with correct rule names, Esc returns to Monthly Gap with
+  selection preserved.
+- **Known simplification, not urgent:** the Spend column's currency is
+  hardcoded to `"GBP"` in `ui.rs`'s `draw_monthly_gap` (a `MonthlySpend`
+  row has no currency field — it's a cross-currency sum) rather than read
+  per-entry; fine while the household only holds GBP accounts, but would
+  need revisiting if a foreign-currency account is ever imported.
+- 68 unit tests pass throughout (unchanged — no new tests added, this was
+  UI scaffolding verified by hand); `cargo build`/`cargo clippy` clean
+  (same pre-existing dead-code warnings as before).
 
 **2026-07-12 — `ledgr status` reformatted as tables; Shared Shopping
 Account corrected from reference to tracked:** `run_status`
@@ -135,11 +294,11 @@ Account Number, column-width computed from the longest label).
 | | [2. Import de-duplication](#task-2-import-de-duplication) | IN PROGRESS |
 | | [3. Account resolution and balance tracking](#task-3-account-resolution-and-balance-tracking) | ✓ DONE |
 | [Delta: Automatic Inbox Import](#delta-automatic-inbox-import) | [1. Inbox change notification](#task-1-inbox-change-notification) | TODO |
-| [Delta: Credit Card Transaction Import](#delta-credit-card-transaction-import) | [1. Credit card statement parser](#task-1-credit-card-statement-parser) | IN PROGRESS |
+| [Delta: Credit Card Transaction Import](#delta-credit-card-transaction-import) | [1. Credit card statement parser](#task-1-credit-card-statement-parser) | ✓ DONE |
 | | [2. Evaluate Barclaycard PDF export](#task-2-evaluate-barclaycard-pdf-export) | ✓ DONE |
 | | [3. Import the user's partner's credit card](#task-3-import-the-users-partners-credit-card) | TODO |
 | | [4. Manual spend entries via a proxy account](#task-4-manual-spend-entries-via-a-proxy-account) | TODO |
-| | [5. Match credit card payments to bank-side transfers](#task-5-match-credit-card-payments-to-bank-side-transfers) | TODO |
+| | [5. Match credit card payments to bank-side transfers](#task-5-match-credit-card-payments-to-bank-side-transfers) | ✓ DONE |
 | [Delta: Amazon Order Import](#delta-amazon-order-import) | [1. Evaluate automation route — email scanning vs manual export](#task-1-evaluate-automation-route--email-scanning-vs-manual-export) | TODO |
 | | [2. Amazon order import](#task-2-amazon-order-import) | TODO |
 | [Delta: Spend Ledger](#delta-spend-ledger) | [1. Spend ledger design](#task-1-spend-ledger-design) | ✓ DONE |
@@ -406,25 +565,61 @@ remembering to run the command.
   their own `AccountType` variant.
 
 ### Task 5: Match credit card payments to bank-side transfers
-- TODO — with the credit card account now real and importable (Task 1),
-  credit card payments still need excluding from spend the same way
-  inter-bank transfers are (see `derive.rs`'s existing transfer
-  pairing). Two ideas discussed, not yet built:
-  1. **Date + exact amount matching** between a bank-side outgoing
-     payment and the card's `"PAYMENT, THANK YOU"` row — verified
-     working against real June 2026 data (two payments matched to the
-     penny and the day). Doesn't depend on the card number at all, so
-     immune to reissue.
-  2. **Card-number-prefix detection** — bank-side transfer descriptions
-     to a credit card carry a truncated form of the card's PAN (e.g.
-     `MR JAMES BARRITT 49291328548900`, missing the last 2 digits — see
-     `doc/kb/barclaycard/pdf-export-structure.md`). The user proposed a
-     function to detect "looks like the first N digits of a card
-     number" in a transaction description, and — since there is
-     currently only one registered Barclaycard — assuming any such match
-     refers to it without needing an exact/current number. Not yet
-     designed in detail (how the "only one card" assumption degrades
-     once Task 3 adds the partner's card too).
+- ✓ DONE — both ideas from the earlier discussion built together:
+  1. **Pattern gate** (`looks_like_card_payment_reference` in
+     `src/derive.rs`, new `Classification::CardPayment`): recognises a
+     bank-side `NAME` shaped as `<cardholder name words> <digit run>` and
+     validates the digit run against a real card-network IIN/BIN table
+     (`known_card_network_prefix` — Visa `4`, Mastercard `51xx-55xx` and
+     `2221-2720`), not just "looks numeric". Deliberately no lower
+     digit-count bound (Barclays' truncation length varies with how much
+     of the 32-char `NAME` field the preceding name text uses) but an
+     upper bound of `MAX_PAN_DIGITS = 16` (a full untruncated PAN can't
+     be longer than that, whatever its prefix looks like). This rule
+     sits between the existing sort-code/account-number transfer rules
+     and the CPM/FT suffix rules in `classify()`'s precedence order.
+  2. **Date + exact amount matching** (`Db::find_card_payment_counterpart`,
+     `src/db/spend.rs`): a transaction passing the pattern gate is only
+     actually excluded from spend once matched to a same/opposite-amount
+     transaction on a `CreditCard`-type account within a ±3 day window
+     (mirrors `find_transfer_counterpart`'s existing window) — the
+     pattern alone is corroborating evidence, not a reliable key on its
+     own (truncated, and not reissue-stable), consistent with the KB
+     article's recommendation. Unmatched candidates (e.g. the card
+     statement for that period not yet imported) still become a spend
+     entry, at reduced confidence (`rule_name = "card_payment_unmatched"`,
+     0.5) rather than being silently dropped — same "stay visible for
+     review" philosophy as the existing `"fallback"` rule.
+  - New `DerivationSummary.card_payments_matched` field; 7 new unit
+    tests covering the pattern gate (real card-shaped match, inbound
+    money excluded, a short single-digit false positive, an unrelated
+    long non-card reference number, a digit run longer than a full PAN)
+    and the full derive path (matched pair excluded from spend; no
+    credit card account yet → unmatched low-confidence spend). 68 tests
+    total, all passing; `cargo clippy` clean.
+  - **Validated against real data** (2026-07-12 session): found 32 real
+    `"MR JAMES BARRITT <truncated PAN>"` transactions, all previously
+    misclassified as `"fallback"` spend (confidence 0.4) — a real
+    instance of the double-counting this task exists to fix. Also found
+    and correctly excluded false positives during design: `"CORNWALL
+    WILDLIFE 6060150000007"` (13-digit charity reference, wrong network
+    prefix) and DVLA reference numbers (18 digits, exceeds
+    `MAX_PAN_DIGITS`, and start with a non-card-network digit anyway).
+    Real `ledgr.db` backed up first
+    (`ledgr.db.bak-20260712221100-pre-card-payment-matching`); cleared
+    the 32 misclassified `spend_entries`/`spend_entry_sources` rows and
+    re-ran `ledgr import` — all 32 matched their exact-amount
+    `"PAYMENT, THANK YOU"` counterpart on the Barclaycard account and
+    were correctly excluded as internal transfers (`spend_entries`
+    860 → 828, zero fell through to the unmatched low-confidence path).
+    Confirmed idempotent — running `ledgr import` again created 0 new
+    spend entries and 0 duplicate `transaction_links`.
+  - **Not yet addressed:** the "only one registered Barclaycard" case —
+    `find_card_payment_counterpart` matches against *any* `CreditCard`
+    account, so once Task 3 (partner's card) adds a second one, a
+    same-day same-amount coincidence across two cards could match the
+    wrong counterpart. Not a problem today (only one card exists); flag
+    for revisiting when Task 3 lands.
 
 ## Delta: Amazon Order Import
 
@@ -975,108 +1170,6 @@ just a categorisation rule with a friendlier UI?).
   once that exists — likely regular payments feed it rather than
   duplicate it.
 
-## Checkpoint: Session 2026-07-11g
-
-**What was completed this session:**
-- Validated per-transaction de-dup against real data: imported a new
-  real Barclays Savings account (`...3693`, "Adventure Fund", 28
-  transactions) alongside a 7-day-overlap re-download of the existing
-  "Jims Premier Account" file. All 20 overlapping transactions were
-  correctly caught as duplicates; the account's transaction count
-  stayed at exactly 562 (confirmed by checking one FITID directly in
-  the database).
-- Added a per-file import log: `import_inbox` (`src/import/pipeline.rs`)
-  now writes a `.log` file next to each processed statement (same
-  timestamp-prefixed name, `.log` extension), one tab-separated line
-  per transaction (external_id, status — imported/duplicate/error,
-  message). Per-transaction insert errors are now caught individually
-  instead of aborting the whole file's import.
-- Fixed `Inbox::mark_processed` (`src/inbox.rs`) to prefix processed
-  filenames with a millisecond timestamp, since banks reuse the same
-  filename for every download and this was silently overwriting the
-  previous copy in `processed/`.
-- Two new unit tests added; verified end-to-end against a real
-  re-saved Barclays file (20 transactions all correctly logged as
-  `duplicate`). Test count now 37, all passing.
-- Cleaned up a synthetic test statement/file created during real-data
-  verification from both the real database and the real inbox
-  `processed/` folder (no stray transactions were created — the DELETE
-  only removed the harmless `statements` row).
-
-**State of the project:**
-Bank Transaction Import's de-dup story (Task 2) is now fully validated
-end-to-end against real data for formats with a stable external ID
-(Barclays OFX via FITID) — whole-file and per-transaction dedup are
-both proven, plus a new audit trail (per-file `.log`) showing exactly
-what happened to every transaction in an import. The remaining gap is
-a de-dup strategy for `GenericCsvParser`-imported institutions (no
-stable per-transaction ID).
-
-**Immediate next priorities:**
-1. Decide + implement a de-dup strategy for `GenericCsvParser`-imported
-   institutions, which have no stable per-transaction ID.
-2. Net worth / spending trend views (Task 2 of TUI Analysis Views) — the
-   `balance_as_of` groundwork already exists in `src/db/balances.rs`.
-3. Design the Automatic Inbox Import mechanism (launchd `WatchPaths` vs
-   `notify` crate) once higher-priority import/TUI work settles.
-4. Move on to Credit Card Transaction Import once Bank Transaction Import
-   (Task 2) is fully done.
-
-## Checkpoint: Session 2026-07-11h
-
-**What was completed this session:**
-- Design session for the spend ledger: wrote
-  `doc/implementation-notes/spend-ledger-design.md` — raw transactions
-  stay immutable evidence; a derived `spend_entries` table (with
-  `spend_entry_sources` provenance links) holds real-world spending;
-  internal transfers between household accounts produce no entries;
-  classification carries rule/matcher/manual provenance + confidence,
-  manual always wins; derivation runs as part of `ledgr import`.
-- ADR 0005 `doc/adr/0005-independent-spend-and-income-ledgers.md`:
-  independent spend and income ledgers (income deferred), reversing an
-  initial single-table-with-kind decision after the naming difficulty
-  exposed that spend and income are different domains.
-- Researched the OFX spec properly and wrote `doc/kb/ofx/structure.md`:
-  full STMTTRN/TRNTYPE reference plus observed Barclays behaviour —
-  Barclays never emits XFER or BANKACCTTO; transfers are identified by
-  sort code + account number packed into the 32-char NAME field, and
-  both sides of a transfer carry the same user reference, making
-  internal-transfer detection and pairing deterministic.
-- Examined the real Barclaycard CSV export in the inbox: usable format
-  but every amount is rounded to whole pounds (all 205 rows) — recorded
-  as a data-quality constraint; parser details added to the Credit Card
-  Transaction Import delta.
-- Started the domain docs: `doc/domain/ubiquitous-language.md` (terms
-  with provenance and status) and `doc/domain/household.md` (the
-  "Household" accounting-entity concept — alternatives considered,
-  Rebel Finance/economics evidence, adopted). Added a CLAUDE.md rule:
-  no new domain terms without consulting the ubiquitous language doc
-  and the user.
-- Scrubbed real account numbers, names, and amounts from all new docs
-  (repo may become public). NOTE: this plan file still contains real
-  account last-4 digits, account nicknames, balances, and a Google
-  Drive path with an email address — scrub before publishing.
-- Added the Double-Entry Accounting exploratory Delta and the Spend
-  Ledger Delta (design ✓ DONE).
-
-**State of the project:**
-The spend ledger is fully designed and decision-trailed (ADR 0005,
-ubiquitous language, OFX research) but not yet implemented — schema
-and derivation are the next build step. Import infrastructure is
-unchanged and solid. Three design open questions await the user:
-reimbursements as refund-of-spend, the sinking-fund convention, and
-whether a precise (non-rounded) Barclaycard export exists.
-
-**Immediate next priorities:**
-1. Confirm spend-ledger open questions 2, 3, 5 with the user.
-2. Implement the spend ledger schema + derivation pass (Spend Ledger
-   Task 2).
-3. Credit card CSV parser (Credit Card Transaction Import Task 1) — the
-   spend ledger wants CC data; format is now known.
-4. Review/re-classification TUI (Spend Ledger Task 3).
-5. Generic-CSV de-dup strategy (Bank Transaction Import Task 2) remains
-   the oldest open TODO.
-
 ## Checkpoint: Session 2026-07-12
 
 **What was completed this session:**
@@ -1430,6 +1523,32 @@ The credit card is now a real, live, imported account, completing the last piece
 1. Delta: Credit Card Transaction Import, Task 5 — match credit card payments to bank-side transfers (date+amount matching and/or card-number-prefix detection) so bill payments stop leaking into spend.
 2. Delta: The Gap, Task 2 — monthly "total spend" shape/command.
 3. Delta: Amazon Order Import, Task 1 — decide email-scanning vs. manual export, now informed by the Gmail-filter narrow-scope recommendation.
+
+## Checkpoint: Session 2026-07-12h
+
+**What was completed this session:**
+- Confirmed the real Barclaycard PDF import (Delta: Credit Card Transaction Import, Task 1) has been run against the live `ledgr.db`, not just the scratch-inbox validation from earlier in the day — verified via `ledgr status`: Barclaycard account (`0002`), 205 transactions, £613.73 balance, matching the earlier scratch validation exactly.
+
+**State of the project:**
+Credit Card Transaction Import Task 1 (parser) is now fully done end-to-end against real data. Task 2 (PDF vs CSV evaluation) was already done. Tasks 3-5 (partner's card, proxy account for manual spend, matching card payments to bank-side transfers) remain TODO.
+
+**Immediate next priorities:**
+1. Delta: Credit Card Transaction Import, Task 5 — match credit card payments to bank-side transfers (date+amount matching and/or card-number-prefix detection) so bill payments stop leaking into spend.
+2. Delta: The Gap, Task 2 — monthly "total spend" shape/command.
+
+## Checkpoint: Session 2026-07-12i
+
+**Completed:**
+- Delta: Credit Card Transaction Import, Task 5 — built and validated card-payment-to-bank-transfer matching, combining both previously-discussed ideas rather than choosing one: a pattern gate (`looks_like_card_payment_reference` in `src/derive.rs`, new `Classification::CardPayment`) recognising a truncated-PAN `NAME` shape and validating it against a real Visa/Mastercard IIN/BIN table (`known_card_network_prefix`), then a date+exact-amount match (`Db::find_card_payment_counterpart`, `src/db/spend.rs`, ±3 day window, mirrors the existing transfer-pairing query) against any `CreditCard`-type account before actually excluding the transaction from spend. Unmatched candidates still become a low-confidence spend entry (`rule_name = "card_payment_unmatched"`) rather than being silently dropped, matching the existing `"fallback"` rule's philosophy.
+- Iterated the pattern gate through several rounds of scrutiny before trusting it against real data: dropped an early exact-length-14 requirement (too rigid — truncation length varies with how much of Barclays' `NAME` field the preceding name text uses), dropped a follow-up minimum-length floor (arbitrary), and settled on relying on `known_card_network_prefix`'s own 4-digit floor for the short end plus a `MAX_PAN_DIGITS = 16` upper bound (a full untruncated PAN can't be longer than that, whatever its prefix looks like) — no lower bound needed. New unit tests cover the false-positive cases found along the way: a bare short digit, an unrelated long reference number with a non-card-network prefix (a real example — see below), and a digit run longer than a full PAN.
+- **Validated against real data:** found 32 real `"MR JAMES BARRITT <truncated PAN>"` transactions, all previously misclassified as `"fallback"` spend (confidence 0.4) — confirming this was a genuine double-counting bug, not a hypothetical. Also found and correctly excluded two real false-positive shapes while designing the pattern gate: `"CORNWALL WILDLIFE 6060150000007"` (13-digit charity reference number, wrong network prefix) and DVLA vehicle-tax reference numbers (18 digits, exceeds `MAX_PAN_DIGITS`). Real `ledgr.db` backed up first (`ledgr.db.bak-20260712221100-pre-card-payment-matching`); cleared the 32 misclassified `spend_entries`/`spend_entry_sources` rows and re-ran `ledgr import` — all 32 matched their exact-amount `"PAYMENT, THANK YOU"` counterpart on the Barclaycard account and were correctly excluded as internal transfers (`spend_entries` 860 → 828). Confirmed idempotent: re-running `ledgr import` created 0 new spend entries and 0 duplicate `transaction_links`.
+- 68 unit tests total (up from 65), all passing; `cargo clippy` clean (same pre-existing dead-code warnings as before, nothing new).
+
+**State of the project:** Credit Card Transaction Import is now done except Tasks 3 (partner's card) and 4 (proxy account for manual spend) — both deferred, not blocking. Every real transaction that goes into computing total spend is now correctly classified: internal transfers (bank-to-bank and, as of this session, bank-to-credit-card) are excluded, and the previously-flagged blocker on Delta: The Gap, Task 2 is resolved. One known gap, not a problem today: `find_card_payment_counterpart` matches against *any* `CreditCard` account, so once Task 3 adds a second registered card, a same-day same-amount coincidence across two cards could match the wrong counterpart — flagged in the plan body for revisiting then.
+
+**Immediate next priorities:**
+1. Delta: The Gap, Task 2 — monthly "total spend" shape/command, now unblocked.
+2. Delta: The Gap, Task 1 — minimal income ledger, needed before a real Gap (income − spend) figure is possible.
 
 ## Implementation Notes
 

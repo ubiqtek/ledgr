@@ -218,6 +218,33 @@ pub struct NewSpendEntry {
     pub rule_name: Option<String>,
 }
 
+/// A spend entry alongside the id of the account its source transaction was
+/// posted to — backs the TUI's per-month drill-down, so the user can verify
+/// spend against the account it actually came from (e.g. spotting a card
+/// payment that should have matched a Barclaycard transaction but didn't).
+/// A spend entry's source account isn't stored on `spend_entries` itself —
+/// it's derived via `spend_entry_sources` back to `transactions`. Carries
+/// the raw id rather than a display name so the TUI can resolve it through
+/// the same (possibly user-overridden, see `Config::apply_account_name_overrides`)
+/// account list it already holds, rather than a second, divergent lookup.
+#[derive(Debug, Clone)]
+pub struct SpendEntryWithAccount {
+    pub entry: SpendEntry,
+    pub account_id: Id,
+}
+
+/// One row of the Monthly Gap view: total spend for a calendar month.
+/// Income/gap columns land once Delta: The Gap, Task 1 (income ledger)
+/// exists — see `doc/planning/plan.md`.
+#[derive(Debug, Clone)]
+pub struct MonthlySpend {
+    /// `YYYY-MM`.
+    pub month: String,
+    /// Net of that month's `spend_entries` (signed, negative = money out —
+    /// same convention as `amount_minor` elsewhere).
+    pub spend_minor: i64,
+}
+
 /// Which raw transaction(s) a spend entry derives from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

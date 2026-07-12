@@ -54,12 +54,7 @@ fn run_import(db: Db) -> anyhow::Result<()> {
     );
     println!("inbox: {}", config.inbox_dir.display());
 
-    let household_accounts: Vec<(String, String)> = config
-        .household_accounts
-        .iter()
-        .map(|a| (a.sort_code.clone(), a.account_number.clone()))
-        .collect();
-    let derivation = derive::derive_spend_entries(&db, &household_accounts)?;
+    let derivation = derive::derive_spend_entries(&db, &config.household_accounts)?;
     println!(
         "spend ledger: {} entr(y/ies) created, {} internal transfer(s) detected ({} paired), {} out of scope",
         derivation.spend_entries_created,
@@ -268,6 +263,29 @@ fn run_name_account(db: Db, last4: &str, name: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Sets (or, given an empty string, clears) a spend entry's note — e.g.
+/// recording that an unrecognised merchant was looked into and is
+/// legitimate. Run via `ledgr note <spend-entry-id> "<text>"`. Also usable
+/// non-interactively (no TUI needed), which is the point: the same action
+/// as the TUI's `n` key on the spend drill-down screen, callable by script
+/// or by an assistant working alongside the user.
+fn run_note(db: Db, id_arg: &str, text: &str) -> anyhow::Result<()> {
+    let id: crate::model::Id = id_arg
+        .parse()
+        .map_err(|_| anyhow::anyhow!("not a valid spend entry id: {id_arg}"))?;
+    let note = if text.trim().is_empty() {
+        None
+    } else {
+        Some(text.trim())
+    };
+    db.set_spend_entry_note(id, note)?;
+    match note {
+        Some(text) => println!("spend entry {id}: note set to \"{text}\""),
+        None => println!("spend entry {id}: note cleared"),
+    }
+    Ok(())
+}
+
 /// Formats a signed minor-unit amount (e.g. pence) as a major-unit string
 /// with the currency code, e.g. `-4550` GBP -> `-45.50 GBP`.
 fn format_amount_minor(amount_minor: i64, currency: &str) -> String {
@@ -289,6 +307,12 @@ fn main() -> anyhow::Result<()> {
                 anyhow::bail!("usage: ledgr name-account <last-4-digits> \"<name>\"");
             };
             return run_name_account(db, last4, name);
+        }
+        Some("note") => {
+            let (Some(id), Some(text)) = (args.get(2), args.get(3)) else {
+                anyhow::bail!("usage: ledgr note <spend-entry-id> \"<text>\"");
+            };
+            return run_note(db, id, text);
         }
         _ => {}
     }
@@ -333,6 +357,25 @@ fn run(
                 let ctrl = key
                     .modifiers
                     .contains(crossterm::event::KeyModifiers::CONTROL);
+
+                // While editing a note, every key is text input (or
+                // commit/cancel) rather than navigation — handled entirely
+                // separately from the match below.
+                if app.note_edit.is_some() {
+                    match key.code {
+                        KeyCode::Enter => app.commit_note()?,
+                        KeyCode::Esc => app.cancel_editing_note(),
+                        KeyCode::Backspace => {
+                            app.note_edit.as_mut().expect("checked above").pop();
+                        }
+                        KeyCode::Char(c) => {
+                            app.note_edit.as_mut().expect("checked above").push(c);
+                        }
+                        _ => {}
+                    }
+                    continue;
+                }
+
                 let was_pending_g = pending_g;
                 pending_g = false;
                 match key.code {
@@ -344,16 +387,25 @@ fn run(
                     KeyCode::Char('u') if ctrl => app.move_selection(-page),
                     KeyCode::Char('q') | KeyCode::Esc => match app.screen {
                         app::Screen::Accounts => app.should_quit = true,
-                        app::Screen::Transactions | app::Screen::Help => app.back(),
+                        app::Screen::Transactions
+                        | app::Screen::MonthlyGap
+                        | app::Screen::MonthSpend
+                        | app::Screen::Help => app.back(),
                     },
                     KeyCode::Char('?') => app.toggle_help(),
+                    KeyCode::Char('m') if app.screen == app::Screen::Accounts => {
+                        app.open_monthly_gap()?;
+                    }
+                    KeyCode::Char('n') if app.screen == app::Screen::MonthSpend => {
+                        app.start_editing_note();
+                    }
                     KeyCode::Down | KeyCode::Char('j') => app.move_selection(1),
                     KeyCode::Up | KeyCode::Char('k') => app.move_selection(-1),
-                    KeyCode::Enter => {
-                        if app.screen == app::Screen::Accounts {
-                            app.open_selected_account()?;
-                        }
-                    }
+                    KeyCode::Enter => match app.screen {
+                        app::Screen::Accounts => app.open_selected_account()?,
+                        app::Screen::MonthlyGap => app.open_selected_month()?,
+                        _ => {}
+                    },
                     _ => {}
                 }
             }

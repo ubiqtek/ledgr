@@ -7,7 +7,8 @@
 
 use super::Db;
 use crate::model::{
-    ClassifiedBy, Id, LinkRelation, NewSpendEntry, SpendEntry, SpendEntrySourceRole, Transaction,
+    ClassifiedBy, Id, LinkRelation, MonthlySpend, NewSpendEntry, SpendEntry, SpendEntrySourceRole,
+    SpendEntryWithAccount, Transaction,
 };
 use rusqlite::{params, OptionalExtension};
 
@@ -72,6 +73,19 @@ impl Db {
         Ok(self.conn().last_insert_rowid())
     }
 
+    /// Sets (or, given `None`, clears) a spend entry's free-text `note` —
+    /// e.g. the user's own record of having looked into an unrecognised
+    /// merchant and decided it's legitimate. Deliberately doesn't touch
+    /// `classified_by`/`confidence`/`rule_name`: a note is just an
+    /// annotation on top of whatever classified the entry, not a
+    /// reclassification (that's still `classified_by = 'manual'`, unused by
+    /// this method).
+    pub fn set_spend_entry_note(&self, id: Id, note: Option<&str>) -> rusqlite::Result<()> {
+        self.conn()
+            .execute("UPDATE spend_entries SET note = ?1 WHERE id = ?2", params![note, id])?;
+        Ok(())
+    }
+
     /// All spend entries, most recent first — the derivation pass's output,
     /// for `ledgr status`-style summaries and the future review queue TUI
     /// (Spend Ledger Task 3).
@@ -98,6 +112,71 @@ impl Db {
                 confidence: row.get(9)?,
                 rule_name: row.get(10)?,
                 classified_at: row.get(11)?,
+            })
+        })?;
+        rows.collect()
+    }
+
+    /// All spend entries for one calendar month (`month` as `YYYY-MM`),
+    /// oldest first, alongside the id of the account each entry's source
+    /// transaction was posted to — backs the TUI's per-month drill-down, so
+    /// the user can eyeball whether anything that isn't real spend (a missed
+    /// transfer, say) has slipped into the ledger, and verify spend against
+    /// the account it actually came from. Joins through `spend_entry_sources`
+    /// (`role = 'source'`) since `spend_entries` itself carries no
+    /// `account_id` — see `SpendEntryWithAccount`'s doc comment.
+    pub fn spend_entries_for_month(
+        &self,
+        month: &str,
+    ) -> rusqlite::Result<Vec<SpendEntryWithAccount>> {
+        let mut stmt = self.conn().prepare(
+            "SELECT se.id, se.occurred_on, se.amount_minor, se.currency, se.counterparty,
+                    se.description, se.note, se.category_id, se.classified_by, se.confidence,
+                    se.rule_name, se.classified_at, t.account_id
+             FROM spend_entries se
+             JOIN spend_entry_sources ses ON ses.spend_entry_id = se.id AND ses.role = 'source'
+             JOIN transactions t ON t.id = ses.transaction_id
+             WHERE substr(se.occurred_on, 1, 7) = ?1
+             ORDER BY se.occurred_on, se.id",
+        )?;
+        let rows = stmt.query_map([month], |row| {
+            let classified_by_str: String = row.get(8)?;
+            Ok(SpendEntryWithAccount {
+                entry: SpendEntry {
+                    id: row.get(0)?,
+                    occurred_on: row.get(1)?,
+                    amount_minor: row.get(2)?,
+                    currency: row.get(3)?,
+                    counterparty: row.get(4)?,
+                    description: row.get(5)?,
+                    note: row.get(6)?,
+                    category_id: row.get(7)?,
+                    classified_by: ClassifiedBy::parse(&classified_by_str)
+                        .unwrap_or(ClassifiedBy::Rule),
+                    confidence: row.get(9)?,
+                    rule_name: row.get(10)?,
+                    classified_at: row.get(11)?,
+                },
+                account_id: row.get(12)?,
+            })
+        })?;
+        rows.collect()
+    }
+
+    /// Net spend per calendar month, most recent first — backs the TUI's
+    /// Monthly Gap screen. `occurred_on` is `YYYY-MM-DD`, so a plain string
+    /// prefix groups correctly without needing SQLite's `strftime`.
+    pub fn monthly_spend_totals(&self) -> rusqlite::Result<Vec<MonthlySpend>> {
+        let mut stmt = self.conn().prepare(
+            "SELECT substr(occurred_on, 1, 7) AS month, SUM(amount_minor)
+             FROM spend_entries
+             GROUP BY month
+             ORDER BY month DESC",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok(MonthlySpend {
+                month: row.get(0)?,
+                spend_minor: row.get(1)?,
             })
         })?;
         rows.collect()
@@ -181,6 +260,38 @@ impl Db {
                     transaction_id,
                     posted_at,
                 ],
+                |row| row.get(0),
+            )
+            .optional()
+    }
+
+    /// Best-effort search for a credit card bill payment's counterpart: any
+    /// `CreditCard` account's transaction for the equal-and-opposite amount
+    /// within a 3-day window (see
+    /// doc/kb/barclaycard/pdf-export-structure.md's recommended
+    /// date+amount matching strategy — deliberately doesn't key off the
+    /// card number, which isn't stable across a reissue). With only one
+    /// registered credit card today this can't yet be ambiguous between
+    /// several cards; that will need revisiting once a second card
+    /// (Credit Card Transaction Import Task 3) exists.
+    pub fn find_card_payment_counterpart(
+        &self,
+        transaction_id: Id,
+        amount_minor: i64,
+        posted_at: &str,
+    ) -> rusqlite::Result<Option<Id>> {
+        self.conn()
+            .query_row(
+                "SELECT t.id
+                 FROM transactions t
+                 JOIN accounts a ON a.id = t.account_id
+                 WHERE a.account_type = 'credit_card'
+                   AND t.amount_minor = ?1
+                   AND t.id != ?2
+                   AND julianday(t.posted_at) BETWEEN julianday(?3) - 3 AND julianday(?3) + 3
+                 ORDER BY ABS(julianday(t.posted_at) - julianday(?3))
+                 LIMIT 1",
+                params![-amount_minor, transaction_id, posted_at],
                 |row| row.get(0),
             )
             .optional()

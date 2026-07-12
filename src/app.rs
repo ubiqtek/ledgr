@@ -1,12 +1,14 @@
 use crate::config::Config;
 use crate::db::{AccountStatus, Db};
-use crate::model::Transaction;
+use crate::model::{MonthlySpend, SpendEntryWithAccount, Transaction};
 use ratatui::widgets::TableState;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Screen {
     Accounts,
     Transactions,
+    MonthlyGap,
+    MonthSpend,
     Help,
 }
 
@@ -25,6 +27,16 @@ pub struct App {
     pub transactions: Vec<Transaction>,
     pub selected_transaction: usize,
     pub transactions_table_state: TableState,
+    pub monthly_spend: Vec<MonthlySpend>,
+    pub selected_month: usize,
+    pub monthly_gap_table_state: TableState,
+    pub month_spend_entries: Vec<SpendEntryWithAccount>,
+    pub selected_spend_entry: usize,
+    pub month_spend_table_state: TableState,
+    /// `Some(buffer)` while editing the selected spend entry's note (`n` on
+    /// `Screen::MonthSpend`) — its presence is what routes key events to
+    /// text editing instead of navigation, see `main.rs`'s event loop.
+    pub note_edit: Option<String>,
     pub should_quit: bool,
     pub status: String,
 }
@@ -44,8 +56,15 @@ impl App {
             transactions: Vec::new(),
             selected_transaction: 0,
             transactions_table_state: TableState::default(),
+            monthly_spend: Vec::new(),
+            selected_month: 0,
+            monthly_gap_table_state: TableState::default(),
+            month_spend_entries: Vec::new(),
+            selected_spend_entry: 0,
+            month_spend_table_state: TableState::default(),
+            note_edit: None,
             should_quit: false,
-            status: "j/k move, enter open, ctrl-d/u page, ? help, esc back, q quit".into(),
+            status: "j/k move, enter open, m gap, ctrl-d/u page, ? help, esc back, q quit".into(),
         })
     }
 
@@ -59,10 +78,68 @@ impl App {
         Ok(())
     }
 
+    pub fn open_monthly_gap(&mut self) -> anyhow::Result<()> {
+        self.monthly_spend = self.db.monthly_spend_totals()?;
+        self.selected_month = 0;
+        self.screen = Screen::MonthlyGap;
+        Ok(())
+    }
+
+    pub fn open_selected_month(&mut self) -> anyhow::Result<()> {
+        let Some(month) = self.monthly_spend.get(self.selected_month) else {
+            return Ok(());
+        };
+        self.month_spend_entries = self.db.spend_entries_for_month(&month.month)?;
+        self.selected_spend_entry = 0;
+        self.screen = Screen::MonthSpend;
+        Ok(())
+    }
+
+    /// Opens the note editor for the selected spend entry on
+    /// `Screen::MonthSpend`, pre-filled with its existing note (if any).
+    pub fn start_editing_note(&mut self) {
+        if self.screen != Screen::MonthSpend {
+            return;
+        }
+        let Some(row) = self.month_spend_entries.get(self.selected_spend_entry) else {
+            return;
+        };
+        self.note_edit = Some(row.entry.note.clone().unwrap_or_default());
+    }
+
+    /// Discards the in-progress note edit without saving.
+    pub fn cancel_editing_note(&mut self) {
+        self.note_edit = None;
+    }
+
+    /// Saves the in-progress note edit (an empty buffer clears the note) and
+    /// closes the editor. Deliberately updates the in-memory row too, not
+    /// just the database, so the change is visible immediately without
+    /// re-querying.
+    pub fn commit_note(&mut self) -> anyhow::Result<()> {
+        let Some(buffer) = self.note_edit.take() else {
+            return Ok(());
+        };
+        let Some(row) = self.month_spend_entries.get_mut(self.selected_spend_entry) else {
+            return Ok(());
+        };
+        let trimmed = buffer.trim();
+        let note = if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed.to_string())
+        };
+        self.db.set_spend_entry_note(row.entry.id, note.as_deref())?;
+        row.entry.note = note;
+        Ok(())
+    }
+
     pub fn move_selection(&mut self, delta: i32) {
         let len = match self.screen {
             Screen::Accounts => self.accounts.len(),
             Screen::Transactions => self.transactions.len(),
+            Screen::MonthlyGap => self.monthly_spend.len(),
+            Screen::MonthSpend => self.month_spend_entries.len(),
             Screen::Help => return,
         };
         if len == 0 {
@@ -71,6 +148,8 @@ impl App {
         let selected = match self.screen {
             Screen::Accounts => &mut self.selected_account,
             Screen::Transactions => &mut self.selected_transaction,
+            Screen::MonthlyGap => &mut self.selected_month,
+            Screen::MonthSpend => &mut self.selected_spend_entry,
             Screen::Help => return,
         };
         let next = *selected as i32 + delta;
@@ -82,6 +161,8 @@ impl App {
         let selected = match self.screen {
             Screen::Accounts => &mut self.selected_account,
             Screen::Transactions => &mut self.selected_transaction,
+            Screen::MonthlyGap => &mut self.selected_month,
+            Screen::MonthSpend => &mut self.selected_spend_entry,
             Screen::Help => return,
         };
         *selected = 0;
@@ -92,6 +173,8 @@ impl App {
         let len = match self.screen {
             Screen::Accounts => self.accounts.len(),
             Screen::Transactions => self.transactions.len(),
+            Screen::MonthlyGap => self.monthly_spend.len(),
+            Screen::MonthSpend => self.month_spend_entries.len(),
             Screen::Help => return,
         };
         if len == 0 {
@@ -100,6 +183,8 @@ impl App {
         let selected = match self.screen {
             Screen::Accounts => &mut self.selected_account,
             Screen::Transactions => &mut self.selected_transaction,
+            Screen::MonthlyGap => &mut self.selected_month,
+            Screen::MonthSpend => &mut self.selected_spend_entry,
             Screen::Help => return,
         };
         *selected = len - 1;
@@ -107,7 +192,8 @@ impl App {
 
     pub fn back(&mut self) {
         match self.screen {
-            Screen::Transactions => self.screen = Screen::Accounts,
+            Screen::Transactions | Screen::MonthlyGap => self.screen = Screen::Accounts,
+            Screen::MonthSpend => self.screen = Screen::MonthlyGap,
             Screen::Help => self.screen = self.previous_screen,
             Screen::Accounts => {}
         }

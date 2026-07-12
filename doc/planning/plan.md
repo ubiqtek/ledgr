@@ -2,8 +2,110 @@
 
 ## What's Next
 
-**Next:** Delta: The Gap, Task 2 — Income and Gap columns on the new Monthly Gap TUI screen (see below), which needs Task 1 (minimal income ledger) first before a real Gap (income − spend) number is possible. Also outstanding from today: the leader-key (`<space>`) top-level navigation scheme discussed but not yet built (needs the fixed-hierarchy `back()` replaced with a real navigation-history stack so `Esc` always returns to whatever screen was actually open before, not a hardcoded parent), and merchant-name normalisation (raw descriptions like `"SUBWAY 55626-0"` → canonical `"Subway"`) — flagged as needed but deliberately deferred, not designed yet.
+**Next:** Build the three items designed below, one at a time, starting
+with the navigation-history-stack + leader-key refactor (it's a
+prerequisite the other two build on): (1) leader-key nav + `Esc`-always-
+goes-back stack, (2) Monthly Transfers screen, (3) Monthly Transfers
+per-month drill-down. Design is fully worked out below — a fresh session
+can implement straight from it without re-deriving. After these: Delta:
+The Gap, Task 2 (Income/Gap columns, needs Task 1 first), and
+merchant-name normalisation — both still deliberately deferred/undesigned.
 **Sub-doc:** (none)
+
+**2026-07-12 — designed (not yet built): leader-key nav + Monthly
+Transfers screen.** Motivating problem: the user noticed spend is
+consistently higher than income yet they're not accumulating debt —
+suspected the **Joint Annual Expense** reference household account is a
+real money source not currently visible anywhere (no income ledger yet,
+per Delta: The Gap Task 1 — this is a concrete symptom of that gap).
+Wants a Monthly Transfers screen (mirroring Monthly Gap) to see the money
+moving in via transfers, and to audit that things classified as transfers
+genuinely aren't disguised spend. Also revived the leader-key nav
+discussion started earlier (`<space>a` accounts, `<space>g` gap,
+`<space>t` transfers) and asked "what happened to it" — not forgotten,
+just not yet built.
+
+**Design, worked through this session:**
+
+1. **Navigation-history stack** (`app.rs`): replace `previous_screen`
+   (only used by Help today) and the fixed-hierarchy `back()` match with a
+   `nav_stack: Vec<Screen>` + a single `navigate_to(&mut self, screen:
+   Screen)` that pushes the current screen before switching (no-op if
+   already on the target). `back()` becomes `pop the stack, or fall back
+   to Accounts if empty`; `main.rs`'s `q`/`Esc` handling simplifies to "quit
+   if on Accounts, else `app.back()`" — no per-screen match needed there
+   any more. Every existing `self.screen = X` assignment (in
+   `open_selected_account`, `open_monthly_gap`, `open_selected_month`,
+   `toggle_help`) becomes `self.navigate_to(X)`. This is what makes
+   leader-key jumps from *any* screen return correctly on `Esc` — jumping
+   `<space>g` while inside `Transactions` pushes `Transactions` onto the
+   stack, so `Esc` from `MonthlyGap` goes back there, not to a hardcoded
+   parent.
+2. **Leader key** (`main.rs`): a `pending_leader: bool` local in `run()`,
+   same pattern as the existing `pending_g` for `gg`. `<space>` sets it;
+   the next keypress dispatches `a` → `navigate_to(Accounts)`, `g` →
+   `open_monthly_gap()`, `t` → `open_monthly_transfers()` (new), anything
+   else is a no-op. Replaces the ad hoc `m` binding entirely (was
+   `Accounts`-only anyway) — top-level navigation becomes leader-key-only
+   for consistency.
+3. **Monthly Transfers screen + drill-down** — the interesting part.
+   **No new persisted ledger table.** Transfers are *not* currently stored
+   anywhere the way `spend_entries` stores spend — `derive_spend_entries`
+   only ever records a `transaction_links` row for a transfer when *both*
+   legs are tracked accounts and get matched (`find_transfer_counterpart`);
+   a one-sided transfer to an untracked household reference account (e.g.
+   Joint Annual Expense, Romina's accounts) produces no persisted record
+   at all beyond "this transaction never got a `spend_entry_sources` row" —
+   which is indistinguishable from `OutOfScope` by that signal alone. This
+   is the same underlying fact as the "Minor inefficiency noted" callout
+   under Spend Ledger Task 2 (every transfer/out-of-scope transaction is
+   still "pending" forever) — but here it's a feature, not a bug: it means
+   `Db::pending_derivation_transactions()` (`db/spend.rs`) already returns
+   exactly the right candidate set (every transfer, past and present, plus
+   out-of-scope) with **no new query needed**. Plan:
+   - New `derive::find_internal_transfers(db, household_accounts) ->
+     Vec<TransferEntry>`: reruns `classify()` (already a pure function)
+     over `pending_derivation_transactions()`, keeping only
+     `Classification::InternalTransfer` results. Read-only, no DB writes —
+     a "preview" pass, not a derivation pass. Extract the
+     household-set/household-names building logic (currently duplicated
+     between this and `derive_spend_entries`) into a shared private
+     helper to avoid copy-paste.
+   - New model structs (`model.rs`): `MonthlyTransfer { month,
+     transferred_out_minor, transferred_in_minor }` (both signed sums,
+     shown separately — not netted — specifically so the user can see
+     "£X went out, £Y came in" per month, which is the "balance it all up"
+     view that answers the original "where's the extra money coming from"
+     question) and `TransferEntry { transaction_id, account_id, posted_at,
+     amount_minor, currency, description, counterpart_sort,
+     counterpart_account }`.
+   - `App` gains `household_accounts: Vec<HouseholdAccountRef>` (loaded
+     once at `App::new`, same lifecycle as `account_names` overrides) so
+     `open_monthly_transfers()` can call `find_internal_transfers` without
+     re-reading the config file each time.
+   - `open_monthly_transfers()` computes the full `Vec<TransferEntry>`
+     once, groups it into `Vec<MonthlyTransfer>` for the top-level screen,
+     and caches the flat list on `App` so the per-month drill-down
+     (`open_selected_transfer_month`) filters in memory rather than
+     re-running `classify()` — cheap at today's transaction volumes
+     (~1-2k).
+   - Drill-down audit columns: Date, Amount, Description, source Account,
+     and a resolved "Transferred To" name — look up `counterpart_sort`/
+     `counterpart_account` against `self.accounts` first (tracked account,
+     e.g. "Adventure Fund"), then `self.household_accounts` (reference
+     account label, e.g. "Joint Annual Expense"), falling back to the raw
+     `sort account` digits if neither matches (a raw fallback here would
+     itself be a signal something's off, similar to how `"fallback"` rule
+     names flagged bad spend classifications).
+   - Deliberately **not** adding a `rule_name` to
+     `Classification::InternalTransfer` (which rule matched: prefix/
+     suffix/name) — would improve audit granularity further but touches
+     the `Classification` enum and every existing `InternalTransfer` test
+     assertion across `derive.rs`; left as a possible follow-up, not
+     needed for a first cut since the resolved counterpart name already
+     gives strong audit signal (an unresolved raw sort/account is
+     inherently suspicious).
+
 **Blockers:** None currently.
 
 **2026-07-12 — spend entry notes: schema field wired up (CLI + TUI):**
@@ -315,6 +417,8 @@ Account Number, column-width computed from the longest label).
 | [Delta: Other Transaction Import](#delta-other-transaction-import) | [1. Pension/investment statement parser](#task-1-pensioninvestment-statement-parser) | TODO |
 | [Delta: TUI Analysis Views](#delta-tui-analysis-views) | [1. Transaction list view](#task-1-transaction-list-view) | ✓ DONE |
 | | [2. Net worth / spending trend views](#task-2-net-worth--spending-trend-views) | TODO |
+| | [3. Monthly Gap screen and spend drill-down](#task-3-monthly-gap-screen-and-spend-drill-down) | IN PROGRESS |
+| | [4. Leader-key navigation and Monthly Transfers screen](#task-4-leader-key-navigation-and-monthly-transfers-screen) | TODO — designed, see What's Next |
 | [Delta: Packaging & Distribution](#delta-packaging--distribution) | [1. Publish `ledgr` to crates.io](#task-1-publish-ledgr-to-cratesio) | ✓ DONE |
 | | [2. Web frontend](#task-2-web-frontend) | TODO |
 | [Delta: Live Open Banking (Enable Banking)](#delta-live-open-banking-enable-banking) | [1. Evaluate feasibility & security model](#task-1-evaluate-feasibility--security-model) | IN PROGRESS |
@@ -1004,6 +1108,51 @@ Build out the TUI beyond the current scaffold.
   exists: `Db::balance_as_of(account_id, date)` (`src/db/balances.rs`)
   can already reconstruct balance at an arbitrary date from balance
   snapshots + transactions.
+
+### Task 3: Monthly Gap screen and spend drill-down
+- ✓ DONE (2026-07-12 session) — `Screen::MonthlyGap` (one row per month,
+  newest first, Spend column only — Income/Gap columns wait on Delta: The
+  Gap Task 1) and a per-month drill-down (`Screen::MonthSpend`, flat
+  transaction list not merchant-grouped, per the user — auditing take
+  priority over aggregation) with sticky column headers and an Account
+  column (resolved through `app.accounts`, not a raw DB join, so it
+  reuses the same user-overridden names as everywhere else). Reached via
+  `m` from Accounts today — **will move to `<space>g` under Task 4's
+  leader-key scheme**, see below.
+- ✓ DONE — real transfer-detection bug found *while using this screen*:
+  household members with no account digits in `NAME` (e.g. `"SCARAMAGLI R
+  AMAZON OASIS FT"`) were misclassified as spend — see `derive.rs`'s rule
+  1c and the **Reference Household Account** entry in
+  `doc/domain/ubiquitous-language.md`.
+- ✓ DONE — spend entry notes: `spend_entries.note` (always existed in the
+  schema, never wired up) now settable via `ledgr note <id> "<text>"`
+  (CLI) or `n` on the drill-down (TUI popup editor) — prompted by an
+  unidentifiable real merchant (`"MARTS MEHAZEPE"`) the user wanted to
+  record having checked and accepted as legitimate.
+- Full session detail: see the dated entries under "What's Next" history
+  above (2026-07-12).
+
+### Task 4: Leader-key navigation and Monthly Transfers screen
+- TODO — designed, not yet built; full design in the dated "What's Next"
+  entry above (2026-07-12, "designed (not yet built)"). Three parts, meant
+  to be built and tested one at a time: (1) replace `app.rs`'s
+  `previous_screen`/fixed-hierarchy `back()` with a real
+  `nav_stack: Vec<Screen>` + `navigate_to()`, so `Esc` always returns to
+  whatever screen was actually open before, from anywhere; (2) `<space>`
+  leader key in `main.rs` (`<space>a` Accounts, `<space>g` Monthly Gap,
+  `<space>t` Monthly Transfers), replacing the ad hoc `m` binding; (3) a
+  new Monthly Transfers screen + per-month drill-down, motivated by the
+  user noticing spend consistently exceeds income with no debt
+  accumulating — suspected (and wants to verify) that money is arriving
+  via internal transfers from the **Joint Annual Expense** reference
+  account with nowhere to see it, since there's no income ledger yet.
+  Deliberately no new persisted schema — `derive::find_internal_transfers`
+  reruns the existing pure `classify()` function over
+  `Db::pending_derivation_transactions()` (already exactly the right
+  candidate set, since transfers never get a `spend_entry_sources` row —
+  same fact as the Spend Ledger Task 2 "minor inefficiency" callout, just
+  useful here instead of wasteful) rather than adding a transfers ledger
+  table.
 
 ## Delta: Packaging & Distribution
 

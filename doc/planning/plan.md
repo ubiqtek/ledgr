@@ -2,13 +2,13 @@
 
 ## What's Next
 
-**Next:** [Delta: Reconciliation / Task 1](#task-1-design-account-level-and-household-level-reconciliation-checks) — design account-level and household-level reconciliation checks.
+**Next:** [Delta: Transfer Ledger / Task 4](#task-4-migrate-credit-card-payment-matching-into-transfer_entries-retire-legacy-transaction_links-usage) — migrate credit card payment matching into `transfer_entries` and retire the legacy `transaction_links` usage it currently relies on (new session, per the user's explicit request to defer the fix).
 **Before that:**
-1. Review and commit the uncommitted working tree (leader-key nav, Monthly Transfers v1, this session's full Transfer Ledger build).
-2. Get the user's sign-off to add "Transfer Entry"/"Transfer Ledger" to `doc/domain/ubiquitous-language.md`.
-**Sub-doc:** (none)
+1. Review and commit the uncommitted working tree (leader-key nav, Monthly Transfers v1, the full Transfer Ledger build, this session's rename/doc/critique work).
+2. Get the user's sign-off to add "Transfer Entry"/"Transfer Ledger"/"Credit Card Payment" to `doc/domain/ubiquitous-language.md` as established terms.
+**Sub-doc:** `doc/implementation-notes/transfer-ledger-critique.md`
 **Blockers:** None currently.
-**Context:** [Checkpoint: Session 2026-07-13d](#checkpoint-session-2026-07-13d).
+**Context:** [Checkpoint: Session 2026-07-13f](#checkpoint-session-2026-07-13f).
 
 ## Summary
 
@@ -31,6 +31,8 @@
 | [Delta: Transfer Ledger](#delta-transfer-ledger) | [1. Monthly Transfers screen (v1, derive-on-the-fly)](#task-1-monthly-transfers-screen-v1-derive-on-the-fly) | ✓ DONE — uncommitted, superseded by Task 2's design |
 | | [2. Design a persisted transfer ledger + ADR](#task-2-design-a-persisted-transfer-ledger--adr) | ✓ DONE |
 | | [3. Persist the ledger and migrate the screen to query it](#task-3-persist-the-ledger-and-migrate-the-screen-to-query-it) | ✓ DONE |
+| | [4. Migrate credit card payment matching into transfer_entries; retire legacy transaction_links usage](#task-4-migrate-credit-card-payment-matching-into-transfer_entries-retire-legacy-transaction_links-usage) | TODO |
+| | [5. Retire transaction_links entirely by absorbing refund links into the spend ledger](#task-5-retire-transaction_links-entirely-by-absorbing-refund-links-into-the-spend-ledger) | TODO |
 | [Delta: Reconciliation](#delta-reconciliation) | [1. Design account-level and household-level reconciliation checks](#task-1-design-account-level-and-household-level-reconciliation-checks) | TODO |
 | [Delta: The Gap](#delta-the-gap) | [1. Minimal income ledger](#task-1-minimal-income-ledger) | TODO |
 | | [2. Gap calculation](#task-2-gap-calculation) | TODO |
@@ -102,6 +104,23 @@ location for downloaded statements.
   handled the real files without needing parser fixes, despite being
   newer/less battle-tested than the GPL-licensed alternative `ofxy`
   (rejected on licensing grounds).
+- Researched (2026-07-13) whether an alternate Barclays export format
+  for the current account avoids `NAME`-field truncation (the root cause
+  of several transfer-pairing workarounds in Delta: Transfer Ledger,
+  e.g. `SHARED BILLS ACCO`). Full findings, real-data evidence, and
+  de-dup analysis in `doc/implementation-notes/optimising-import-data.md`.
+  Headline: `data.csv` and `data.qbo` add nothing over OFX (CSV shares
+  the same truncation failure mode and has no de-dup key at all; QBO is
+  literally the same OFX 1.02 payload under a different extension). The
+  current-account statement **PDF** (`Transaction.pdf`, distinct from
+  the already-built `BarclaycardPdfParser`) is a genuine lead — it keeps
+  a transfer's sort code/account number on its own line, separate from
+  the truncated label, so account numbers never get cut the way OFX's
+  `NAME` field cuts them. TODO — decide whether to build a
+  `BarclaysStatementPdfParser` for this format (sub-doc has the open
+  questions: de-dup without `FITID`, using running balance as part of
+  the de-dup key, primary-format-switch vs backfill-only).
+- Sub-doc: `doc/implementation-notes/optimising-import-data.md`
 
 ### Task 2: Import de-duplication
 - ✓ DONE — whole-file de-dup: `src/import/pipeline.rs` hashes each inbox
@@ -890,6 +909,54 @@ to Task 2 below, done step by step rather than rushed).
   formalise "Transfer Entry"/"Transfer Ledger" in
   `doc/domain/ubiquitous-language.md` (currently `candidate`, see Task
   2's open question).
+
+### Task 4: Migrate credit card payment matching into `transfer_entries`; retire legacy `transaction_links` usage
+- TODO — external review (fable-model agent, 2026-07-13, read-only, see
+  `doc/implementation-notes/transfer-ledger-critique.md`) found that
+  `Classification::CardPayment` matching (Delta: Credit Card Transaction
+  Import, Task 5) still writes to the legacy `transaction_links` table
+  (`relation='transfer'`, `confidence=0.85`) instead of to
+  `transfer_entries`, even though the project's own ubiquitous language
+  ("Internal Transfer") already defines credit card repayments as a kind
+  of internal transfer that should produce a transfer entry. Consequence:
+  credit card repayments are currently invisible on the Monthly Transfers
+  screen. Two related bugs also flagged: matched card payments are
+  re-matched on every `ledgr import` (no `transfer_entries` row excludes
+  them from `pending_derivation_transactions`), and an unmatched card
+  payment's low-confidence spend entry is never retroactively corrected
+  once the real card statement is later imported (permanent
+  double-count). New term **Credit Card Payment** recorded in
+  `doc/domain/ubiquitous-language.md` (candidate) to make this explicit
+  going forward. Deliberately not fixed this session — the user asked for
+  docs/plan only, fix deferred to a new session.
+- TODO — once the above lands, re-assess whether `transaction_links` can
+  be retired further: after migration its only remaining live writer is
+  refund linking (`LinkRelation::Refund`) — `duplicate_of`/`related` have
+  no writers at all today. Not a full kill, but a significant shrink. See
+  the critique doc for the full analysis.
+- Sub-doc: `doc/implementation-notes/transfer-ledger-critique.md`
+
+### Task 5: Retire `transaction_links` entirely by absorbing refund links into the spend ledger
+- TODO (added 2026-07-13) — once Task 4 removes the credit card payment
+  writer, `transaction_links`' only remaining live use is refund linking
+  (`LinkRelation::Refund`, written in `src/derive.rs` when a `Refund`-
+  classified transaction is matched to its original charge via
+  `Db::find_refund_original`). The user's decision: rather than leave
+  `transaction_links` alive for this one purpose, absorb the refund
+  relationship directly into `spend_entries` (e.g. a nullable
+  self-referencing column such as `refunds_spend_entry_id`, or an
+  equivalent shape — not yet designed), so a refund is a first-class
+  property of the spend ledger entry itself rather than a separate edge
+  row nothing else reads. Once done, `transaction_links` (including the
+  unused `duplicate_of`/`related` relations, which have no writers today
+  — see `doc/implementation-notes/transfer-ledger-critique.md`) can be
+  dropped from the schema entirely.
+- TODO — design the exact column/shape, decide whether `duplicate_of`/
+  `related` are worth preserving in some other form or are safe to drop
+  outright (no writer today, so likely just dead CHECK options), migrate
+  the real database, update `doc/implementation-notes/spend-ledger-design.md`
+  accordingly.
+- Sub-doc: `doc/implementation-notes/transfer-ledger-critique.md`
 
 ## Delta: Reconciliation
 
@@ -1893,6 +1960,108 @@ leader-key nav / Monthly Transfers v1 changes from prior sessions.
 
 **Immediate next priorities:** unchanged from the previous checkpoint —
 see "What's Next" at the top of this file.
+
+## Checkpoint: Session 2026-07-13e
+
+**Completed:**
+- Renamed `derive_spend_entries` to `run_derivation` throughout
+  `src/derive.rs`, `src/analysis.rs`, `src/main.rs`, `src/db/spend.rs`,
+  `src/model.rs` (function, call sites, test names, doc comments) —
+  prompted by the user questioning why transfer pairing ran "as part of
+  derive_spend_entries" when it also derives transfers/card payments.
+  `cargo build`/`test`/`clippy` clean throughout, 81 tests passing.
+- Fixed a genuinely self-contradictory paragraph in
+  `doc/implementation-notes/transfer-ledger-design.md` explaining
+  `transaction_links` vs `transfer_entries` — traced the root cause via
+  a read-only fable-model agent review (see
+  `doc/implementation-notes/transfer-ledger-critique.md`, newly written
+  up and linked from the design doc) rather than just improving the
+  prose.
+- Trimmed the design doc per the user's request: dropped the full DDL
+  block (now points at `src/db/schema.sql`), replaced it with a mermaid
+  ER diagram, and removed `transaction_links` from that diagram since
+  it isn't actually part of the transfer ledger.
+- Added **Credit Card Payment** to `doc/domain/ubiquitous-language.md`
+  (candidate) — the user asked for "card payment" to be made explicit
+  and distinguished from a card *purchase* (spend), since the informal
+  term was ambiguous between opposite ends of the household boundary.
+- Fable review's key finding: `Classification::CardPayment` should
+  already be an internal transfer by the project's own agreed
+  definition, but still writes to the legacy `transaction_links` table
+  instead of `transfer_entries` — logged as new Task 4 under Delta:
+  Transfer Ledger, deliberately **not fixed this session** (user asked
+  for docs/plan only, real fix deferred to a new session).
+- User flagged a separate, unrelated observation for later: OFX's
+  `NAME` field truncation is "super annoying" and worth checking whether
+  Barclaycard's CSV export avoids it, possibly reopening whether OFX is
+  worth keeping as the primary bank import format — logged as a TODO
+  note under Delta: Bank Transaction Import, Task 1, not investigated
+  yet.
+
+**State of the project:** Delta: Transfer Ledger's schema/pairing work
+(Tasks 1-3) is done and structurally sound; this session found and
+documented (but deliberately did not fix) a real gap where credit card
+payments don't yet participate in it. Everything remains uncommitted,
+alongside all prior uncommitted sessions' work.
+
+**Immediate next priorities:** see "What's Next" at the top of this
+file.
+
+## Checkpoint: Session 2026-07-13f
+
+**Completed:**
+- Investigated three real alternate Barclays export formats for the
+  current account against OFX's `NAME`-field truncation problem
+  (`~/Downloads/data.csv`, `Transaction.pdf`, `data.qbo` — all
+  scratch-only, never imported or committed). Full findings in new doc
+  `doc/implementation-notes/optimising-import-data.md`, linked from
+  Delta: Bank Transaction Import, Task 1.
+- **`data.csv`**: same truncation failure mode as OFX (label and account
+  number share one fixed-width field), no `FITID` equivalent, no balance
+  column — no advantage over OFX found.
+- **`data.qbo`**: confirmed to be the identical OFX 1.02 SGML payload
+  `BarclaysOfxParser` already parses (same header, same `FITID`, same
+  `NAME` field, same truncation) — not a distinct format, just a
+  different file extension. `.qbo` isn't in `src/import/pipeline.rs`'s
+  extension map today; a one-line addition if ever needed, not
+  currently required.
+- **`Transaction.pdf`** (current-account statement PDF, distinct from
+  the already-built `BarclaycardPdfParser`): a genuine lead. Its
+  transfer-type rows (`Funds Transfer`/`Standing Order`/`Direct
+  Debit`/`Bill Payment`) carry the counterpart sort code/account number
+  on its own line, separate from the truncated free-text label — so the
+  account number is never truncated, unlike OFX where label and account
+  number share one 32-char `NAME` field. This directly targets the
+  `SHARED BILLS ACCO`-style gap driving Delta: Transfer Ledger's
+  self-reference-match tier. Also has a per-transaction running balance
+  (neither OFX nor CSV provide this per-line) and a "Pending debit card
+  transactions" section with untruncated merchant descriptions and full
+  card numbers, not currently importable by anything. Has no `FITID`
+  equivalent — real-data check found a hash of `(date, amount,
+  description)` alone is unsafe as a de-dup key (two genuine same-day,
+  same-amount, same-description collisions found in 573 real
+  transactions), but the running balance disambiguates them and is
+  proposed as a required part of a synthetic de-dup key for this format.
+- Evaluated three further options surfaced via external search
+  (third-party PDF-to-CSV converters, a browser extension against a live
+  Barclays session, Open Banking) — first two rejected as inconsistent
+  with `ledgr`'s no-data-leaves-the-machine design; Open Banking is
+  already tracked separately under Delta: Live Open Banking (Enable
+  Banking) and not duplicated here.
+- Not decided: whether to actually build a `BarclaysStatementPdfParser`
+  for the current-account PDF format. Deliberately left as a TODO/open
+  question, not actioned this session.
+
+**State of the project:** unchanged from Session 2026-07-13e otherwise —
+the real fix (Delta: Transfer Ledger, Task 4: migrate credit card
+payment matching into `transfer_entries`) is still the next priority for
+a new session; this session was research-only, no code touched, no
+plan.md task marked done. The PDF-format lead is a separate, independent
+thread (Delta: Bank Transaction Import, Task 1) that can be picked up
+whenever, not a blocker for Task 4.
+
+**Immediate next priorities:** see "What's Next" at the top of this
+file.
 
 ## Implementation Notes
 

@@ -141,8 +141,9 @@ tax and pensions. Deliberately not being built yet.
 
 ### Internal Transfer — established
 
-Money moving between the user's own accounts (including credit-card
-repayments). Produces **no** spend/income entry in the **spend ledger**
+Money moving between the user's own accounts (including **credit card
+payments** — see that term for the current implementation gap). Produces
+**no** spend/income entry in the **spend ledger**
 (excluded from spending per the Rebel Finance method), but does produce
 a **transfer entry** in the **transfer ledger** — a different ledger
 from spend/income, tracking money movement *within* the household rather
@@ -150,6 +151,30 @@ than crossing its boundary. (Until 2026-07-13, internal transfers were
 recorded only as a `transaction_links` pairing with no dedicated ledger;
 see Delta: Transfer Ledger.) *Origin: Rebel Finance ("transfers between
 your own accounts"), confirmed by the user.*
+
+### Credit Card Payment — candidate
+
+A specific case of **internal transfer**: money moving from a household
+current/savings account to pay down a household credit card account.
+Named explicitly as "Credit Card Payment" rather than the bare "Card
+Payment" used informally in code and earlier docs (`Classification::CardPayment`
+in `src/derive.rs`, rule names `card_payment`/`card_payment_unmatched`),
+because "card payment" alone is ambiguous with a card *purchase*
+(spend) — the two are opposite ends of the household boundary (a
+purchase is spend; a repayment is internal money movement) and sharing
+one loose name for both risks conflating them. Recognised by matching a
+credit-card statement's payment line to its counterpart debit on a bank
+account (date + exact amount, ±3 days) — see
+`doc/implementation-notes/transfer-ledger-design.md`. As of 2026-07-13
+this matching is implemented against the older `transaction_links` edge
+table (`relation='transfer'`, `confidence=0.85`), not the newer
+**transfer entry**/**transfer ledger** machinery that now covers other
+internal transfers — flagged as a known gap, not yet resolved, since by
+this term's own definition a credit card payment is an internal
+transfer and should produce a transfer entry like any other.
+*Origin: the user, 2026-07-13, requesting the "card payment" term used
+informally in code/docs be made explicit and distinguished from a card
+purchase; naming not yet formally confirmed.*
 
 ### Household — established
 

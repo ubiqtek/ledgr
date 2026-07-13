@@ -8,6 +8,10 @@ transfer") — see [transfer-ledger-history.md](transfer-ledger-history.md).
 Companion ADR:
 [0009 — Persisted ledgers, built at import, queried never re-derived](../adr/0009-persisted-ledgers-built-at-import.md).
 Grounding detail: [Transfer Detection — Technical Notes](../developer-docs/transfer-detection.md).
+Known design gap (credit card payments still using the legacy
+`transaction_links` mechanism instead of `transfer_entries`, and whether
+`transaction_links` can be retired once fixed): [Transfer Ledger /
+`transaction_links` — Critique](transfer-ledger-critique.md).
 
 ## Summary
 
@@ -37,24 +41,22 @@ Grounding detail: [Transfer Detection — Technical Notes](../developer-docs/tra
   one-sided entries** into one, which is what actually happens when
   neither leg was fresh in the run that finally pairs them (e.g. a
   pairing tier added after both legs already existed, unpaired).
-- `transaction_links` is a separate, older, generic edge table (`from_transaction_id`/`to_transaction_id`/`relation`/`confidence`) that links
-  two transactions for several unrelated reasons — `relation` is one of
-  `transfer`, `refund`, `duplicate_of`, or `related`. Before this delta,
-  a `relation='transfer'` row was how *both* transfer-pairing and
-  card-payment matching recorded a link, which is what made the two
-  mechanisms hard to tell apart. This delta only retires **one** of
-  those two writers: the old transfer-pairing mechanism
-  (`find_transfer_counterpart`, which wrote `relation='transfer'` rows at
-  `confidence=0.9`) is superseded by `transfer_entries` and derivation no
-  longer writes that row. The **other** writer of `relation='transfer'`
-  rows — `Classification::CardPayment` matching a credit-card payment to
-  its bank-side debit (Delta: Credit Card Transaction Import, Task 5),
-  which writes at `confidence=0.85` — is untouched by this delta and
-  still runs. So `transaction_links` rows with `relation='transfer'`
-  still exist after this delta; the `confidence` value, not the
-  `relation` value, is what tells the two apart. `transaction_links` also
-  still carries all `refund`/`duplicate_of`/`related` rows unchanged, as
-  before.
+- `transaction_links` (see `src/db/schema.sql` for the exact DDL) is a
+  separate, older, generic edge table linking two transactions for
+  several unrelated reasons (`relation` — `transfer`/`refund`/
+  `duplicate_of`/`related`). It is **not** part of the transfer ledger —
+  the only reason it comes up here at all is a known, unresolved gap: a
+  **credit card payment** (see that term in `ubiquitous-language.md`) is,
+  by definition, a kind of internal transfer, but its matching code
+  (`Classification::CardPayment`) still writes to `transaction_links`
+  (`relation='transfer'`, `confidence=0.85`) instead of to
+  `transfer_entries` like every other internal transfer does. So a
+  household's credit card repayments currently do **not** appear in the
+  transfer ledger or the Monthly Transfers screen. Flagged as a follow-up
+  (not yet actioned), not a design feature of this table — full analysis,
+  including why `transaction_links` can't simply be deleted once this is
+  fixed (refund linking is a second, independent live writer), in
+  [transfer-ledger-critique.md](transfer-ledger-critique.md).
 
 ## Schema at a glance
 
@@ -63,7 +65,6 @@ erDiagram
     accounts ||--o{ transactions : "holds"
     transactions ||--o| transfer_entries : "out_transaction_id"
     transactions ||--o| transfer_entries : "in_transaction_id"
-    transactions ||--o{ transaction_links : "from / to"
     transactions ||--o{ spend_entry_sources : "source"
     spend_entries ||--o{ spend_entry_sources : "derived from"
 
@@ -72,122 +73,16 @@ erDiagram
         int in_transaction_id "nullable, the other leg"
         text pair_method "how the two legs were matched"
     }
-    transaction_links {
-        int from_transaction_id
-        int to_transaction_id
-        text relation "transfer(0.9,retired) / transfer(0.85,card payment) / refund / duplicate_of / related"
-    }
     spend_entries {
         int id
         text classified_by
     }
 ```
 
-`transfer_entries` and `transaction_links` are two separate tables that
-both connect pairs of transactions, for different purposes — see the
-Summary above for how the overlapping `relation='transfer'` case is told
-apart by `confidence`, not by which table it's in.
-
-## Schema (full DDL)
-
-```sql
--- Derived transfer ledger — one transfer entry (row) per real-world
--- transfer, linking the two transactions that are its legs directly.
--- Mirrors spend_entries' provenance idiom, but unlike a spend entry
--- (which can have many transaction sources), a transfer entry has at
--- most two: the leg where money left an account (out_*) and the leg
--- where it arrived (in_*). Either side is NULL until its transaction is
--- known — classify() only ever sees one raw transaction at a time, so a
--- transfer entry is always created one-sided and then completed (by an
--- UPDATE) once the other leg is found.
-CREATE TABLE IF NOT EXISTS transfer_entries (
-    id                  INTEGER PRIMARY KEY,
-    occurred_on         TEXT NOT NULL,
-    -- Unsigned magnitude — direction is structural (out_* vs in_*), not
-    -- a sign convention, unlike transactions.amount_minor.
-    amount_minor        INTEGER NOT NULL CHECK (amount_minor >= 0),
-    currency            TEXT NOT NULL,
-
-    -- The leg where money left an account. UNIQUE so re-running
-    -- derivation over an already-recorded leg is a no-op.
-    -- out_account_id/out_sort_code/out_account_number are set as soon as
-    -- *either* leg is known: definitively (the real account, via
-    -- out_transaction_id) once that leg's own transaction is found; as a
-    -- prediction (this leg's own NAME decode of who should receive it)
-    -- before then — the prediction can be wrong (see pair_method =
-    -- 'self_reference_match'), which is exactly the signal used to tell
-    -- tiers apart once the real transaction is found.
-    -- out_sort_code/out_account_number (raw decoded digits) stay
-    -- populated even after confirmation, so a counterpart that's a
-    -- Reference Household Account (no accounts.id — ADR 0008) or an
-    -- unregistered named individual can still be displayed without a
-    -- transaction ever landing on this side.
-    out_transaction_id  INTEGER UNIQUE REFERENCES transactions(id) ON DELETE CASCADE,
-    out_account_id      INTEGER REFERENCES accounts(id) ON DELETE SET NULL,
-    out_sort_code       TEXT,
-    out_account_number  TEXT,
-    out_description     TEXT,
-
-    -- The leg where money arrived. Same shape/rules as out_*, mirrored.
-    in_transaction_id   INTEGER UNIQUE REFERENCES transactions(id) ON DELETE CASCADE,
-    in_account_id       INTEGER REFERENCES accounts(id) ON DELETE SET NULL,
-    in_sort_code        TEXT,
-    in_account_number   TEXT,
-    in_description      TEXT,
-
-    -- How the *pairing* (finding the second leg) was made — NULL until
-    -- both legs are known.
-    pair_method         TEXT CHECK (pair_method IN (
-                            'description_match',    -- one leg's own NAME
-                                                     -- cross-references
-                                                     -- the other's
-                                                     -- account (manual
-                                                     -- transfers)
-                            'amount_date_match',     -- both legs' own
-                                                     -- NAME decodes
-                                                     -- correctly
-                                                     -- identify each
-                                                     -- other (automated
-                                                     -- transfers, mutual
-                                                     -- agreement)
-                            'self_reference_match'   -- one leg's own
-                                                     -- NAME decodes to
-                                                     -- *itself* rather
-                                                     -- than the true
-                                                     -- sender; the other
-                                                     -- leg's correct
-                                                     -- decode plus
-                                                     -- amount+date is
-                                                     -- the whole signal
-                                                     -- (e.g. the real
-                                                     -- SHARED BILLS ACCO
-                                                     -- standing order)
-                         )),
-    pair_confidence     REAL,
-
-    -- Classification provenance for "this is certainly an internal
-    -- transfer" — from whichever leg's classify() result created this
-    -- row. Deterministic (household-registry match), so confidence is
-    -- high/near-1.0 for every rule that reaches InternalTransfer today;
-    -- kept as a real column so manual correction has a place to record
-    -- classified_by = 'manual', per the same manual-always-wins
-    -- convention as spend_entries.
-    classified_by       TEXT NOT NULL CHECK (classified_by IN
-                            ('rule', 'matcher', 'manual')),
-    confidence           REAL,
-    rule_name            TEXT,
-    classified_at        TEXT NOT NULL,
-
-    CHECK (out_transaction_id IS NOT NULL OR in_transaction_id IS NOT NULL)
-);
-
-CREATE INDEX IF NOT EXISTS idx_transfer_entries_occurred_on
-    ON transfer_entries(occurred_on);
-CREATE INDEX IF NOT EXISTS idx_transfer_entries_out_account
-    ON transfer_entries(out_account_id);
-CREATE INDEX IF NOT EXISTS idx_transfer_entries_in_account
-    ON transfer_entries(in_account_id);
-```
+`transaction_links` is deliberately left off this diagram — it's not
+part of the transfer ledger's design, only tangled up with it via the
+credit-card-payment gap noted above. See `src/db/schema.sql` for the
+full DDL of every table, including `transfer_entries`.
 
 A fully paired transfer is **one** row, both `out_*` and `in_*` filled. A
 transfer to/from a Reference Household Account, or to/from an
@@ -207,15 +102,15 @@ one side (there is no second transaction to ever record) — not a
 - `spend_entries` already established the convention of a derived ledger
   row per classified item, with its own provenance shape, separate from
   the generic `transaction_links` edge table (which remains in use for
-  the genuinely edge-like `refund`/`duplicate_of`/`related` relations, and
-  for `Classification::CardPayment` pairing).
+  the genuinely edge-like `refund`/`duplicate_of`/`related` relations, and,
+  for now, **credit card payment** matching — see the gap noted above).
 
 ## Pairing algorithm
 
 Runs as part of `run_derivation` (`src/derive.rs`), in two stages. There
 is no separate `derive_transfer_entries` function: `run_derivation` makes
 one `classify()` call per transaction, and the result — spend entry,
-transfer leg, card payment, or out-of-scope — is a single decision, not
+transfer leg, credit card payment, or out-of-scope — is a single decision, not
 independent passes over the same data, so transfer pairing is a branch
 inside this one function rather than a second derivation pass.
 

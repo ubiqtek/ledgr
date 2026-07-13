@@ -1,8 +1,7 @@
 use crate::config::{Config, HouseholdAccountRef};
 use crate::db::{AccountStatus, Db};
-use crate::derive;
 use crate::model::{
-    MonthlySpend, MonthlyTransfer, SpendEntryWithAccount, Transaction, TransferEntry,
+    Id, MonthlySpend, MonthlyTransfer, SpendEntryWithAccount, Transaction, TransferEntry,
 };
 use ratatui::widgets::TableState;
 
@@ -45,14 +44,10 @@ pub struct App {
     /// `open_monthly_transfers` doesn't need to re-read the config file on
     /// every call.
     pub household_accounts: Vec<HouseholdAccountRef>,
-    /// The full flat list behind the Monthly Transfers screen, cached here
-    /// so a future per-month drill-down can filter it in memory rather than
-    /// re-running `derive::find_internal_transfers`.
-    pub transfer_entries: Vec<TransferEntry>,
     pub monthly_transfers: Vec<MonthlyTransfer>,
     pub selected_transfer_month: usize,
     pub monthly_transfers_table_state: TableState,
-    /// The selected month's transfer entries, filtered in memory from
+    /// The selected month's transfer entries, queried directly from
     /// `transfer_entries` by `open_selected_transfer_month` — the per-month
     /// audit drill-down for the Monthly Transfers screen.
     pub transfer_month_entries: Vec<TransferEntry>,
@@ -105,7 +100,6 @@ impl App {
             selected_spend_entry: 0,
             month_spend_table_state: TableState::default(),
             household_accounts: config.household_accounts,
-            transfer_entries: Vec::new(),
             monthly_transfers: Vec::new(),
             selected_transfer_month: 0,
             monthly_transfers_table_state: TableState::default(),
@@ -147,44 +141,38 @@ impl App {
         Ok(())
     }
 
-    /// Opens the Monthly Transfers audit screen: re-derives the full set of
-    /// internal transfers (`derive::find_internal_transfers` — read-only, no
-    /// DB writes), caches the flat list on `self.transfer_entries` for a
-    /// future per-month drill-down to filter in memory, and groups it into
-    /// `self.monthly_transfers` for display.
+    /// Opens the Monthly Transfers audit screen: queries the persisted
+    /// transfer ledger's monthly aggregates directly (`Db::monthly_transfer_totals`)
+    /// — no live re-derivation, per ADR 0009.
     pub fn open_monthly_transfers(&mut self) -> anyhow::Result<()> {
-        self.transfer_entries =
-            derive::find_internal_transfers(&self.db, &self.household_accounts)?;
-        self.monthly_transfers = group_monthly_transfers(&self.transfer_entries);
+        self.monthly_transfers = self.db.monthly_transfer_totals()?;
         self.selected_transfer_month = 0;
         self.navigate_to(Screen::MonthlyTransfers);
         Ok(())
     }
 
     /// Opens the per-month audit drill-down for the Monthly Transfers
-    /// screen: filters the already-cached `self.transfer_entries` down to
-    /// the selected month, in memory — no DB access or re-derivation, that's
-    /// the whole point of caching the flat list in `open_monthly_transfers`.
+    /// screen: queries `transfer_entries` directly for the selected month
+    /// (`Db::transfer_entries_for_month`) — no in-memory filtering of a
+    /// cached full list, and no live re-derivation.
     pub fn open_selected_transfer_month(&mut self) -> anyhow::Result<()> {
         let Some(month) = self.monthly_transfers.get(self.selected_transfer_month) else {
             return Ok(());
         };
-        self.transfer_month_entries = self
-            .transfer_entries
-            .iter()
-            .filter(|entry| entry.posted_at.get(..7) == Some(month.month.as_str()))
-            .cloned()
-            .collect();
+        self.transfer_month_entries = self.db.transfer_entries_for_month(&month.month)?;
         self.selected_transfer_entry = 0;
         self.navigate_to(Screen::TransferMonth);
         Ok(())
     }
 
     /// Opens the "both legs of this transfer" popup for the selected entry
-    /// on `Screen::TransferMonth`. The counterpart leg isn't cached anywhere
-    /// (`find_internal_transfers` only ever sees one side), so this looks it
-    /// up on demand via the same `find_transfer_counterpart` query
-    /// derivation uses — read-only, no DB writes.
+    /// on `Screen::TransferMonth`. Both legs already live directly on the
+    /// selected entry's `transfer_entries` row (`out_*`/`in_*`), so this is
+    /// just reading it — a foreign-key follow via `Db::get_transaction`,
+    /// not a live re-derivation. The outgoing side is shown as "own"
+    /// (matching the drill-down's canonical row), falling back to the
+    /// incoming side only for the rare row where the outgoing leg's
+    /// transaction hasn't been found at all yet.
     pub fn show_transfer_detail(&mut self) -> anyhow::Result<()> {
         if self.screen != Screen::TransferMonth {
             return Ok(());
@@ -195,44 +183,63 @@ impl App {
         else {
             return Ok(());
         };
-        let Some(own) = self.db.get_transaction(entry.transaction_id)? else {
+
+        let (
+            own_transaction_id,
+            own_account_id,
+            own_sort,
+            own_account,
+            counterpart_transaction_id,
+            counterpart_account_id,
+            counterpart_sort,
+            counterpart_account,
+        ) = if entry.out_transaction_id.is_some() {
+            (
+                entry.out_transaction_id,
+                entry.out_account_id,
+                entry.out_sort.as_deref(),
+                entry.out_account.as_deref(),
+                entry.in_transaction_id,
+                entry.in_account_id,
+                entry.in_sort.as_deref(),
+                entry.in_account.as_deref(),
+            )
+        } else {
+            (
+                entry.in_transaction_id,
+                entry.in_account_id,
+                entry.in_sort.as_deref(),
+                entry.in_account.as_deref(),
+                entry.out_transaction_id,
+                entry.out_account_id,
+                entry.out_sort.as_deref(),
+                entry.out_account.as_deref(),
+            )
+        };
+
+        let Some(own_transaction_id) = own_transaction_id else {
             return Ok(());
         };
-        let own_account = self
-            .accounts
-            .iter()
-            .find(|s| s.account.id == entry.account_id);
-        let own_account_name = own_account
-            .map(|s| s.account.name.clone())
-            .unwrap_or_else(|| "?".to_string());
-
-        let counterpart = match (
-            own_account.and_then(|s| s.account.sort_code.as_deref()),
-            own_account.and_then(|s| s.account.account_number.as_deref()),
-            entry.counterpart_sort.as_deref(),
-            entry.counterpart_account.as_deref(),
-        ) {
-            (
-                Some(own_sort),
-                Some(own_number),
-                Some(counterpart_sort),
-                Some(counterpart_number),
-            ) => self
-                .db
-                .find_transfer_counterpart(
-                    entry.transaction_id,
-                    own_sort,
-                    own_number,
-                    counterpart_sort,
-                    counterpart_number,
-                    entry.amount_minor,
-                    &entry.posted_at,
-                )?
-                .and_then(|id| self.db.get_transaction(id).ok().flatten()),
-            _ => None,
+        let Some(own) = self.db.get_transaction(own_transaction_id)? else {
+            return Ok(());
         };
-        let counterpart_label =
-            resolve_counterparty(entry, &self.accounts, &self.household_accounts);
+        let own_account_name = resolve_transfer_leg_name(
+            own_account_id,
+            own_sort,
+            own_account,
+            &self.accounts,
+            &self.household_accounts,
+        );
+
+        let counterpart = counterpart_transaction_id
+            .and_then(|id| self.db.get_transaction(id).ok().flatten());
+        let counterpart_label = resolve_transfer_leg_name(
+            counterpart_account_id,
+            counterpart_sort,
+            counterpart_account,
+            &self.accounts,
+            &self.household_accounts,
+        );
 
         self.transfer_detail = Some(TransferDetail {
             own,
@@ -427,24 +434,30 @@ impl App {
                 let entry = self
                     .transfer_month_entries
                     .get(self.selected_transfer_entry)?;
-                let account_name = self
-                    .accounts
-                    .iter()
-                    .find(|s| s.account.id == entry.account_id)
-                    .map(|s| s.account.name.as_str())
-                    .unwrap_or("?");
-                let counterparty =
-                    resolve_counterparty(entry, &self.accounts, &self.household_accounts);
-                let (from, to) = if entry.amount_minor < 0 {
-                    (account_name.to_string(), counterparty)
-                } else {
-                    (counterparty, account_name.to_string())
-                };
+                let from = resolve_transfer_leg_name(
+                    entry.out_account_id,
+                    entry.out_sort.as_deref(),
+                    entry.out_account.as_deref(),
+                    &self.accounts,
+                    &self.household_accounts,
+                );
+                let to = resolve_transfer_leg_name(
+                    entry.in_account_id,
+                    entry.in_sort.as_deref(),
+                    entry.in_account.as_deref(),
+                    &self.accounts,
+                    &self.household_accounts,
+                );
+                let description = entry
+                    .out_description
+                    .as_deref()
+                    .or(entry.in_description.as_deref())
+                    .unwrap_or("");
                 Some(format!(
                     "{}\t{}\t{}\t{}\t{}",
-                    entry.posted_at,
-                    crate::format_amount_minor(entry.amount_minor.abs(), &entry.currency),
-                    entry.description,
+                    entry.occurred_on,
+                    crate::format_amount_minor(entry.amount_minor, &entry.currency),
+                    description,
                     from,
                     to
                 ))
@@ -481,43 +494,36 @@ impl App {
     }
 }
 
-/// Resolves a transfer entry's counterpart to a display name for the
-/// per-month audit drill-down: a tracked account first (e.g. "Adventure
-/// Fund"), then a reference household account (e.g. "Joint Annual
-/// Expense"), falling back to the raw sort code/account number digits if
-/// neither matches — that fallback is itself a signal something's off,
-/// similar in spirit to how a `"fallback"` rule name flags a low-confidence
-/// spend classification elsewhere, so it's shown plainly rather than hidden.
-pub(crate) fn resolve_counterparty(
-    entry: &TransferEntry,
+/// Resolves one side (out or in) of a transfer entry to a display name: a
+/// tracked account first (e.g. "Adventure Fund", when `account_id` is
+/// resolved — always true once that side's transaction is known), then a
+/// reference household account (e.g. "Joint Annual Expense", matched by the
+/// raw decoded digits), falling back to the raw sort code/account number
+/// digits if neither matches — that fallback is itself a signal something's
+/// off, similar in spirit to how a `"fallback"` rule name flags a
+/// low-confidence spend classification elsewhere, so it's shown plainly
+/// rather than hidden.
+pub(crate) fn resolve_transfer_leg_name(
+    account_id: Option<Id>,
+    sort: Option<&str>,
+    account_number: Option<&str>,
     accounts: &[AccountStatus],
     household_accounts: &[HouseholdAccountRef],
 ) -> String {
-    let (Some(sort), Some(account_number)) = (&entry.counterpart_sort, &entry.counterpart_account)
-    else {
+    if let Some(id) = account_id {
+        if let Some(status) = accounts.iter().find(|s| s.account.id == id) {
+            return status.account.name.clone();
+        }
+    }
+
+    let (Some(sort), Some(account_number)) = (sort, account_number) else {
         return "?".to_string();
     };
 
-    // Barclays truncates the account-number digits when a long label pushes
-    // the NAME field past its length limit (e.g. "SHARED BILLS ACCO 208794
-    // 231650", the real account being `...23165086`) — `account_number` may
-    // therefore be a prefix rather than the full number. Matched the same
-    // way `derive::household_contains` matches it for classification, so
-    // this resolves to the same account classification already settled on.
-    if let Some(status) = accounts.iter().find(|s| {
-        s.account.sort_code.as_deref() == Some(sort.as_str())
-            && s
-                .account
-                .account_number
-                .as_deref()
-                .is_some_and(|full| full.starts_with(account_number.as_str()))
-    }) {
-        return status.account.name.clone();
-    }
-
-    if let Some(household) = household_accounts.iter().find(|h| {
-        &h.sort_code == sort && h.account_number.starts_with(account_number.as_str())
-    }) {
+    if let Some(household) = household_accounts
+        .iter()
+        .find(|h| h.sort_code == sort && h.account_number.starts_with(account_number))
+    {
         return household
             .label
             .clone()
@@ -527,88 +533,20 @@ pub(crate) fn resolve_counterparty(
     format!("{sort} {account_number}")
 }
 
-/// Groups transfer entries into per-month totals for the Monthly Transfers
-/// screen, newest month first (same ordering convention as
-/// `Db::monthly_spend_totals`). Out and in are kept separate — not netted —
-/// per `MonthlyTransfer`'s doc comment.
-fn group_monthly_transfers(entries: &[TransferEntry]) -> Vec<MonthlyTransfer> {
-    let mut totals: std::collections::BTreeMap<String, (i64, i64)> =
-        std::collections::BTreeMap::new();
-    for entry in entries {
-        let month = entry.posted_at.get(..7).unwrap_or(&entry.posted_at);
-        let (out, inn) = totals.entry(month.to_string()).or_default();
-        if entry.amount_minor < 0 {
-            *out += entry.amount_minor;
-        } else {
-            *inn += entry.amount_minor;
-        }
-    }
-    totals
-        .into_iter()
-        .rev()
-        .map(
-            |(month, (transferred_out_minor, transferred_in_minor))| MonthlyTransfer {
-                month,
-                transferred_out_minor,
-                transferred_in_minor,
-            },
-        )
-        .collect()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn entry(posted_at: &str, amount_minor: i64) -> TransferEntry {
-        TransferEntry {
-            transaction_id: 1,
-            account_id: 1,
-            posted_at: posted_at.into(),
-            amount_minor,
-            currency: "GBP".into(),
-            description: "TEST".into(),
-            counterpart_sort: None,
-            counterpart_account: None,
-        }
-    }
-
-    #[test]
-    fn group_monthly_transfers_keeps_in_and_out_separate_newest_month_first() {
-        let entries = vec![
-            entry("2026-06-05", -12000),
-            entry("2026-06-10", 5000),
-            entry("2026-07-01", 3000),
-        ];
-
-        let months = group_monthly_transfers(&entries);
-
-        assert_eq!(months.len(), 2);
-        assert_eq!(months[0].month, "2026-07");
-        assert_eq!(months[0].transferred_out_minor, 0);
-        assert_eq!(months[0].transferred_in_minor, 3000);
-        assert_eq!(months[1].month, "2026-06");
-        assert_eq!(months[1].transferred_out_minor, -12000);
-        assert_eq!(months[1].transferred_in_minor, 5000);
-    }
-
-    fn transfer_entry_to(sort: &str, account_number: &str) -> TransferEntry {
-        let mut e = entry("2026-07-01", -1000);
-        e.counterpart_sort = Some(sort.into());
-        e.counterpart_account = Some(account_number.into());
-        e
-    }
-
-    fn account_status(name: &str, sort: &str, account_number: &str) -> AccountStatus {
+    fn account_status(id: Id, name: &str) -> AccountStatus {
         AccountStatus {
             account: crate::model::Account {
-                id: 1,
+                id,
                 name: name.into(),
                 institution: None,
                 account_type: crate::model::AccountType::Savings,
                 currency: "GBP".into(),
-                sort_code: Some(sort.into()),
-                account_number: Some(account_number.into()),
+                sort_code: None,
+                account_number: None,
             },
             transaction_count: 0,
             balance_minor: None,
@@ -630,37 +568,47 @@ mod tests {
     }
 
     #[test]
-    fn resolve_counterparty_matches_tracked_account_first() {
-        let entry = transfer_entry_to("209912", "12345678");
-        let accounts = vec![account_status("Adventure Fund", "209912", "12345678")];
+    fn resolve_transfer_leg_name_matches_tracked_account_by_id() {
+        let accounts = vec![account_status(4, "Adventure Fund")];
         let household = vec![household_ref("209912", "12345678", "Should not be used")];
 
         assert_eq!(
-            resolve_counterparty(&entry, &accounts, &household),
+            resolve_transfer_leg_name(Some(4), None, None, &accounts, &household),
             "Adventure Fund"
         );
     }
 
     #[test]
-    fn resolve_counterparty_falls_back_to_household_reference_account() {
-        let entry = transfer_entry_to("609934", "99998888");
-        let accounts = vec![account_status("Current Account", "111111", "22222222")];
+    fn resolve_transfer_leg_name_falls_back_to_household_reference_account() {
+        let accounts = vec![account_status(1, "Current Account")];
         let household = vec![household_ref("609934", "99998888", "Joint Annual Expense")];
 
         assert_eq!(
-            resolve_counterparty(&entry, &accounts, &household),
+            resolve_transfer_leg_name(None, Some("609934"), Some("99998888"), &accounts, &household),
             "Joint Annual Expense"
         );
     }
 
     #[test]
-    fn resolve_counterparty_falls_back_to_raw_digits_when_unresolved() {
-        let entry = transfer_entry_to("609934", "99998888");
-        let accounts = vec![account_status("Current Account", "111111", "22222222")];
+    fn resolve_transfer_leg_name_matches_a_truncated_household_account_number() {
+        // Barclays truncates the account-number digits when a long label
+        // pushes the NAME field past its length limit — the stored digits
+        // may be a prefix of the real account number.
+        let household = vec![household_ref("208794", "23165086", "Bills Account")];
+
+        assert_eq!(
+            resolve_transfer_leg_name(None, Some("208794"), Some("231650"), &[], &household),
+            "Bills Account"
+        );
+    }
+
+    #[test]
+    fn resolve_transfer_leg_name_falls_back_to_raw_digits_when_unresolved() {
+        let accounts = vec![account_status(1, "Current Account")];
         let household = vec![household_ref("111111", "22222222", "Unrelated")];
 
         assert_eq!(
-            resolve_counterparty(&entry, &accounts, &household),
+            resolve_transfer_leg_name(None, Some("609934"), Some("99998888"), &accounts, &household),
             "609934 99998888"
         );
     }

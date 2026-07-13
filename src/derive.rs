@@ -1,6 +1,7 @@
 //! Spend ledger derivation pass — turns raw transactions into
-//! `spend_entries`, or (for internal transfers) `transaction_links`, per
-//! doc/implementation-notes/spend-ledger-design.md.
+//! `spend_entries`, or (for internal transfers) `transfer_entries`, per
+//! doc/implementation-notes/spend-ledger-design.md and
+//! doc/implementation-notes/transfer-ledger-design.md.
 //!
 //! Deliberately scoped to what the design doc's derivation rules table
 //! covers for data ledgr can actually import today (Barclays OFX): rules
@@ -11,7 +12,10 @@
 
 use crate::config::HouseholdAccountRef;
 use crate::db::Db;
-use crate::model::{Account, ClassifiedBy, LinkRelation, NewSpendEntry, TransferEntry};
+use crate::model::{
+    Account, ClassifiedBy, LinkRelation, NewSpendEntry, NewTransferLeg, TransferLegRole,
+    TransferPairMethod,
+};
 use std::collections::HashSet;
 
 #[derive(Debug, Default, PartialEq, Eq)]
@@ -21,7 +25,30 @@ pub struct DerivationSummary {
     pub transfers_paired: usize,
     pub out_of_scope: usize,
     pub card_payments_matched: usize,
+    /// Pairings completed this run where at least one leg was already
+    /// persisted from an earlier run — either a genuinely new leg
+    /// completing an old one (see
+    /// doc/implementation-notes/transfer-ledger-design.md, "Pairing can
+    /// complete retroactively"), or two already-persisted legs that only
+    /// became pairable once a new pairing tier was added (e.g. tier 3's
+    /// rollout, which paired legs neither newly imported nor newly
+    /// classified this run). A subset of `transfers_paired`, not an
+    /// addition to it.
+    pub transfers_backfilled: usize,
 }
+
+/// Confidence assigned to a tier-3 (`SelfReferenceMatch`) transfer pairing.
+/// Deliberately below tier 2's `AmountDateMatch` (0.75): tier 2 at least
+/// gets a mutual cross-check (both legs' own `NAME` decodes agree with each
+/// other), whereas tier 3 has no cross-check from the candidate's own decode
+/// at all — self-reference plus an exact amount+date match is the entire
+/// signal. Still a judgement call, like tier 2's 0.75 was (see the design
+/// doc's open questions) — chosen to sit clearly below tier 2 without
+/// dropping into the same range as the low-confidence spend fallbacks
+/// (0.4-0.6) that flag something as actually uncertain, since the
+/// *classification* here (this leg is an internal transfer) is still
+/// deterministic; only the *pairing* is weaker.
+const SELF_REFERENCE_MATCH_CONFIDENCE: f64 = 0.6;
 
 /// Runs the derivation pass over every raw transaction not yet linked to a
 /// spend entry. `extra_household_accounts` are known-but-not-imported
@@ -30,7 +57,7 @@ pub struct DerivationSummary {
 /// An entry with a `name` set is also matched against person-to-person
 /// `NAME` fields that carry no account digits at all (see
 /// `matches_household_member_name`).
-pub fn derive_spend_entries(
+pub fn run_derivation(
     db: &Db,
     extra_household_accounts: &[HouseholdAccountRef],
 ) -> anyhow::Result<DerivationSummary> {
@@ -38,16 +65,18 @@ pub fn derive_spend_entries(
     let (household, household_names) = build_household(&accounts, extra_household_accounts);
 
     let mut summary = DerivationSummary::default();
-    #[allow(clippy::type_complexity)]
-    let mut transfer_candidates: Vec<(
-        crate::model::Id,
-        String,
-        String,
-        String,
-        String,
-        i64,
-        String,
-    )> = Vec::new();
+    // Transaction ids given a `transfer_entries` row *this run*, via any
+    // path (a fresh leg recorded standalone, one completing an existing
+    // row, or one directly paired with a counterpart found by tier 1) —
+    // used to decide whether a pairing counts as `transfers_backfilled`
+    // (only when the OTHER side predates this exact operation) and to
+    // guard against reprocessing a transaction later in this same
+    // iteration (`pending_derivation_transactions` is a fixed snapshot
+    // taken once at the top of this loop, so a transaction whose row gets
+    // created mid-loop — e.g. as the counterpart tier 1 finds for an
+    // *earlier* transaction in this same snapshot — can still appear later
+    // in the very same iteration).
+    let mut this_run_ids: HashSet<crate::model::Id> = HashSet::new();
     let mut card_payment_candidates: Vec<crate::model::Transaction> = Vec::new();
 
     for txn in db.pending_derivation_transactions()? {
@@ -67,18 +96,140 @@ pub fn derive_spend_entries(
                 counterpart_account,
             } => {
                 summary.transfers_detected += 1;
-                if let (Some(own_sort), Some(own_account)) =
-                    (&account.sort_code, &account.account_number)
-                {
-                    transfer_candidates.push((
-                        txn.id,
-                        own_sort.clone(),
-                        own_account.clone(),
-                        counterpart_sort,
-                        counterpart_account,
-                        txn.amount_minor,
-                        txn.posted_at.clone(),
-                    ));
+                // Already given a row this run — either this transaction
+                // itself was processed earlier in this same snapshot, or it
+                // was consumed as another leg's tier-1 counterpart. Still
+                // worth counting as `transfers_detected` above (classify()
+                // legitimately recognised it as an internal transfer), just
+                // not worth recording/pairing again.
+                if this_run_ids.contains(&txn.id) {
+                    continue;
+                }
+                if account.sort_code.is_some() && account.account_number.is_some() {
+                    this_run_ids.insert(txn.id);
+                    // Truncation-tolerant match, same rule as
+                    // `household_contains`, so this resolves to the same
+                    // account classification already settled on.
+                    let counterpart_account_id = accounts
+                        .iter()
+                        .find(|a| {
+                            a.sort_code.as_deref() == Some(counterpart_sort.as_str())
+                                && a.account_number
+                                    .as_deref()
+                                    .is_some_and(|full| full.starts_with(&counterpart_account))
+                        })
+                        .map(|a| a.id);
+                    let role = if txn.amount_minor < 0 {
+                        TransferLegRole::Out
+                    } else {
+                        TransferLegRole::In
+                    };
+                    let leg = NewTransferLeg {
+                        transaction_id: txn.id,
+                        account_id: account.id,
+                        role,
+                        occurred_on: txn.posted_at.clone(),
+                        amount_minor: txn.amount_minor.abs(),
+                        currency: txn.currency.clone(),
+                        description: txn.description.clone(),
+                        counterpart_sort_code: counterpart_sort.clone(),
+                        counterpart_account_number: counterpart_account.clone(),
+                        counterpart_account_id,
+                        classified_by: ClassifiedBy::Rule,
+                        confidence: Some(1.0),
+                        rule_name: Some("household_transfer".to_string()),
+                    };
+
+                    // Tier 1: description cross-reference against raw
+                    // transactions (manual transfers) — works regardless of
+                    // whether the counterpart has itself been classified
+                    // yet, since it searches `transactions` directly, not
+                    // `transfer_entries`.
+                    let tier1 = match counterpart_account_id {
+                        Some(_) => db.find_transfer_counterpart(
+                            txn.id,
+                            account.sort_code.as_deref().unwrap(),
+                            account.account_number.as_deref().unwrap(),
+                            &counterpart_sort,
+                            &counterpart_account,
+                            txn.amount_minor,
+                            &txn.posted_at,
+                        )?,
+                        None => None,
+                    };
+
+                    if let Some(counterpart_transaction_id) = tier1 {
+                        let counterpart_predates_this_run =
+                            !this_run_ids.contains(&counterpart_transaction_id);
+                        if let Some(existing_row) =
+                            db.transfer_row_for_transaction(counterpart_transaction_id)?
+                        {
+                            db.complete_transfer_leg(
+                                existing_row,
+                                &leg,
+                                TransferPairMethod::DescriptionMatch,
+                                0.9,
+                            )?;
+                            summary.transfers_paired += 1;
+                            if counterpart_predates_this_run {
+                                summary.transfers_backfilled += 1;
+                            }
+                        } else if let Some(counterpart) =
+                            db.get_transaction(counterpart_transaction_id)?
+                        {
+                            db.create_paired_transfer(
+                                &leg,
+                                &counterpart,
+                                TransferPairMethod::DescriptionMatch,
+                                0.9,
+                            )?;
+                            summary.transfers_paired += 1;
+                        }
+                        this_run_ids.insert(counterpart_transaction_id);
+                        continue;
+                    }
+
+                    // Tiers 2/3: search open (one-sided) transfer entries —
+                    // see the design doc's "Pairing algorithm". `role` here
+                    // is the slot *this* leg fills (i.e. the open row's
+                    // missing side). Both tiers share one query
+                    // (`find_open_transfer_candidate`); the returned
+                    // prediction (what the open row's known leg itself
+                    // decoded as *its* counterpart) decides which tier
+                    // actually fired.
+                    if let Some(counterpart_account_id) = counterpart_account_id {
+                        if let Some((row_id, known_transaction_id, predicted)) =
+                            db.find_open_transfer_candidate(
+                                role,
+                                counterpart_account_id,
+                                leg.amount_minor,
+                                &txn.posted_at,
+                            )?
+                        {
+                            let pair_method = if predicted == Some(account.id) {
+                                Some((TransferPairMethod::AmountDateMatch, 0.75))
+                            } else if predicted == Some(counterpart_account_id) {
+                                Some((
+                                    TransferPairMethod::SelfReferenceMatch,
+                                    SELF_REFERENCE_MATCH_CONFIDENCE,
+                                ))
+                            } else {
+                                None
+                            };
+                            if let Some((pair_method, pair_confidence)) = pair_method {
+                                db.complete_transfer_leg(row_id, &leg, pair_method, pair_confidence)?;
+                                summary.transfers_paired += 1;
+                                if !this_run_ids.contains(&known_transaction_id) {
+                                    summary.transfers_backfilled += 1;
+                                }
+                                this_run_ids.insert(known_transaction_id);
+                                continue;
+                            }
+                        }
+                    }
+
+                    // No match at any tier: record this leg alone.
+                    db.insert_transfer_leg(&leg)?;
                 }
             }
             Classification::CardPayment => {
@@ -149,38 +300,111 @@ pub fn derive_spend_entries(
         }
     }
 
-    // Both legs of a transfer show up as their own candidate (each side's
-    // NAME points at the other), so a naive pass would record the pairing
-    // twice, once per direction — track which transactions are already
-    // paired within this run to record each transfer once.
-    let mut already_paired = std::collections::HashSet::new();
-    for (
-        from_id,
-        own_sort,
-        own_account,
-        counterpart_sort,
-        counterpart_account,
-        amount_minor,
-        posted_at,
-    ) in transfer_candidates
-    {
-        if already_paired.contains(&from_id) {
+    // Re-pairing sweep: re-attempts pairing for every currently open
+    // (one-sided) transfer entry, independent of whether a new transaction
+    // arrived this run. A row can become pairable purely because *another*
+    // already-open row's own decode correctly names it — no new
+    // transaction needs to arrive to trigger that (e.g. two legs
+    // persisted, unpaired, by an earlier run, before a pairing tier that
+    // could match them existed at all). See the design doc's "Pairing
+    // algorithm". Symmetric to the inline tiers 2/3 above, just searching
+    // among persisted open rows on both sides instead of a fresh leg
+    // against persisted rows.
+    let open_entries = db.open_transfer_entries()?;
+    let open_by_id: std::collections::HashMap<crate::model::Id, &crate::model::OpenTransferEntry> =
+        open_entries.iter().map(|o| (o.id, o)).collect();
+    let mut swept: HashSet<crate::model::Id> = HashSet::new();
+    for open in &open_entries {
+        if swept.contains(&open.id) {
             continue;
         }
-        if let Some(to_id) = db.find_transfer_counterpart(
-            from_id,
-            &own_sort,
-            &own_account,
-            &counterpart_sort,
-            &counterpart_account,
-            amount_minor,
-            &posted_at,
-        )? {
-            db.insert_transaction_link(from_id, to_id, LinkRelation::Transfer, Some(0.9))?;
-            already_paired.insert(from_id);
-            already_paired.insert(to_id);
-            summary.transfers_paired += 1;
+        // `known_role`/`known_account_id`: the side `open` already has.
+        // `predicted_account_id`: `open`'s own decoded guess for its
+        // missing side — used as the search key, exactly like a fresh
+        // leg's own decode is in the inline tiers above.
+        let (known_role, known_account_id, predicted_account_id) = if open.out_transaction_id.is_some() {
+            (TransferLegRole::Out, open.out_account_id, open.in_account_id)
+        } else {
+            (TransferLegRole::In, open.in_account_id, open.out_account_id)
+        };
+        let (Some(known_account_id), Some(predicted_account_id)) =
+            (known_account_id, predicted_account_id)
+        else {
+            continue;
+        };
+        let Some((other_id, other_known_transaction_id, other_predicted)) = db
+            .find_open_transfer_candidate(known_role, predicted_account_id, open.amount_minor, &open.occurred_on)?
+        else {
+            continue;
+        };
+        if other_id == open.id || swept.contains(&other_id) {
+            continue;
         }
+        let Some(other) = open_by_id.get(&other_id) else {
+            continue;
+        };
+        // Tier determination mirrors the inline case: does the *other*
+        // row's own decode correctly name `open` (mutual, tier 2) or does
+        // it self-reference (tier 3)? `other`'s own known account is
+        // `predicted_account_id` by construction (that's what we searched
+        // by), so no extra lookup is needed to check the self-reference
+        // case.
+        let pair_method = if other_predicted == Some(known_account_id) {
+            Some((TransferPairMethod::AmountDateMatch, 0.75))
+        } else if other_predicted == Some(predicted_account_id) {
+            Some((
+                TransferPairMethod::SelfReferenceMatch,
+                SELF_REFERENCE_MATCH_CONFIDENCE,
+            ))
+        } else {
+            None
+        };
+        let Some((pair_method, pair_confidence)) = pair_method else {
+            continue;
+        };
+
+        // `other`'s known side is the leg that completes `open`; only the
+        // fields `complete_transfer_leg` actually reads (transaction id,
+        // account, description, occurred_on, role) matter here.
+        let other_role = if other.out_transaction_id.is_some() {
+            TransferLegRole::Out
+        } else {
+            TransferLegRole::In
+        };
+        let other_description = if other_role == TransferLegRole::Out {
+            other.out_description.clone()
+        } else {
+            other.in_description.clone()
+        }
+        .unwrap_or_default();
+        let leg = NewTransferLeg {
+            transaction_id: other_known_transaction_id,
+            account_id: predicted_account_id,
+            role: other_role,
+            occurred_on: other.occurred_on.clone(),
+            amount_minor: other.amount_minor,
+            currency: other.currency.clone(),
+            description: other_description,
+            counterpart_sort_code: String::new(),
+            counterpart_account_number: String::new(),
+            counterpart_account_id: None,
+            classified_by: ClassifiedBy::Rule,
+            confidence: None,
+            rule_name: None,
+        };
+        // Delete `other` first: `in_transaction_id`/`out_transaction_id`
+        // are each UNIQUE across the table, so completing `open` with a
+        // transaction id `other` still holds would momentarily violate
+        // that constraint if done the other way round.
+        db.delete_transfer_entry(other.id)?;
+        db.complete_transfer_leg(open.id, &leg, pair_method, pair_confidence)?;
+        swept.insert(open.id);
+        swept.insert(other.id);
+        summary.transfers_paired += 1;
+        // Both sides necessarily predate this exact pairing operation —
+        // both were already fully-persisted open rows before the sweep
+        // began, so this is always a backfill.
+        summary.transfers_backfilled += 1;
     }
 
     // A card-payment reference alone isn't a reliable match (see
@@ -221,8 +445,7 @@ pub fn derive_spend_entries(
 
 /// Builds the household lookups `classify` needs from every imported
 /// account's own sort code/account number plus any `extra_household_accounts`
-/// (e.g. a partner's, never imported) — shared by `derive_spend_entries` and
-/// `find_internal_transfers` so the two don't drift.
+/// (e.g. a partner's, never imported).
 #[allow(clippy::type_complexity)]
 fn build_household<'a>(
     accounts: &[Account],
@@ -250,51 +473,6 @@ fn build_household<'a>(
     (household, household_names)
 }
 
-/// Re-runs `classify` over every transaction not yet linked to a spend entry
-/// (`Db::pending_derivation_transactions`, the same candidate set
-/// `derive_spend_entries` starts from — see its doc comment), keeping only
-/// those recognised as `Classification::InternalTransfer`. Read-only preview
-/// pass for the Monthly Transfers audit screen — never writes to the
-/// database, unlike `derive_spend_entries`.
-pub fn find_internal_transfers(
-    db: &Db,
-    household_accounts: &[HouseholdAccountRef],
-) -> anyhow::Result<Vec<TransferEntry>> {
-    let accounts = db.list_accounts()?;
-    let (household, household_names) = build_household(&accounts, household_accounts);
-
-    let mut entries = Vec::new();
-    for txn in db.pending_derivation_transactions()? {
-        let Some(account) = accounts.iter().find(|a| a.id == txn.account_id) else {
-            continue;
-        };
-
-        if let Classification::InternalTransfer {
-            counterpart_sort,
-            counterpart_account,
-        } = classify(
-            &txn.description,
-            txn.trn_type.as_deref(),
-            txn.amount_minor,
-            &household,
-            &household_names,
-        ) {
-            entries.push(TransferEntry {
-                transaction_id: txn.id,
-                account_id: account.id,
-                posted_at: txn.posted_at.clone(),
-                amount_minor: txn.amount_minor,
-                currency: txn.currency.clone(),
-                description: txn.description.clone(),
-                counterpart_sort: Some(counterpart_sort),
-                counterpart_account: Some(counterpart_account),
-            });
-        }
-    }
-
-    Ok(entries)
-}
-
 #[derive(Debug, PartialEq)]
 enum Classification {
     InternalTransfer {
@@ -307,7 +485,7 @@ enum Classification {
     /// doc/kb/barclaycard/pdf-export-structure.md). The truncated PAN alone
     /// isn't a reliable matching key (it's missing digits and isn't stable
     /// across a reissue), so this is provisional pending a date+amount
-    /// match against the credit card account in `derive_spend_entries`.
+    /// match against the credit card account in `run_derivation`.
     CardPayment,
     Spend {
         counterparty: Option<String>,
@@ -481,19 +659,41 @@ fn parse_account_prefix(description: &str) -> Option<(&str, &str, &str)> {
 }
 
 /// Recognises Barclays' other `NAME` shape for a transfer: a human label
-/// followed by `<sort code> <account no>` at the *end* of the description
-/// (e.g. `"ADVENTURE FUND 208794 33893693"`), rather than at the start. The
-/// account number is sometimes truncated to 6 digits when the label pushes
-/// the whole `NAME` field past Barclays' length limit (e.g.
+/// followed by `<sort code> <account no>` at (or very near) the *end* of the
+/// description (e.g. `"ADVENTURE FUND 208794 33893693"`), rather than at the
+/// start. The account number is sometimes truncated to 6 digits when the
+/// label pushes the whole `NAME` field past Barclays' length limit (e.g.
 /// `"SHARED BILLS ACCO 208794 231650"` — real account is `...23165086`, cut
 /// to `231650`) — `household_contains` handles matching a truncated account
-/// number against the full one on file. Returns `(sort_code, account_no)`,
-/// which may itself be truncated.
+/// number against the full one on file. A short marker word (e.g. `"STO"`)
+/// can also follow the account number — real data confirmed this despite
+/// earlier assuming automated transfers never carry one (see
+/// doc/developer-docs/transfer-detection.md, "The missing STO marker"),
+/// tolerated the same way the leading-prefix rule already tolerates
+/// trailing text via its `rest` return value. Returns `(sort_code,
+/// account_no)`, which may itself be truncated.
 fn parse_trailing_account_suffix(description: &str) -> Option<(&str, &str)> {
     let tokens: Vec<&str> = description.split_whitespace().collect();
-    let account = *tokens.last()?;
-    let sort = *tokens.get(tokens.len().checked_sub(2)?)?;
+    if let Some(pair) = trailing_account_pair(&tokens) {
+        return Some(pair);
+    }
+
+    let (&marker, rest) = tokens.split_last()?;
+    let is_short_marker =
+        (1..=4).contains(&marker.len()) && marker.bytes().all(|b| b.is_ascii_alphabetic());
+    if is_short_marker {
+        return trailing_account_pair(rest);
+    }
+    None
+}
+
+/// The last two tokens of `tokens`, if they form a `<sort code> <account
+/// no>` pair — the shared check behind `parse_trailing_account_suffix`'s two
+/// attempts (with, and without, a trailing marker word).
+fn trailing_account_pair<'a>(tokens: &[&'a str]) -> Option<(&'a str, &'a str)> {
     let is_digits = |s: &str| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit());
+    let &account = tokens.last()?;
+    let &sort = tokens.get(tokens.len().checked_sub(2)?)?;
     if sort.len() == 6 && is_digits(sort) && (6..=8).contains(&account.len()) && is_digits(account)
     {
         Some((sort, account))
@@ -732,6 +932,31 @@ mod tests {
         );
     }
 
+    /// Real data (found during the transfer ledger migration) contradicted
+    /// doc/developer-docs/transfer-detection.md's "missing STO marker"
+    /// note: an automated transfer's trailing shape *can* carry a marker
+    /// word after the account number — `parse_trailing_account_suffix` must
+    /// tolerate it, or the receiving leg of every SHARED BILLS ACCO standing
+    /// order (this exact real shape) never classifies as a transfer at all.
+    #[test]
+    fn classifies_a_trailing_account_transfer_with_a_marker_word_after_the_account_number() {
+        let household = household_of(&[("208794", "23165086")]);
+        let result = classify(
+            "BARRITT J 208794 23165086 STO",
+            Some("OTHER"),
+            341500,
+            &household,
+            &[],
+        );
+        assert_eq!(
+            result,
+            Classification::InternalTransfer {
+                counterpart_sort: "208794".into(),
+                counterpart_account: "23165086".into(),
+            }
+        );
+    }
+
     #[test]
     fn classifies_a_payment_to_an_unknown_account_as_low_confidence_spend() {
         let household = HashSet::new();
@@ -860,7 +1085,7 @@ mod tests {
     }
 
     #[test]
-    fn derive_spend_entries_creates_a_spend_entry_for_a_card_payment() {
+    fn run_derivation_creates_a_spend_entry_for_a_card_payment() {
         let db = Db::open_in_memory().expect("open db");
         let account_id = db
             .insert_account(&NewAccount {
@@ -886,7 +1111,7 @@ mod tests {
         })
         .expect("insert transaction");
 
-        let summary = derive_spend_entries(&db, &[]).expect("derive");
+        let summary = run_derivation(&db, &[]).expect("derive");
         assert_eq!(
             summary,
             DerivationSummary {
@@ -895,12 +1120,13 @@ mod tests {
                 transfers_paired: 0,
                 out_of_scope: 0,
                 card_payments_matched: 0,
+                transfers_backfilled: 0,
             }
         );
     }
 
     #[test]
-    fn derive_spend_entries_is_idempotent() {
+    fn run_derivation_is_idempotent() {
         let db = Db::open_in_memory().expect("open db");
         let account_id = db
             .insert_account(&NewAccount {
@@ -926,8 +1152,8 @@ mod tests {
         })
         .expect("insert transaction");
 
-        derive_spend_entries(&db, &[]).expect("first derive");
-        let second = derive_spend_entries(&db, &[]).expect("second derive");
+        run_derivation(&db, &[]).expect("first derive");
+        let second = run_derivation(&db, &[]).expect("second derive");
         assert_eq!(
             second.spend_entries_created, 0,
             "must not double-derive an already-linked transaction"
@@ -935,7 +1161,7 @@ mod tests {
     }
 
     #[test]
-    fn derive_spend_entries_pairs_both_legs_of_a_real_transfer() {
+    fn run_derivation_pairs_both_legs_of_a_real_transfer() {
         let db = Db::open_in_memory().expect("open db");
         let bills_account = db
             .insert_account(&NewAccount {
@@ -985,7 +1211,7 @@ mod tests {
         })
         .expect("insert spending-side transaction");
 
-        let summary = derive_spend_entries(&db, &[]).expect("derive");
+        let summary = run_derivation(&db, &[]).expect("derive");
         assert_eq!(
             summary.spend_entries_created, 0,
             "internal transfers must not become spend"
@@ -998,10 +1224,25 @@ mod tests {
             summary.transfers_paired, 1,
             "exactly one pairing across the two legs"
         );
+
+        // The per-month drill-down shows one row per transfer, not one per
+        // leg: the schema itself guarantees this now — a paired transfer is
+        // one `transfer_entries` row with both `out_*`/`in_*` sides filled
+        // in, not two separate rows — see `Db::transfer_entries_for_month`.
+        let month_rows = db
+            .transfer_entries_for_month("2026-07")
+            .expect("query month");
+        assert_eq!(
+            month_rows.len(),
+            1,
+            "a paired transfer must show as a single row, not one per leg"
+        );
+        assert_eq!(month_rows[0].out_account_id, Some(bills_account));
+        assert_eq!(month_rows[0].amount_minor, 8900);
     }
 
     #[test]
-    fn derive_spend_entries_recognises_a_configured_partner_account_as_household() {
+    fn run_derivation_recognises_a_configured_partner_account_as_household() {
         let db = Db::open_in_memory().expect("open db");
         let account_id = db
             .insert_account(&NewAccount {
@@ -1033,7 +1274,7 @@ mod tests {
             label: Some("Partner".into()),
             name: None,
         };
-        let summary = derive_spend_entries(&db, &[partner]).expect("derive");
+        let summary = run_derivation(&db, &[partner]).expect("derive");
         assert_eq!(summary.spend_entries_created, 0);
         assert_eq!(summary.transfers_detected, 1);
     }
@@ -1112,7 +1353,7 @@ mod tests {
     }
 
     #[test]
-    fn derive_spend_entries_pairs_a_card_payment_with_its_credit_card_counterpart() {
+    fn run_derivation_pairs_a_card_payment_with_its_credit_card_counterpart() {
         let db = Db::open_in_memory().expect("open db");
         let current_account = db
             .insert_account(&NewAccount {
@@ -1162,7 +1403,7 @@ mod tests {
         })
         .expect("insert card-side payment");
 
-        let summary = derive_spend_entries(&db, &[]).expect("derive");
+        let summary = run_derivation(&db, &[]).expect("derive");
         assert_eq!(
             summary.card_payments_matched, 1,
             "the two legs should be matched by date+amount"
@@ -1174,7 +1415,7 @@ mod tests {
     }
 
     #[test]
-    fn derive_spend_entries_records_an_unmatched_card_payment_as_low_confidence_spend() {
+    fn run_derivation_records_an_unmatched_card_payment_as_low_confidence_spend() {
         let db = Db::open_in_memory().expect("open db");
         let current_account = db
             .insert_account(&NewAccount {
@@ -1201,7 +1442,7 @@ mod tests {
         })
         .expect("insert bank-side payment");
 
-        let summary = derive_spend_entries(&db, &[]).expect("derive");
+        let summary = run_derivation(&db, &[]).expect("derive");
         assert_eq!(summary.card_payments_matched, 0);
         assert_eq!(
             summary.spend_entries_created, 1,
@@ -1209,8 +1450,15 @@ mod tests {
         );
     }
 
+    /// The real gap this delta exists to close: a standing order between two
+    /// household accounts where the receiving leg's trailing-suffix `NAME`
+    /// shape (a label first, then sort/account) never starts with the
+    /// origin's own prefix — so the description cross-reference (tier 1)
+    /// can never match it, even though both sides still independently
+    /// classify the other as their household counterpart, which the
+    /// amount+date fallback (tier 2) uses to close the pair.
     #[test]
-    fn find_internal_transfers_returns_only_transfers_not_spend_or_out_of_scope() {
+    fn run_derivation_pairs_an_automated_transfer_via_amount_date_fallback() {
         let db = Db::open_in_memory().expect("open db");
         let bills_account = db
             .insert_account(&NewAccount {
@@ -1222,77 +1470,359 @@ mod tests {
                 account_number: Some("12345678".into()),
             })
             .expect("insert bills account");
+        let spending_account = db
+            .insert_account(&NewAccount {
+                name: "Jims Premier Account".into(),
+                institution: Some("Barclays".into()),
+                account_type: AccountType::Current,
+                currency: "GBP".into(),
+                sort_code: Some("209934".into()),
+                account_number: Some("87654321".into()),
+            })
+            .expect("insert spending account");
 
-        // An internal transfer to a household reference account (never
-        // imported, so only reachable via the config-supplied
-        // household_accounts list, mirroring a real Reference Household
-        // Account like Joint Annual Expense).
-        db.insert_transaction(&NewTransaction {
-            account_id: bills_account,
-            import_id: None,
-            posted_at: "2026-06-05".into(),
-            amount_minor: -12000,
-            currency: "GBP".into(),
-            description: "609934 99998888 JOINT EXPENSE FT".into(),
-            raw_description: None,
-            trn_type: Some("OTHER".into()),
-            external_id: None,
-            notes: None,
-        })
-        .expect("insert transfer transaction");
+        let origin_id = db
+            .insert_transaction(&NewTransaction {
+                account_id: spending_account,
+                import_id: None,
+                posted_at: "2026-07-01".into(),
+                amount_minor: -3000000,
+                currency: "GBP".into(),
+                description: "209912 12345678 STO".into(),
+                raw_description: None,
+                trn_type: Some("REPEATPMT".into()),
+                external_id: None,
+                notes: None,
+            })
+            .expect("insert origin leg")
+            .expect("origin leg inserted");
 
-        // Ordinary spend — must not appear in the transfers result.
-        db.insert_transaction(&NewTransaction {
-            account_id: bills_account,
-            import_id: None,
-            posted_at: "2026-06-06".into(),
-            amount_minor: -2599,
-            currency: "GBP".into(),
-            description: "TESCO STORES ON 06 JUN CPM".into(),
-            raw_description: None,
-            trn_type: Some("OTHER".into()),
-            external_id: None,
-            notes: None,
-        })
-        .expect("insert spend transaction");
+        // The receiving leg's own NAME is the "label first, sort/account
+        // last" trailing shape (see doc/developer-docs/transfer-detection.md)
+        // — it doesn't *start with* the origin's prefix, so the description
+        // cross-reference query can never match it, even though it does
+        // correctly decode the origin as its own household counterpart.
+        let receiving_id = db
+            .insert_transaction(&NewTransaction {
+                account_id: bills_account,
+                import_id: None,
+                posted_at: "2026-07-01".into(),
+                amount_minor: 3000000,
+                currency: "GBP".into(),
+                description: "SHARED BILLS ACCO 209934 87654321".into(),
+                raw_description: None,
+                trn_type: Some("OTHER".into()),
+                external_id: None,
+                notes: None,
+            })
+            .expect("insert receiving leg")
+            .expect("receiving leg inserted");
 
-        // Out of scope (salary) — must not appear in the transfers result.
-        db.insert_transaction(&NewTransaction {
-            account_id: bills_account,
-            import_id: None,
-            posted_at: "2026-06-07".into(),
-            amount_minor: 200000,
-            currency: "GBP".into(),
-            description: "SALARY".into(),
-            raw_description: None,
-            trn_type: Some("DIRECTDEP".into()),
-            external_id: None,
-            notes: None,
-        })
-        .expect("insert out-of-scope transaction");
-
-        let household = HouseholdAccountRef {
-            sort_code: "609934".into(),
-            account_number: "99998888".into(),
-            label: Some("Joint Annual Expense".into()),
-            name: None,
-        };
-        let transfers = find_internal_transfers(&db, &[household]).expect("find transfers");
-
-        assert_eq!(transfers.len(), 1, "only the transfer should be returned");
-        assert_eq!(transfers[0].description, "609934 99998888 JOINT EXPENSE FT");
-        assert_eq!(transfers[0].amount_minor, -12000);
-        assert_eq!(transfers[0].counterpart_sort.as_deref(), Some("609934"));
+        let summary = run_derivation(&db, &[]).expect("derive");
+        assert_eq!(summary.spend_entries_created, 0);
+        assert_eq!(summary.transfers_detected, 2);
+        assert_eq!(summary.transfers_paired, 1);
         assert_eq!(
-            transfers[0].counterpart_account.as_deref(),
-            Some("99998888")
+            summary.transfers_backfilled, 0,
+            "both legs land in the same run, so nothing is retroactive"
         );
 
-        // Read-only — must not write any spend entries or transaction links.
+        let origin_counterpart = db
+            .get_transfer_counterpart_transaction_id(origin_id)
+            .expect("query counterpart")
+            .expect("origin leg paired");
+        assert_eq!(origin_counterpart, receiving_id);
+        let receiving_counterpart = db
+            .get_transfer_counterpart_transaction_id(receiving_id)
+            .expect("query counterpart")
+            .expect("receiving leg paired");
+        assert_eq!(receiving_counterpart, origin_id);
+    }
+
+    /// The real gap tier 2 alone can't close: the receiving leg's `NAME`
+    /// decodes to its *own* account rather than the sender's (the real
+    /// SHARED BILLS ACCO shape — `"BARRITT J 208794 23165086 STO"` on the
+    /// Bills Account's own transaction). Tier 2's mutual-agreement check
+    /// requires the candidate's own decode to point back at the origin,
+    /// which can never hold here, so tier 3 (self-reference + amount+date)
+    /// is what has to pair it.
+    #[test]
+    fn run_derivation_pairs_a_self_referencing_automated_transfer_via_tier_3() {
+        let db = Db::open_in_memory().expect("open db");
+        let bills_account = db
+            .insert_account(&NewAccount {
+                name: "Bills Account".into(),
+                institution: Some("Barclays".into()),
+                account_type: AccountType::Current,
+                currency: "GBP".into(),
+                sort_code: Some("208794".into()),
+                account_number: Some("23165086".into()),
+            })
+            .expect("insert bills account");
+        let spending_account = db
+            .insert_account(&NewAccount {
+                name: "Jims Premier Account".into(),
+                institution: Some("Barclays".into()),
+                account_type: AccountType::Current,
+                currency: "GBP".into(),
+                sort_code: Some("209934".into()),
+                account_number: Some("87654321".into()),
+            })
+            .expect("insert spending account");
+
+        let origin_id = db
+            .insert_transaction(&NewTransaction {
+                account_id: spending_account,
+                import_id: None,
+                posted_at: "2026-07-01".into(),
+                amount_minor: -3415000,
+                currency: "GBP".into(),
+                description: "SHARED BILLS ACCO 208794 23165086".into(),
+                raw_description: None,
+                trn_type: Some("REPEATPMT".into()),
+                external_id: None,
+                notes: None,
+            })
+            .expect("insert origin leg")
+            .expect("origin leg inserted");
+
+        // The receiving leg's own NAME decodes to its *own* sort/account
+        // (208794 23165086 = the Bills Account itself), not the sender's —
+        // tier 2's mutual check can never hold for this leg.
+        let receiving_id = db
+            .insert_transaction(&NewTransaction {
+                account_id: bills_account,
+                import_id: None,
+                posted_at: "2026-07-01".into(),
+                amount_minor: 3415000,
+                currency: "GBP".into(),
+                description: "BARRITT J 208794 23165086 STO".into(),
+                raw_description: None,
+                trn_type: Some("OTHER".into()),
+                external_id: None,
+                notes: None,
+            })
+            .expect("insert receiving leg")
+            .expect("receiving leg inserted");
+
+        let summary = run_derivation(&db, &[]).expect("derive");
+        assert_eq!(summary.spend_entries_created, 0);
+        assert_eq!(summary.transfers_detected, 2);
+        assert_eq!(summary.transfers_paired, 1);
+
+        let origin_counterpart = db
+            .get_transfer_counterpart_transaction_id(origin_id)
+            .expect("query counterpart")
+            .expect("origin leg paired");
+        assert_eq!(origin_counterpart, receiving_id);
+        let receiving_counterpart = db
+            .get_transfer_counterpart_transaction_id(receiving_id)
+            .expect("query counterpart")
+            .expect("receiving leg paired");
+        assert_eq!(receiving_counterpart, origin_id);
+    }
+
+    /// The exact real bug found migrating tier 3 onto the real database:
+    /// two legs that were *both* already persisted, unpaired, from a run
+    /// before a new pairing tier existed — neither is a "newly imported"
+    /// leg, so nothing would ever re-trigger pairing for them if the
+    /// pairing loop only looked at this run's freshly-classified
+    /// candidates. `run_derivation` must re-attempt pairing over
+    /// every currently-unpaired `transfer_entries` row on every run, not
+    /// just ones tied to a transaction processed this run.
+    #[test]
+    fn run_derivation_pairs_two_already_persisted_unpaired_legs_on_a_later_run() {
+        let db = Db::open_in_memory().expect("open db");
+        let bills_account = db
+            .insert_account(&NewAccount {
+                name: "Bills Account".into(),
+                institution: Some("Barclays".into()),
+                account_type: AccountType::Current,
+                currency: "GBP".into(),
+                sort_code: Some("208794".into()),
+                account_number: Some("23165086".into()),
+            })
+            .expect("insert bills account");
+        let spending_account = db
+            .insert_account(&NewAccount {
+                name: "Jims Premier Account".into(),
+                institution: Some("Barclays".into()),
+                account_type: AccountType::Current,
+                currency: "GBP".into(),
+                sort_code: Some("209934".into()),
+                account_number: Some("87654321".into()),
+            })
+            .expect("insert spending account");
+
+        let origin_id = db
+            .insert_transaction(&NewTransaction {
+                account_id: spending_account,
+                import_id: None,
+                posted_at: "2026-07-01".into(),
+                amount_minor: -3415000,
+                currency: "GBP".into(),
+                description: "SHARED BILLS ACCO 208794 23165086".into(),
+                raw_description: None,
+                trn_type: Some("REPEATPMT".into()),
+                external_id: None,
+                notes: None,
+            })
+            .expect("insert origin leg")
+            .expect("origin leg inserted");
+        let receiving_id = db
+            .insert_transaction(&NewTransaction {
+                account_id: bills_account,
+                import_id: None,
+                posted_at: "2026-07-01".into(),
+                amount_minor: 3415000,
+                currency: "GBP".into(),
+                description: "BARRITT J 208794 23165086 STO".into(),
+                raw_description: None,
+                trn_type: Some("OTHER".into()),
+                external_id: None,
+                notes: None,
+            })
+            .expect("insert receiving leg")
+            .expect("receiving leg inserted");
+
+        // Simulates both legs already having been recorded, unpaired, by a
+        // run that predates tier 3 — bypasses `classify()`/derivation
+        // entirely and writes the rows directly, the same shape the real
+        // pre-tier-3 database was actually found in: one row per leg, each
+        // missing the other side, the origin's own decode correctly
+        // predicting Bills Account, the receiving leg's own decode
+        // self-referencing (predicting itself).
+        db.conn()
+            .execute(
+                "INSERT INTO transfer_entries
+                    (occurred_on, amount_minor, currency,
+                     out_transaction_id, out_account_id, out_description,
+                     in_account_id,
+                     classified_by, confidence, rule_name, classified_at)
+                 VALUES
+                    ('2026-07-01', 3415000, 'GBP',
+                     ?1, ?2, 'SHARED BILLS ACCO 208794 23165086',
+                     ?3,
+                     'rule', 1.0, 'household_transfer', '2026-07-01T00:00:00.000Z')",
+                rusqlite::params![origin_id, spending_account, bills_account],
+            )
+            .expect("seed origin leg's transfer_entries row directly");
+        db.conn()
+            .execute(
+                "INSERT INTO transfer_entries
+                    (occurred_on, amount_minor, currency,
+                     in_transaction_id, in_account_id, in_description,
+                     out_account_id,
+                     classified_by, confidence, rule_name, classified_at)
+                 VALUES
+                    ('2026-07-01', 3415000, 'GBP',
+                     ?1, ?2, 'BARRITT J 208794 23165086 STO',
+                     ?2,
+                     'rule', 1.0, 'household_transfer', '2026-07-01T00:00:00.000Z')",
+                rusqlite::params![receiving_id, bills_account],
+            )
+            .expect("seed receiving leg's transfer_entries row directly");
+
+        // Neither transaction is "pending" any more (both already have a
+        // transfer_entries row), so this run detects nothing new — the
+        // pairing must still happen by re-scanning persisted unpaired rows.
+        let summary = run_derivation(&db, &[]).expect("derive");
+        assert_eq!(summary.transfers_detected, 0);
+        assert_eq!(summary.transfers_paired, 1);
         assert_eq!(
-            db.list_spend_entries().expect("list spend entries").len(),
-            0,
-            "find_internal_transfers is a preview pass and must not derive spend"
+            summary.transfers_backfilled, 1,
+            "both legs predate this run, so this is a backfill"
         );
+
+        let origin_counterpart = db
+            .get_transfer_counterpart_transaction_id(origin_id)
+            .expect("query counterpart")
+            .expect("origin leg paired");
+        assert_eq!(origin_counterpart, receiving_id);
+    }
+
+    /// A leg imported before its counterpart (cross-file import timing) must
+    /// be recorded immediately, unpaired, and then have its pairing fields
+    /// backfilled once the counterpart is imported and derivation runs
+    /// again — not just get a fresh, separately-unpaired row for the new leg.
+    #[test]
+    fn run_derivation_backfills_an_earlier_unpaired_leg_retroactively() {
+        let db = Db::open_in_memory().expect("open db");
+        let bills_account = db
+            .insert_account(&NewAccount {
+                name: "Bills Account".into(),
+                institution: Some("Barclays".into()),
+                account_type: AccountType::Current,
+                currency: "GBP".into(),
+                sort_code: Some("209912".into()),
+                account_number: Some("12345678".into()),
+            })
+            .expect("insert bills account");
+        let spending_account = db
+            .insert_account(&NewAccount {
+                name: "Jims Premier Account".into(),
+                institution: Some("Barclays".into()),
+                account_type: AccountType::Current,
+                currency: "GBP".into(),
+                sort_code: Some("209934".into()),
+                account_number: Some("87654321".into()),
+            })
+            .expect("insert spending account");
+
+        let origin_id = db
+            .insert_transaction(&NewTransaction {
+                account_id: spending_account,
+                import_id: None,
+                posted_at: "2026-07-01".into(),
+                amount_minor: -3000000,
+                currency: "GBP".into(),
+                description: "209912 12345678 STO".into(),
+                raw_description: None,
+                trn_type: Some("REPEATPMT".into()),
+                external_id: None,
+                notes: None,
+            })
+            .expect("insert origin leg")
+            .expect("origin leg inserted");
+
+        // First run: only the origin leg exists — recorded unpaired.
+        let first = run_derivation(&db, &[]).expect("first derive");
+        assert_eq!(first.transfers_detected, 1);
+        assert_eq!(first.transfers_paired, 0);
+        assert!(db
+            .get_transfer_counterpart_transaction_id(origin_id)
+            .expect("query counterpart")
+            .is_none());
+
+        // The receiving leg lands in a later import.
+        let receiving_id = db
+            .insert_transaction(&NewTransaction {
+                account_id: bills_account,
+                import_id: None,
+                posted_at: "2026-07-01".into(),
+                amount_minor: 3000000,
+                currency: "GBP".into(),
+                description: "SHARED BILLS ACCO 209934 87654321".into(),
+                raw_description: None,
+                trn_type: Some("OTHER".into()),
+                external_id: None,
+                notes: None,
+            })
+            .expect("insert receiving leg")
+            .expect("receiving leg inserted");
+
+        let second = run_derivation(&db, &[]).expect("second derive");
+        assert_eq!(second.transfers_detected, 1, "only the new leg is pending");
+        assert_eq!(second.transfers_paired, 1);
+        assert_eq!(
+            second.transfers_backfilled, 1,
+            "the origin leg's row was persisted in an earlier run"
+        );
+
+        let origin_counterpart = db
+            .get_transfer_counterpart_transaction_id(origin_id)
+            .expect("query counterpart")
+            .expect("origin leg now paired");
+        assert_eq!(origin_counterpart, receiving_id);
     }
 }

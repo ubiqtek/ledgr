@@ -413,24 +413,30 @@ fn draw_transfer_month(frame: &mut Frame, app: &mut App, area: Rect) {
         .transfer_month_entries
         .iter()
         .map(|entry| {
-            let amount = crate::format_amount_minor(entry.amount_minor.abs(), &entry.currency);
-            let account_name = app
-                .accounts
-                .iter()
-                .find(|s| s.account.id == entry.account_id)
-                .map(|s| s.account.name.as_str())
-                .unwrap_or("?");
-            let counterparty =
-                crate::app::resolve_counterparty(entry, &app.accounts, &app.household_accounts);
-            let (from, to) = if entry.amount_minor < 0 {
-                (account_name.to_string(), counterparty)
-            } else {
-                (counterparty, account_name.to_string())
-            };
+            let amount = crate::format_amount_minor(entry.amount_minor, &entry.currency);
+            let from = crate::app::resolve_transfer_leg_name(
+                entry.out_account_id,
+                entry.out_sort.as_deref(),
+                entry.out_account.as_deref(),
+                &app.accounts,
+                &app.household_accounts,
+            );
+            let to = crate::app::resolve_transfer_leg_name(
+                entry.in_account_id,
+                entry.in_sort.as_deref(),
+                entry.in_account.as_deref(),
+                &app.accounts,
+                &app.household_accounts,
+            );
+            let description = entry
+                .out_description
+                .as_deref()
+                .or(entry.in_description.as_deref())
+                .unwrap_or("");
             Row::new(vec![
-                Cell::from(entry.posted_at.clone()),
+                Cell::from(entry.occurred_on.clone()),
                 Cell::from(Line::from(amount).alignment(Alignment::Right)),
-                Cell::from(entry.description.clone()),
+                Cell::from(description.to_string()),
                 Cell::from(from),
                 Cell::from(to),
             ])

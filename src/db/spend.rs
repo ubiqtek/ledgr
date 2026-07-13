@@ -1,24 +1,29 @@
 //! Persistence for the derived spend ledger — `spend_entries` and
-//! `spend_entry_sources` — plus `transaction_links` access used by transfer
-//! pairing and refund linking. See
-//! doc/implementation-notes/spend-ledger-design.md. Classification logic
+//! `spend_entry_sources` — plus the derived transfer ledger
+//! (`transfer_entries`) and `transaction_links` access used by refund
+//! linking. See doc/implementation-notes/spend-ledger-design.md and
+//! doc/implementation-notes/transfer-ledger-design.md. Classification logic
 //! itself lives in `crate::derive`, kept separate from persistence so the
 //! rules stay unit-testable without a database.
 
 use super::Db;
 use crate::model::{
-    ClassifiedBy, Id, LinkRelation, MonthlySpend, NewSpendEntry, SpendEntry, SpendEntrySourceRole,
-    SpendEntryWithAccount, Transaction,
+    ClassifiedBy, Id, LinkRelation, MonthlySpend, MonthlyTransfer, NewSpendEntry, NewTransferLeg,
+    OpenTransferEntry, SpendEntry, SpendEntrySourceRole, SpendEntryWithAccount, Transaction,
+    TransferEntry, TransferLegRole, TransferPairMethod,
 };
 use rusqlite::{params, OptionalExtension};
 
 impl Db {
-    /// Transactions not yet linked to a spend entry as their `source` — the
-    /// candidate set for a derivation pass. Transactions classified as
-    /// internal transfers or left out-of-scope (income, cash) never gain a
-    /// spend entry, so they stay in this set forever; re-processing them is
-    /// harmless (transfer pairing is idempotent via a UNIQUE constraint, and
-    /// re-classifying an out-of-scope transaction is a no-op).
+    /// Transactions not yet linked to a spend entry as their `source`, and
+    /// not yet recorded in `transfer_entries` either — the candidate set for
+    /// a derivation pass. An out-of-scope transaction (income, cash) gains
+    /// neither, so it stays in this set forever; re-processing it is
+    /// harmless (re-classifying it is a no-op). An internal transfer now
+    /// gets a `transfer_entries` row on first derivation, so it's excluded
+    /// from future runs — see
+    /// doc/implementation-notes/transfer-ledger-design.md, "Integration into
+    /// run_derivation".
     pub fn pending_derivation_transactions(&self) -> rusqlite::Result<Vec<Transaction>> {
         let mut stmt = self.conn().prepare(
             "SELECT t.id, t.account_id, t.import_id, t.posted_at, t.amount_minor,
@@ -27,7 +32,9 @@ impl Db {
              FROM transactions t
              LEFT JOIN spend_entry_sources s
                     ON s.transaction_id = t.id AND s.role = 'source'
-             WHERE s.transaction_id IS NULL
+             LEFT JOIN transfer_entries te
+                    ON te.out_transaction_id = t.id OR te.in_transaction_id = t.id
+             WHERE s.transaction_id IS NULL AND te.id IS NULL
              ORDER BY t.posted_at, t.id",
         )?;
         let rows = stmt.query_map([], Self::row_to_transaction)?;
@@ -265,6 +272,388 @@ impl Db {
                 |row| row.get(0),
             )
             .optional()
+    }
+
+    /// Whether `transaction_id` already belongs to a transfer entry, as
+    /// either leg. Used when a tier-1 description match finds a counterpart
+    /// transaction directly (`find_transfer_counterpart` searches raw
+    /// `transactions`, independent of `transfer_entries`) — if that
+    /// transaction already has a row (inserted earlier, one-sided), this
+    /// leg completes it; otherwise a brand new fully-paired row is created.
+    pub fn transfer_row_for_transaction(&self, transaction_id: Id) -> rusqlite::Result<Option<Id>> {
+        self.conn()
+            .query_row(
+                "SELECT id FROM transfer_entries
+                 WHERE out_transaction_id = ?1 OR in_transaction_id = ?1",
+                params![transaction_id],
+                |row| row.get(0),
+            )
+            .optional()
+    }
+
+    /// Inserts a new, one-sided transfer entry: only `leg`'s own side is
+    /// known; the other side's account is recorded as a *prediction* (this
+    /// leg's own decoded counterpart identity) until a later call
+    /// (`complete_transfer_leg`) fills in the real transaction, if one is
+    /// ever found. See doc/implementation-notes/transfer-ledger-design.md.
+    pub fn insert_transfer_leg(&self, leg: &NewTransferLeg) -> rusqlite::Result<Id> {
+        let (out_transaction_id, out_account_id, out_sort, out_account_no, out_description) =
+            match leg.role {
+                TransferLegRole::Out => (
+                    Some(leg.transaction_id),
+                    Some(leg.account_id),
+                    None,
+                    None,
+                    Some(leg.description.as_str()),
+                ),
+                TransferLegRole::In => (
+                    None,
+                    leg.counterpart_account_id,
+                    Some(leg.counterpart_sort_code.as_str()),
+                    Some(leg.counterpart_account_number.as_str()),
+                    None,
+                ),
+            };
+        let (in_transaction_id, in_account_id, in_sort, in_account_no, in_description) =
+            match leg.role {
+                TransferLegRole::In => (
+                    Some(leg.transaction_id),
+                    Some(leg.account_id),
+                    None,
+                    None,
+                    Some(leg.description.as_str()),
+                ),
+                TransferLegRole::Out => (
+                    None,
+                    leg.counterpart_account_id,
+                    Some(leg.counterpart_sort_code.as_str()),
+                    Some(leg.counterpart_account_number.as_str()),
+                    None,
+                ),
+            };
+        self.conn().execute(
+            "INSERT INTO transfer_entries
+                (occurred_on, amount_minor, currency,
+                 out_transaction_id, out_account_id, out_sort_code, out_account_number, out_description,
+                 in_transaction_id, in_account_id, in_sort_code, in_account_number, in_description,
+                 classified_by, confidence, rule_name, classified_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16,
+                     strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))",
+            params![
+                leg.occurred_on,
+                leg.amount_minor,
+                leg.currency,
+                out_transaction_id,
+                out_account_id,
+                out_sort,
+                out_account_no,
+                out_description,
+                in_transaction_id,
+                in_account_id,
+                in_sort,
+                in_account_no,
+                in_description,
+                leg.classified_by.as_str(),
+                leg.confidence,
+                leg.rule_name,
+            ],
+        )?;
+        Ok(self.conn().last_insert_rowid())
+    }
+
+    /// Fills in the previously-empty side of an existing one-sided transfer
+    /// entry (found either as an open row awaiting pairing, tier 2/3, or as
+    /// a transaction that already has a row, tier 1) with `leg` and records
+    /// how the pairing was made. The outgoing leg's date becomes the row's
+    /// canonical `occurred_on` if this call supplies it.
+    pub fn complete_transfer_leg(
+        &self,
+        row_id: Id,
+        leg: &NewTransferLeg,
+        pair_method: TransferPairMethod,
+        pair_confidence: f64,
+    ) -> rusqlite::Result<()> {
+        match leg.role {
+            TransferLegRole::Out => {
+                self.conn().execute(
+                    "UPDATE transfer_entries
+                     SET out_transaction_id = ?1, out_account_id = ?2, out_description = ?3,
+                         occurred_on = ?4, pair_method = ?5, pair_confidence = ?6
+                     WHERE id = ?7",
+                    params![
+                        leg.transaction_id,
+                        leg.account_id,
+                        leg.description,
+                        leg.occurred_on,
+                        pair_method.as_str(),
+                        pair_confidence,
+                        row_id,
+                    ],
+                )?;
+            }
+            TransferLegRole::In => {
+                self.conn().execute(
+                    "UPDATE transfer_entries
+                     SET in_transaction_id = ?1, in_account_id = ?2, in_description = ?3,
+                         pair_method = ?4, pair_confidence = ?5
+                     WHERE id = ?6",
+                    params![
+                        leg.transaction_id,
+                        leg.account_id,
+                        leg.description,
+                        pair_method.as_str(),
+                        pair_confidence,
+                        row_id,
+                    ],
+                )?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Creates a brand-new, fully-paired transfer entry directly — tier 1's
+    /// "counterpart transaction found, and it doesn't already have a row"
+    /// case: both legs are known at once, so there's no one-sided
+    /// intermediate state to create and then complete.
+    pub fn create_paired_transfer(
+        &self,
+        leg: &NewTransferLeg,
+        counterpart: &Transaction,
+        pair_method: TransferPairMethod,
+        pair_confidence: f64,
+    ) -> rusqlite::Result<Id> {
+        let (out_transaction_id, out_account_id, out_description, out_occurred_on) =
+            match leg.role {
+                TransferLegRole::Out => (leg.transaction_id, leg.account_id, leg.description.as_str(), leg.occurred_on.as_str()),
+                TransferLegRole::In => (
+                    counterpart.id,
+                    counterpart.account_id,
+                    counterpart.description.as_str(),
+                    counterpart.posted_at.as_str(),
+                ),
+            };
+        let (in_transaction_id, in_account_id, in_description) = match leg.role {
+            TransferLegRole::In => (leg.transaction_id, leg.account_id, leg.description.as_str()),
+            TransferLegRole::Out => (
+                counterpart.id,
+                counterpart.account_id,
+                counterpart.description.as_str(),
+            ),
+        };
+        self.conn().execute(
+            "INSERT INTO transfer_entries
+                (occurred_on, amount_minor, currency,
+                 out_transaction_id, out_account_id, out_description,
+                 in_transaction_id, in_account_id, in_description,
+                 pair_method, pair_confidence,
+                 classified_by, confidence, rule_name, classified_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14,
+                     strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))",
+            params![
+                out_occurred_on,
+                leg.amount_minor,
+                leg.currency,
+                out_transaction_id,
+                out_account_id,
+                out_description,
+                in_transaction_id,
+                in_account_id,
+                in_description,
+                pair_method.as_str(),
+                pair_confidence,
+                leg.classified_by.as_str(),
+                leg.confidence,
+                leg.rule_name,
+            ],
+        )?;
+        Ok(self.conn().last_insert_rowid())
+    }
+
+    /// Every `transfer_entries` row still missing a side, oldest first —
+    /// the candidate set for `run_derivation`'s re-pairing sweep. A
+    /// row can become pairable purely because *another* already-open row's
+    /// own decode names it, independent of any new transaction arriving —
+    /// see doc/implementation-notes/transfer-ledger-design.md, "Pairing
+    /// algorithm".
+    pub fn open_transfer_entries(&self) -> rusqlite::Result<Vec<OpenTransferEntry>> {
+        let mut stmt = self.conn().prepare(
+            "SELECT id, occurred_on, amount_minor, currency,
+                    out_transaction_id, out_account_id, out_description,
+                    in_transaction_id, in_account_id, in_description
+             FROM transfer_entries
+             WHERE out_transaction_id IS NULL OR in_transaction_id IS NULL
+             ORDER BY occurred_on, id",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok(OpenTransferEntry {
+                id: row.get(0)?,
+                occurred_on: row.get(1)?,
+                amount_minor: row.get(2)?,
+                currency: row.get(3)?,
+                out_transaction_id: row.get(4)?,
+                out_account_id: row.get(5)?,
+                out_description: row.get(6)?,
+                in_transaction_id: row.get(7)?,
+                in_account_id: row.get(8)?,
+                in_description: row.get(9)?,
+            })
+        })?;
+        rows.collect()
+    }
+
+    /// Removes a transfer entry outright — used only by the re-pairing
+    /// sweep, to drop the now-redundant row once two separately-persisted
+    /// open rows are merged into one (`complete_transfer_leg`) by that
+    /// sweep.
+    pub fn delete_transfer_entry(&self, id: Id) -> rusqlite::Result<()> {
+        self.conn()
+            .execute("DELETE FROM transfer_entries WHERE id = ?1", params![id])?;
+        Ok(())
+    }
+
+    /// Tiers 2/3 of transfer pairing (see the design doc's "Pairing
+    /// algorithm"): an open transfer entry — missing exactly `missing_role`,
+    /// from this run or an earlier one, it makes no difference to this
+    /// query — whose known side belongs to `known_account_id` (the account
+    /// this leg's own decode identified as its counterpart), with a
+    /// matching amount and a date within a 3-day window. Returns the row
+    /// id, the known side's own transaction id (so the caller can tell
+    /// whether that leg was itself classified this run, for
+    /// `DerivationSummary::transfers_backfilled`'s bookkeeping), and that
+    /// row's *prediction* for the missing side (the known leg's own
+    /// decoded counterpart, recorded when the row was created) — the
+    /// caller compares the prediction against its own account id to tell
+    /// tier 2 (mutual agreement) from tier 3 (self-reference) apart; `None`
+    /// means the prediction was never resolved to a tracked account at all.
+    pub fn find_open_transfer_candidate(
+        &self,
+        missing_role: TransferLegRole,
+        known_account_id: Id,
+        amount_minor: i64,
+        posted_at: &str,
+    ) -> rusqlite::Result<Option<(Id, Id, Option<Id>)>> {
+        let sql = match missing_role {
+            // Missing the "out" side means the "in" side is known.
+            TransferLegRole::Out => {
+                "SELECT id, in_transaction_id, out_account_id
+                 FROM transfer_entries
+                 WHERE out_transaction_id IS NULL
+                   AND in_transaction_id IS NOT NULL
+                   AND in_account_id = ?1
+                   AND amount_minor = ?2
+                   AND julianday(occurred_on) BETWEEN julianday(?3) - 3 AND julianday(?3) + 3
+                 ORDER BY ABS(julianday(occurred_on) - julianday(?3))
+                 LIMIT 1"
+            }
+            TransferLegRole::In => {
+                "SELECT id, out_transaction_id, in_account_id
+                 FROM transfer_entries
+                 WHERE in_transaction_id IS NULL
+                   AND out_transaction_id IS NOT NULL
+                   AND out_account_id = ?1
+                   AND amount_minor = ?2
+                   AND julianday(occurred_on) BETWEEN julianday(?3) - 3 AND julianday(?3) + 3
+                 ORDER BY ABS(julianday(occurred_on) - julianday(?3))
+                 LIMIT 1"
+            }
+        };
+        self.conn()
+            .query_row(sql, params![known_account_id, amount_minor, posted_at], |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+            })
+            .optional()
+    }
+
+    /// The counterpart transaction id recorded for a transfer leg, if any —
+    /// `None` both when the transaction has no `transfer_entries` row at all
+    /// and when it has one but the other side isn't known yet.
+    pub fn get_transfer_counterpart_transaction_id(
+        &self,
+        transaction_id: Id,
+    ) -> rusqlite::Result<Option<Id>> {
+        self.conn()
+            .query_row(
+                "SELECT CASE
+                            WHEN out_transaction_id = ?1 THEN in_transaction_id
+                            WHEN in_transaction_id = ?1 THEN out_transaction_id
+                        END
+                 FROM transfer_entries
+                 WHERE out_transaction_id = ?1 OR in_transaction_id = ?1",
+                params![transaction_id],
+                |row| row.get(0),
+            )
+            .optional()
+            .map(|outer: Option<Option<Id>>| outer.flatten())
+    }
+
+    /// Net transferred in/out per calendar month, most recent first — backs
+    /// the TUI's Monthly Transfers screen. Same shape as
+    /// `monthly_spend_totals`, but keeps out/in separate (not netted) per
+    /// `MonthlyTransfer`'s doc comment. A row contributes to "out" whenever
+    /// its outgoing side is known (paired or not) and to "in" whenever its
+    /// incoming side is known — independent of each other, since a
+    /// one-sided row still represents real money having moved on its known
+    /// side.
+    pub fn monthly_transfer_totals(&self) -> rusqlite::Result<Vec<MonthlyTransfer>> {
+        let mut stmt = self.conn().prepare(
+            "SELECT substr(occurred_on, 1, 7) AS month,
+                    -SUM(CASE WHEN out_transaction_id IS NOT NULL THEN amount_minor ELSE 0 END),
+                    SUM(CASE WHEN in_transaction_id IS NOT NULL THEN amount_minor ELSE 0 END)
+             FROM transfer_entries
+             GROUP BY month
+             ORDER BY month DESC",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok(MonthlyTransfer {
+                month: row.get(0)?,
+                transferred_out_minor: row.get(1)?,
+                transferred_in_minor: row.get(2)?,
+            })
+        })?;
+        rows.collect()
+    }
+
+    /// All transfer entries for one calendar month (`month` as `YYYY-MM`),
+    /// oldest first — backs the TUI's per-month drill-down. One row per
+    /// `transfer_entries` row, i.e. one row **per real-world transfer**,
+    /// not per leg — the schema itself now guarantees this (see the design
+    /// doc), so no display-layer deduplication is needed.
+    pub fn transfer_entries_for_month(&self, month: &str) -> rusqlite::Result<Vec<TransferEntry>> {
+        let mut stmt = self.conn().prepare(
+            "SELECT id, occurred_on, amount_minor, currency,
+                    out_transaction_id, out_account_id, out_sort_code, out_account_number, out_description,
+                    in_transaction_id, in_account_id, in_sort_code, in_account_number, in_description,
+                    pair_method, pair_confidence
+             FROM transfer_entries
+             WHERE substr(occurred_on, 1, 7) = ?1
+             ORDER BY occurred_on, id",
+        )?;
+        let rows = stmt.query_map([month], |row| {
+            let pair_method: Option<String> = row.get(14)?;
+            Ok(TransferEntry {
+                id: row.get(0)?,
+                occurred_on: row.get(1)?,
+                amount_minor: row.get(2)?,
+                currency: row.get(3)?,
+                out_transaction_id: row.get(4)?,
+                out_account_id: row.get(5)?,
+                out_sort: row.get(6)?,
+                out_account: row.get(7)?,
+                out_description: row.get(8)?,
+                in_transaction_id: row.get(9)?,
+                in_account_id: row.get(10)?,
+                in_sort: row.get(11)?,
+                in_account: row.get(12)?,
+                in_description: row.get(13)?,
+                pair_method: pair_method.map(|m| match m.as_str() {
+                    "description_match" => TransferPairMethod::DescriptionMatch,
+                    "amount_date_match" => TransferPairMethod::AmountDateMatch,
+                    _ => TransferPairMethod::SelfReferenceMatch,
+                }),
+                pair_confidence: row.get(15)?,
+            })
+        })?;
+        rows.collect()
     }
 
     /// Best-effort search for a credit card bill payment's counterpart: any

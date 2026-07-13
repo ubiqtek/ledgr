@@ -8,3 +8,4 @@
 - [6. No account-type gate on spend derivation — scan every account uniformly](0006-no-account-type-gate-on-spend-derivation.md)
 - [7. Model assets and liabilities as accounts with (manual or imported) balance snapshots](0007-assets-and-liabilities-as-accounts-with-balance-snapshots.md)
 - [8. Reference household accounts — config-only, never imported, no balance data](0008-reference-household-accounts.md)
+- [9. Persisted ledgers, built once at import — the UI only ever queries them](0009-persisted-ledgers-built-at-import.md)

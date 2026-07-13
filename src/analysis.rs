@@ -30,7 +30,7 @@ pub fn category_totals(db: &Db, account_id: Id) -> rusqlite::Result<Vec<(Option<
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::derive::derive_spend_entries;
+    use crate::derive::run_derivation;
     use crate::model::{AccountType, NewAccount, NewTransaction};
 
     #[test]
@@ -62,7 +62,7 @@ mod tests {
             })
             .expect("insert transaction");
         }
-        derive_spend_entries(&db, &[]).expect("derive");
+        run_derivation(&db, &[]).expect("derive");
 
         // The +2000 credit has no matching pattern/TRNTYPE, so it's left
         // out of scope (a candidate income transaction) rather than spend;

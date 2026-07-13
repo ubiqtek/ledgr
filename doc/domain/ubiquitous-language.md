@@ -84,11 +84,53 @@ from a household member is simply an internal transfer.)
 ### Spend Ledger — established
 
 The derived ledger of real-world spending: one **spend entry** per
-outflow to a merchant or person, linked to the raw transaction(s) it
-derives from. The only place classification, categorisation, and
-budget work happens. See ADR 0005 and
+outflow to a merchant or person, linked to the transaction(s) it derives
+from. The only place classification, categorisation, and budget work
+happens. See ADR 0005 and
 `doc/implementation-notes/spend-ledger-design.md`.
 *Origin: the user, design session 2026-07-11.*
+
+### Spend Entry — established
+
+One row in the **spend ledger**: `ledgr`'s judgement that a
+**transaction** represents real spend, plus its classification
+provenance (rule/confidence/note). Distinct from the transaction it
+derives from — the transaction is the raw imported fact; the spend
+entry is the derived, categorisable, human-facing record built from it.
+*Origin: the user, design session 2026-07-11 (named as part of Spend
+Ledger); given its own entry 2026-07-13 for clarity against
+**transaction**.*
+
+### Transfer Ledger — candidate
+
+The derived ledger of internal transfers between household accounts:
+one **transfer entry** per real-world transfer between two accounts,
+built during `ledgr import`'s derivation pass and never re-derived live
+by the UI (ADR 0009 — the same principle the spend ledger already
+followed). See `doc/implementation-notes/transfer-ledger-design.md`.
+Not yet agreed as a formal term — the user asked for the transaction/
+transfer-entry terminology to be made precise (2026-07-13), which this
+records, but hasn't explicitly signed off on "Transfer Ledger" itself as
+the name.
+*Origin: the assistant, proposed 2026-07-13 (Delta: Transfer Ledger),
+naming mirrors the already-established **Spend Ledger**; pending the
+user's confirmation.*
+
+### Transfer Entry — candidate
+
+One row in the **transfer ledger**: `ledgr`'s judgement that two
+**transactions** (or one transaction and a household counterpart that
+will never itself be imported) are the two legs of the same transfer,
+plus how that pairing was made. Distinct from the transactions it
+derives from, exactly as a **spend entry** is distinct from the
+transaction(s) it derives from — a transaction is the raw imported fact;
+a transfer entry is the derived record linking two of them. **Not** one
+row per leg (an earlier version of this design was corrected by the user
+mid-session, 2026-07-13, precisely because "transfer entry" had been
+used to mean a single transaction's own row — see the design doc's
+history companion for the full correction).
+*Origin: the assistant, proposed 2026-07-13 (Delta: Transfer Ledger);
+pending the user's confirmation.*
 
 ### Income Ledger — established (deferred)
 
@@ -100,11 +142,14 @@ tax and pensions. Deliberately not being built yet.
 ### Internal Transfer — established
 
 Money moving between the user's own accounts (including credit-card
-repayments). Produces an entry in **neither** ledger; recorded only as
-a pairing between the two raw transactions (`transaction_links`,
-`relation = 'transfer'`). Excluded from spending per the Rebel Finance
-method. *Origin: Rebel Finance ("transfers between your own
-accounts"), confirmed by the user.*
+repayments). Produces **no** spend/income entry in the **spend ledger**
+(excluded from spending per the Rebel Finance method), but does produce
+a **transfer entry** in the **transfer ledger** — a different ledger
+from spend/income, tracking money movement *within* the household rather
+than crossing its boundary. (Until 2026-07-13, internal transfers were
+recorded only as a `transaction_links` pairing with no dedicated ledger;
+see Delta: Transfer Ledger.) *Origin: Rebel Finance ("transfers between
+your own accounts"), confirmed by the user.*
 
 ### Household — established
 

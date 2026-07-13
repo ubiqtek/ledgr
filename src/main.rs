@@ -54,12 +54,13 @@ fn run_import(db: Db) -> anyhow::Result<()> {
     );
     println!("inbox: {}", config.inbox_dir.display());
 
-    let derivation = derive::derive_spend_entries(&db, &config.household_accounts)?;
+    let derivation = derive::run_derivation(&db, &config.household_accounts)?;
     println!(
-        "spend ledger: {} entr(y/ies) created, {} internal transfer(s) detected ({} paired), {} out of scope",
+        "spend ledger: {} entr(y/ies) created, {} internal transfer(s) detected ({} paired, {} backfilled), {} out of scope",
         derivation.spend_entries_created,
         derivation.transfers_detected,
         derivation.transfers_paired,
+        derivation.transfers_backfilled,
         derivation.out_of_scope
     );
     Ok(())

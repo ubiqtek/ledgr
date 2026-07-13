@@ -2,9 +2,13 @@
 
 ## What's Next
 
-**Next:** [Delta: Transfer Ledger / Task 2](#task-2-design-a-persisted-transfer-ledger--adr) — design a persisted transfer ledger table + write the missing ADR, then [Delta: Reconciliation / Task 1](#task-1-design-account-level-and-household-level-reconciliation-checks). Also outstanding: review and commit the uncommitted leader-key nav / Monthly Transfers v1 working-tree changes. Full context: [Checkpoint: Session 2026-07-13b](#checkpoint-session-2026-07-13b).
+**Next:** [Delta: Reconciliation / Task 1](#task-1-design-account-level-and-household-level-reconciliation-checks) — design account-level and household-level reconciliation checks.
+**Before that:**
+1. Review and commit the uncommitted working tree (leader-key nav, Monthly Transfers v1, this session's full Transfer Ledger build).
+2. Get the user's sign-off to add "Transfer Entry"/"Transfer Ledger" to `doc/domain/ubiquitous-language.md`.
 **Sub-doc:** (none)
 **Blockers:** None currently.
+**Context:** [Checkpoint: Session 2026-07-13d](#checkpoint-session-2026-07-13d).
 
 ## Summary
 
@@ -25,8 +29,8 @@
 | | [2. Spend ledger schema and derivation](#task-2-spend-ledger-schema-and-derivation) | ✓ DONE |
 | | [3. Review and re-classification TUI](#task-3-review-and-re-classification-tui) | TODO — deprioritised below Delta: The Gap |
 | [Delta: Transfer Ledger](#delta-transfer-ledger) | [1. Monthly Transfers screen (v1, derive-on-the-fly)](#task-1-monthly-transfers-screen-v1-derive-on-the-fly) | ✓ DONE — uncommitted, superseded by Task 2's design |
-| | [2. Design a persisted transfer ledger + ADR](#task-2-design-a-persisted-transfer-ledger--adr) | TODO |
-| | [3. Persist the ledger and migrate the screen to query it](#task-3-persist-the-ledger-and-migrate-the-screen-to-query-it) | TODO |
+| | [2. Design a persisted transfer ledger + ADR](#task-2-design-a-persisted-transfer-ledger--adr) | ✓ DONE |
+| | [3. Persist the ledger and migrate the screen to query it](#task-3-persist-the-ledger-and-migrate-the-screen-to-query-it) | ✓ DONE |
 | [Delta: Reconciliation](#delta-reconciliation) | [1. Design account-level and household-level reconciliation checks](#task-1-design-account-level-and-household-level-reconciliation-checks) | TODO |
 | [Delta: The Gap](#delta-the-gap) | [1. Minimal income ledger](#task-1-minimal-income-ledger) | TODO |
 | | [2. Gap calculation](#task-2-gap-calculation) | TODO |
@@ -623,27 +627,269 @@ to Task 2 below, done step by step rather than rushed).
   not patched in place.
 
 ### Task 2: Design a persisted transfer ledger + ADR
-- TODO — design a real table (name TBD — check
-  `doc/domain/ubiquitous-language.md` and agree the term before coining
-  one, per the project's usual process) mirroring `spend_entries`'
-  provenance-edge-table shape, populated once during `ledgr import`'s
-  derivation pass rather than re-derived live by the UI. Must solve the
-  `find_transfer_counterpart` automated-vs-manual-transfer matching gap
-  above as part of the redesign — the point is to get the pairing right
-  once, at import time, not to keep re-running a fragile heuristic on
-  every screen open. Write up the "persisted ledger, built at import,
-  UI only queries" principle as a proper ADR as part of this task — the
-  user considers it a precedent likely to apply to the future income
-  ledger too (Delta: The Gap, Task 1).
+- ✓ DONE (2026-07-13 session) — design written to
+  `doc/implementation-notes/transfer-ledger-design.md`: a new
+  `transfer_entries` table, one row per transaction classified as an
+  internal transfer, mirroring `spend_entries`' provenance idiom
+  (`classified_by`/`confidence`/`rule_name`/`classified_at`). Pairing is
+  modelled as extra columns on the *same* row
+  (`counterpart_sort_code`/`counterpart_account_number`/
+  `counterpart_account_id`/`counterpart_transaction_id`/`pair_method`/
+  `pair_confidence`) rather than a second edge table, since a transfer
+  has at most one counterpart — deliberately simpler than
+  `transaction_links`' general edge-table shape for this narrower case.
+  A three-tier pairing algorithm designed (tier 3 added mid-Task 3 once
+  a real-data gap surfaced — see below): **tier 1** description
+  cross-reference (the existing `find_transfer_counterpart` mechanism,
+  manual transfers, confidence 0.9); **tier 2** mutual-classification
+  amount+date match (new — both legs' own `classify()` decodes the
+  *other* leg as its counterpart, confidence 0.75, covers automated
+  transfers where both sides correctly cross-reference each other);
+  **tier 3** self-reference match (new, confidence 0.6 — see Task 3).
+  Unmatched legs stay visible (`counterpart_transaction_id` `NULL`)
+  rather than being dropped, matching the existing "stay visible for
+  review" philosophy used elsewhere (e.g. the `"fallback"` spend rule).
+  Supports retroactive backfill: an earlier unpaired leg can be
+  completed by a later derivation run once its counterpart arrives.
+- ✓ DONE — ADR written:
+  `doc/adr/0009-persisted-ledgers-built-at-import.md`, recording the
+  general principle the user wanted formalised: **every derived
+  relation is built once at import into a persisted table; the UI
+  (`app.rs`/`ui.rs`) only ever queries it, never re-derives live.**
+  Transfer ledger is the first concrete application. Income ledger
+  (Delta: The Gap, Task 1) flagged as the next expected application;
+  Delta: Reconciliation flagged as a direct beneficiary (a persisted
+  ledger is much cheaper to reconcile against than a live re-derive).
+  `doc/adr/decisions.md` index updated.
+- **Open question raised and resolved with the user, not yet actioned:**
+  "Transfer Entry"/"Transfer Ledger" are not yet agreed terms in
+  `doc/domain/ubiquitous-language.md` — only "Internal Transfer" (the
+  underlying concept) is agreed there. Per this project's
+  ubiquitous-language process, these terms are used informally in code
+  and docs already but still need the user's explicit sign-off before
+  being added to that doc formally. Flagged as an outstanding follow-up
+  TODO (see "What's Next").
 
 ### Task 3: Persist the ledger and migrate the screen to query it
-- TODO — build the schema/derivation from Task 2's design, migrate the
-  real database, then switch `App::open_monthly_transfers`/
-  `open_selected_transfer_month`/`show_transfer_detail` to query the new
-  table directly instead of calling `derive::find_internal_transfers`/
-  `find_transfer_counterpart` on every screen open. Existing UI
-  (columns, popup, clipboard copy) should mostly carry over unchanged —
-  only the backing data source changes.
+- ✓ DONE (2026-07-13 session) — schema: `transfer_entries` table + 3
+  indexes added to `src/db/schema.sql`.
+- ✓ DONE — `src/derive.rs`: `derive_spend_entries` now writes an
+  unpaired `transfer_entries` row per `InternalTransfer`-classified leg,
+  then runs the three-tier pairing in order (description match, mutual
+  amount-date match, self-reference match). Pairing deliberately
+  iterates over **all** currently-unpaired persisted `transfer_entries`
+  rows (`Db::unpaired_transfer_entries`), not just the current run's
+  freshly-classified candidates — fixed after a real bug surfaced where
+  already-persisted-but-unpaired legs from an earlier run could never be
+  reconsidered once a new tier was added later, since no new transaction
+  was arriving to trigger a backfill for them. `DerivationSummary`
+  gained `transfers_backfilled`. The old `find_internal_transfers`
+  (Task 1's live-derive preview) deleted, superseded entirely.
+- ✓ DONE — `src/db/spend.rs`/`src/db/mod.rs`: new `Db` methods —
+  `insert_transfer_entry`, `pair_transfer_legs`,
+  `find_transfer_pairing_candidate` (tier 2),
+  `find_transfer_self_reference_candidate` (tier 3),
+  `unpaired_transfer_entries`, `get_transfer_counterpart_transaction_id`,
+  `monthly_transfer_totals`, `transfer_entries_for_month`. A
+  schema-migration helper (`migrate_rename_stale_transfer_entries`/
+  `migrate_copy_stale_transfer_entries`, `src/db/mod.rs`) added to
+  handle changing `transfer_entries.pair_method`'s `CHECK` constraint on
+  an already-created real table — SQLite can't `ALTER` a `CHECK`
+  constraint, so the old table is renamed aside, `schema.sql` recreates
+  it fresh, rows are copied across, and the old table is dropped — same
+  pattern used for earlier `CHECK`-constraint migrations
+  (`AccountType::Checking` → `Current`). Covered by a new test.
+- ✓ DONE — `src/model.rs`: new `TransferPairMethod` enum
+  (`DescriptionMatch`/`AmountDateMatch`/`SelfReferenceMatch`),
+  `NewTransferEntry`. `TransferEntry` kept unchanged — it already
+  matched what the UI needed.
+- ✓ DONE — `src/app.rs`: `open_monthly_transfers`/
+  `open_selected_transfer_month`/`show_transfer_detail` migrated to
+  query `transfer_entries` directly instead of calling
+  `derive::classify()` live. `src/ui.rs` needed **no changes** —
+  column/popup/clipboard-copy behaviour is unaffected, confirming the
+  design doc's claim that only the backing data source would change.
+- **Real bug found and fixed:** `derive::parse_trailing_account_suffix`
+  was rejecting a trailing marker word (e.g. `"STO"`) after the account
+  number in a `NAME` field. Real data has `"BARRITT J 208794 23165086
+  STO"` on the Bills Account side of the SHARED BILLS ACCO standing
+  order. Fixed narrowly, tested, documented inline. Necessary but not
+  sufficient on its own to close the target 7-pair gap from Delta:
+  Transfer Ledger's opening motivation — see the second bug below.
+- **Second real gap found during implementation, resolved with the user
+  via a direct question rather than assumed:** tier 2's
+  mutual-match requirement structurally cannot pair the SHARED BILLS
+  ACCO ↔ Bills Account legs, because the Bills Account's own `NAME`
+  field self-references its **own** account number, not the sender's —
+  so its own `classify()` decode resolves to itself, not to the other
+  leg, and mutual agreement can never hold no matter how the matching
+  window is tuned. The user's decision: add a third, distinct,
+  explicitly-tracked pairing tier (`self_reference_match`) rather than
+  loosen tier 2's safety property, so self-reference-derived pairs stay
+  independently auditable/reconsiderable later rather than being folded
+  silently into tier 2's confidence. Implemented: fires only after
+  tiers 1 and 2 both fail; requires the *other* leg's own decoded
+  counterpart to equal *its own* account (the self-reference signature),
+  plus exact opposite amount, a ±3 day window, and being unclaimed.
+  Confidence `SELF_REFERENCE_MATCH_CONFIDENCE = 0.6` — deliberately
+  below tier 2's 0.75 since there's no mutual cross-check (self-reference
+  + amount/date is the whole signal); still a judgement call, flagged to
+  the user, not yet revisited against a longer real-data track record.
+- ✓ DONE — tests: 80 total (up from 76 at the start of this delta's
+  Task 3), all passing — new tests cover tier 1 (unchanged behaviour
+  confirmed), tier 2 (amount-date mutual match), tier 3 (self-reference
+  match), retroactive backfill of a newly-imported leg completing an old
+  one, retroactive re-pairing of two already-persisted unpaired legs
+  once a new tier is added (the second real bug's regression test), the
+  `CHECK`-constraint schema migration, and a classification regression
+  test for the trailing-marker parsing fix. `cargo build`: 0 errors, 11
+  warnings (pre-existing dead-code baseline, nothing new). `cargo
+  clippy --all-targets`: 0 errors, 12 warnings (pre-existing baseline;
+  one new but deliberately-allowed `enum_variant_names` lint on
+  `TransferPairMethod`, all three variants ending in "Match" by design,
+  matching the `pair_method` string values).
+- ✓ DONE — real database migration: backed up
+  `~/.local/share/ledgr/ledgr.db` twice
+  (`ledgr.db.bak-20260713162825-pre-transfer-ledger` before the tier-3
+  work, `ledgr.db.bak-20260713205125-pre-self-reference-tier` before the
+  schema migration). Ran `ledgr import` to backfill `transfer_entries`
+  for all 300 already-imported internal transfers: 218 legs paired via
+  `description_match`, 21 via `self_reference_match` (including all 7
+  target SHARED BILLS ACCO pairs — transaction ids 734/765/792/830/867/
+  897/931 on the Bills Account side), 0 via `amount_date_match` (that
+  tier's real-world case, if one exists, wasn't found in this dataset),
+  40 legs permanently unpaired (all confirmed to be Reference Household
+  Accounts, unpairable by definition, not a gap). `ledgr status`
+  confirmed no regression in balances/transaction counts. Re-running
+  `ledgr import` a second time produced 0 new pairs/backfills —
+  confirmed idempotent.
+- ✓ DONE — `transaction_links` cleanup: spot-checked 5 of the original
+  `relation='transfer'` pairs against `transfer_entries` (all matched),
+  then deleted the 110 redundant `relation='transfer' AND
+  confidence=0.9` rows — the old `find_transfer_counterpart`-only
+  pairing mechanism, now fully superseded by `transfer_entries`.
+  Deliberately **kept** the 32 `relation='transfer' AND confidence=0.85`
+  rows — these are `Classification::CardPayment` pairs from the
+  separate `find_card_payment_counterpart` mechanism (Delta: Credit Card
+  Transaction Import, Task 5), which `transfer_entries` does not cover
+  at all and which derivation still actively writes.
+  `transaction_links` now holds exactly those 32 rows.
+- **Two more real bugs found via actual TUI use (2026-07-13, after the
+  above was reported done) and fixed directly, not by a subagent:**
+  1. **Counterparty display bug:** `Db::transfer_entries_for_month`
+     only ever selected the raw `counterpart_sort_code`/
+     `counterpart_account_number` digits decoded from a leg's own `NAME`
+     field — never the actual resolved pairing. For a self-referencing
+     leg (its own `NAME` names its own account, not the sender's — the
+     exact case `self_reference_match` exists to pair), this meant the
+     "From/To" columns showed the account as its own counterparty even
+     though `transfer_entries.counterpart_transaction_id` had the right
+     answer all along. Fixed: the query now `LEFT JOIN`s `transfer_entries`
+     to itself via `counterpart_transaction_id` to fetch the real
+     counterpart's `account_id`; `TransferEntry` gained
+     `counterpart_resolved_account_id`; `resolve_counterparty`
+     (`src/app.rs`) now prefers it over the raw decode. New test:
+     `resolve_counterparty_prefers_resolved_pairing_over_a_self_referencing_decode`.
+  2. **Duplicate-row display:** the per-month drill-down showed **two**
+     rows for every paired transfer (one per leg, per the original
+     design doc's explicit "both legs of a paired transfer produce two
+     rows" decision) — the user had never actually agreed to that and
+     found it confusing/duplicate-looking in the live TUI. User's
+     decision when asked directly: **one row per transfer.**
+     `Db::transfer_entries_for_month` now suppresses the incoming leg of
+     a same-month pair (the outgoing/negative-amount leg is canonical,
+     since "From/To" already reads sender-first); a leg whose counterpart
+     falls in a different month (pairing tolerates up to a 3-day gap) is
+     still shown alone, and unpaired legs are always shown. Covered by
+     new assertions appended to the existing
+     `derive_spend_entries_pairs_both_legs_of_a_real_transfer` test
+     (row count == 1). **Note for the record:** the original "two rows,
+     one per leg" design choice in
+     `doc/implementation-notes/transfer-ledger-design.md` was made
+     unilaterally by the design subagent, not agreed with the user —
+     worth a general reminder to flag UI/display shape decisions as
+     explicit open questions the same way schema/naming decisions
+     already are.
+  - Both fixes verified against the real database (the SHARED BILLS ACCO
+    pair now shows as a single correctly-directed row) and via
+    `cargo build`/`test`/`clippy` (82 tests, all passing; clippy clean,
+    same pre-existing baseline).
+- **The real fix, later the same session: `transfer_entries` was the
+  wrong shape, not just missing a display fix.** The "duplicate-row
+  display" patch above (#2) suppressed a symptom — the schema still
+  stored **two rows per paired transfer** (one per leg, linked by
+  `counterpart_transaction_id`), which is what made the duplicate-row
+  bug possible at all. The user rejected this directly: a transfer entry
+  should be *the link between two transactions*, not one transaction's
+  own row. Reworked `transfer_entries` for real: `out_transaction_id`/
+  `out_account_id`/`out_sort_code`/`out_account_number`/`out_description`
+  and a mirrored `in_*` set directly on **one row per real-world
+  transfer**, either side nullable until that leg's transaction is
+  found. This is a genuine schema change:
+  - `src/db/schema.sql`: table redefined (`out_*`/`in_*` columns,
+    `CHECK (out_transaction_id IS NOT NULL OR in_transaction_id IS NOT
+    NULL)`).
+  - `src/model.rs`: `TransferLegRole` (Out/In), `NewTransferLeg`
+    (replaces `NewTransferEntry`), `TransferEntry` rewritten to the new
+    shape, new `OpenTransferEntry` (the re-pairing sweep's candidate
+    type).
+  - `src/db/spend.rs`: `insert_transfer_leg`, `complete_transfer_leg`,
+    `create_paired_transfer`, `find_open_transfer_candidate` (shared by
+    tiers 2/3), `open_transfer_entries`, `delete_transfer_entry`,
+    `transfer_row_for_transaction` replace the old per-leg methods;
+    `transfer_entries_for_month`/`monthly_transfer_totals` rewritten for
+    the new columns (no display-layer dedup needed any more — the schema
+    itself guarantees one row per transfer).
+  - `src/derive.rs`: pairing restructured into two stages — inline
+    tiers 1-3 while classifying each transaction (mirrors the previous
+    per-leg logic's tier order, just completing/creating merged rows
+    instead of linking separate ones), plus a **new re-pairing sweep**
+    after the main loop that re-attempts pairing across every currently
+    *open* row against every *other* open row — needed because two
+    already-persisted one-sided rows (neither tied to a transaction
+    freshly classified this run) can only be merged by comparing them to
+    each other, not to a fresh transaction. This is the same shape of
+    gap tier 3's original rollout hit, re-confirmed as a recurring
+    requirement of this design rather than a one-off.
+  - `src/app.rs`/`src/ui.rs`: `resolve_counterparty` replaced by
+    `resolve_transfer_leg_name` (resolves either side directly from
+    `*_account_id`/`*_sort`/`*_account`, no join-based "resolved
+    pairing" workaround needed since the row already has the answer);
+    `show_transfer_detail`/`selected_row_text`/`draw_transfer_month`
+    updated to read `out_*`/`in_*` directly.
+  - Real database re-migrated (not just re-derived): backed up fresh
+    (`ledgr.db.bak-20260713220720-pre-transfer-entry-shape-rework`),
+    verified structurally against a scratch copy first, then the actual
+    300 old one-row-per-leg rows merged into 170 rows in the new shape
+    (130 fully paired — 109 `description_match`, 21
+    `self_reference_match`, 0 `amount_date_match` — plus 40 permanently
+    one-sided). All 7 SHARED BILLS ACCO pairs confirmed merged correctly.
+    `ledgr status` confirmed no regression in balances/transaction
+    counts.
+  - `doc/domain/ubiquitous-language.md`: "Transfer Ledger"/"Transfer
+    Entry" downgraded from `established` back to `candidate` — they'd
+    been marked established earlier this session and attributed to "the
+    user," which overclaimed; the user asked only for the terminology to
+    be made *precise*, not signed off on the terms, and the "Transfer
+    Entry" description at the time still described the now-rejected
+    one-row-per-leg shape. Corrected: attributed to the assistant,
+    description rewritten to match the corrected shape, pending the
+    user's actual sign-off.
+  - Tests: 81 total, all passing (including the migration rewritten as a
+    real column-shape merge test, not just a `CHECK`-constraint bump).
+    `cargo build`/`clippy --all-targets`: 0 errors, same pre-existing
+    dead-code baseline (plus 3 new forward-looking fields on
+    `TransferEntry`/`OpenTransferEntry`, consistent with the project's
+    existing tolerance for that pattern).
+  - Full narrative, including the exact reasoning trail and the lesson
+    about not treating a display-layer patch as if it fixed the
+    underlying model: `doc/implementation-notes/transfer-ledger-history.md`.
+- **Not yet done:** full manual click-through of the live TUI (only
+  verified via `cargo build`/`test`/`clippy` and real-database SQL
+  checks so far). Also not done: getting the user's actual sign-off to
+  formalise "Transfer Entry"/"Transfer Ledger" in
+  `doc/domain/ubiquitous-language.md` (currently `candidate`, see Task
+  2's open question).
 
 ## Delta: Reconciliation
 
@@ -1519,6 +1765,134 @@ leader-key nav / Monthly Transfers v1 changes as before.
 3. Review and commit the still-uncommitted working tree changes.
 4. Delta: The Gap, Task 1 (Minimal income ledger) — next after the two
    new deltas.
+
+## Checkpoint: Session 2026-07-13c
+
+**Completed:**
+- Delta: Transfer Ledger, Task 2 (design + ADR) and Task 3 (build + real
+  migration) — both done in full, closing out the delta reopened in the
+  previous two checkpoints.
+- Design written to `doc/implementation-notes/transfer-ledger-design.md`:
+  new `transfer_entries` table (one row per internal-transfer-classified
+  transaction, mirroring `spend_entries`' provenance idiom), pairing
+  modelled as extra columns on the same row rather than a second edge
+  table (a transfer has at most one counterpart), and a three-tier
+  pairing algorithm (description match, mutual amount-date match,
+  self-reference match — the third tier added mid-build once a real gap
+  demanded it, see below).
+- ADR written: `doc/adr/0009-persisted-ledgers-built-at-import.md`,
+  formalising the principle the user asked for: every derived relation
+  is built once at import into a persisted table, the UI only ever
+  queries it. Income ledger (Delta: The Gap, Task 1) flagged as the next
+  expected application; Delta: Reconciliation flagged as a direct
+  beneficiary.
+- Built: `transfer_entries` schema + indexes, three-tier pairing in
+  `src/derive.rs`, new `Db` methods in `src/db/spend.rs`/`src/db/mod.rs`,
+  `TransferPairMethod`/`NewTransferEntry` in `src/model.rs`, `src/app.rs`
+  migrated to query the persisted table (`src/ui.rs` needed no changes
+  at all — confirming the design doc's prediction).
+- Two real bugs found and fixed along the way: (1)
+  `parse_trailing_account_suffix` was rejecting a trailing marker word
+  (`"STO"`) after the account number; (2) tier 2's mutual-match
+  requirement structurally could never pair the SHARED BILLS ACCO ↔
+  Bills Account legs, because the Bills Account's own `NAME` field
+  self-references its own account number rather than the sender's. The
+  user's decision on the second bug: add a third, explicitly-tracked
+  `self_reference_match` pairing tier (confidence 0.6) rather than loosen
+  tier 2's safety property, for future auditability. Also fixed a
+  derivation bug where already-persisted-but-unpaired legs from an
+  earlier run could never be reconsidered once a new tier was added
+  later — pairing now iterates all currently-unpaired persisted rows,
+  not just the current run's freshly-classified candidates.
+- Tests: 80 total (up from 76), all passing; `cargo build`/`cargo clippy
+  --all-targets` clean against the pre-existing warning baseline.
+- Real `ledgr.db` migrated (backed up twice first): backfilled
+  `transfer_entries` for all 300 already-imported internal transfers —
+  218 description-match, 21 self-reference-match (including all 7 target
+  SHARED BILLS ACCO pairs), 0 amount-date-match, 40 permanently unpaired
+  (confirmed Reference Household Accounts, not a gap). Confirmed
+  idempotent on a second `ledgr import` run. Cleaned up 110 now-redundant
+  `transaction_links` transfer rows, deliberately kept the 32 rows still
+  actively written by the separate card-payment-matching mechanism.
+
+**State of the project:** Delta: Transfer Ledger is functionally
+complete — the Monthly Transfers screen and its drill-down/popup now
+read from a real persisted, provenance-tracked table instead of
+re-deriving live, and the audit-trail gap that reopened this delta (zero
+`transaction_links` coverage for automated transfers) is fully closed on
+real data. Not yet done: a manual TUI click-through (only verified via
+tests/build/clippy and real-DB SQL so far), and getting the user's
+sign-off to formalise "Transfer Entry"/"Transfer Ledger" in
+`doc/domain/ubiquitous-language.md`. Everything from this session is
+uncommitted, sitting alongside the already-uncommitted leader-key nav /
+Monthly Transfers v1 changes from prior sessions.
+
+**Immediate next priorities:**
+1. Review and commit the uncommitted working tree — now spanning the
+   leader-key nav / Monthly Transfers v1 work plus this session's full
+   Transfer Ledger Task 2/3 build — before starting anything new.
+2. Get the user's sign-off on "Transfer Entry"/"Transfer Ledger" as
+   agreed terms in `doc/domain/ubiquitous-language.md`.
+3. Delta: Reconciliation, Task 1 — design account-level/household-level
+   checks, now genuinely easier with a persisted transfer ledger to
+   reconcile against.
+4. Delta: The Gap, Task 1 (Minimal income ledger) — next delta expected
+   to apply the same "persisted ledger, built at import" principle
+   (ADR 0009).
+
+## Checkpoint: Session 2026-07-13d
+
+**Completed:**
+- Two display bugs found by the user actually looking at the live TUI
+  (neither caught by tests/build/clippy/SQL checks, since both were
+  purely about rendering, not the persisted data): the counterparty
+  column resolving to a self-referencing leg's own account instead of
+  its real pair, and the drill-down showing two rows per paired transfer
+  when the user expected one. Both initially patched at the
+  query/display layer.
+- **The real fix, once the user rejected the patch as papering over a
+  wrong data model**: `transfer_entries` was redesigned from one row
+  per leg (two rows per paired transfer, linked by
+  `counterpart_transaction_id`) to **one row per real-world transfer**
+  (`out_*`/`in_*` columns naming both legs directly, either side
+  nullable until found). Full schema, model, `Db` layer, `derive.rs`
+  pairing logic (now needs a genuine second-stage "re-pairing sweep"
+  comparing open rows against each other, not just against fresh
+  transactions), and `app.rs`/`ui.rs` all reworked accordingly. See
+  "Delta: Transfer Ledger, Task 3" above for the full technical detail,
+  and `doc/implementation-notes/transfer-ledger-history.md` for the
+  complete reasoning trail and the lesson learned (a display-layer patch
+  had been accepted as "fixed" without checking whether the underlying
+  model actually matched the domain concept).
+- Real database re-migrated a second time (170 merged rows from the
+  prior 300 per-leg rows; 130 fully paired, 40 correctly one-sided; all
+  7 SHARED BILLS ACCO pairs confirmed intact) — backed up fresh first,
+  verified structurally against a scratch copy before touching the real
+  file.
+- Corrected an overclaim from earlier this session: "Transfer Ledger"/
+  "Transfer Entry" had been marked `established` in
+  `doc/domain/ubiquitous-language.md` and attributed to "the user" —
+  downgraded to `candidate`, re-attributed to the assistant, description
+  rewritten to match the corrected one-row-per-transfer shape.
+- Design docs split and rewritten: `transfer-ledger-design.md` is now a
+  clean current-state reference (schema, pairing algorithm, real worked
+  examples, all matching what's actually built); the discovery narrative
+  (original two-tier plan, the tier-3 gap, the retroactive re-scan bug,
+  the TUI display bugs, and this session's schema correction) moved to
+  the new `transfer-ledger-history.md`.
+- Tests: 81 total, all passing throughout every step (rewritten to
+  exercise the new schema, not just re-labelled). `cargo build`/`clippy
+  --all-targets`: 0 errors, same pre-existing dead-code baseline.
+
+**State of the project:** Delta: Transfer Ledger is functionally
+complete and, this time, structurally sound — a transfer entry is now
+genuinely the link between two transactions, matching the user's
+domain model, not two independently-stored legs. Everything from this
+session remains uncommitted, sitting alongside the already-uncommitted
+leader-key nav / Monthly Transfers v1 changes from prior sessions.
+
+**Immediate next priorities:** unchanged from the previous checkpoint —
+see "What's Next" at the top of this file.
 
 ## Implementation Notes
 

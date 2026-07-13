@@ -27,12 +27,18 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         Screen::Transactions => draw_transactions(frame, app, chunks[0]),
         Screen::MonthlyGap => draw_monthly_gap(frame, app, chunks[0]),
         Screen::MonthSpend => draw_month_spend(frame, app, chunks[0]),
+        Screen::MonthlyTransfers => draw_monthly_transfers(frame, app, chunks[0]),
+        Screen::TransferMonth => draw_transfer_month(frame, app, chunks[0]),
         Screen::Help => draw_help(frame, chunks[0]),
     }
     draw_status(frame, app, chunks[1]);
 
     if let Some(buffer) = &app.note_edit {
         draw_note_editor(frame, buffer, frame.area());
+    }
+
+    if let Some(detail) = &app.transfer_detail {
+        draw_transfer_detail(frame, detail, frame.area());
     }
 }
 
@@ -44,6 +50,52 @@ fn draw_note_editor(frame: &mut Frame, buffer: &str, area: Rect) {
     let paragraph = Paragraph::new(format!("{buffer}\u{2588}")).block(
         Block::default()
             .title("Note (Enter to save, Esc to cancel)")
+            .borders(Borders::ALL),
+    );
+    frame.render_widget(paragraph, popup);
+}
+
+/// Shows both legs of a transfer side by side (`i` on
+/// `Screen::TransferMonth`) — the selected entry plus, when found, its
+/// counterpart transaction. The counterpart is `None` when the other side
+/// isn't a recorded transaction at all (e.g. a Reference Household Account,
+/// which by definition has no imports) rather than a lookup failure, so
+/// that's stated plainly instead of looking like an error.
+fn draw_transfer_detail(frame: &mut Frame, detail: &crate::app::TransferDetail, area: Rect) {
+    let popup = centered_rect(70, 8, area);
+    frame.render_widget(Clear, popup);
+
+    let own_amount = crate::format_amount_minor(detail.own.amount_minor, &detail.own.currency);
+    let mut lines = vec![
+        format!(
+            "{}  {}  {}",
+            detail.own.posted_at, own_amount, detail.own_account_name
+        ),
+        detail.own.description.clone(),
+        String::new(),
+    ];
+    match &detail.counterpart {
+        Some(counterpart) => {
+            let counterpart_amount =
+                crate::format_amount_minor(counterpart.amount_minor, &counterpart.currency);
+            lines.push(format!(
+                "{}  {}  {}",
+                counterpart.posted_at, counterpart_amount, detail.counterpart_label
+            ));
+            lines.push(counterpart.description.clone());
+        }
+        None => {
+            lines.push(format!(
+                "No matching transaction recorded for \"{}\" — likely a Reference \
+                 Household Account (never imported) rather than a missing match.",
+                detail.counterpart_label
+            ));
+        }
+    }
+
+    let paragraph = Paragraph::new(lines.join("\n")).block(
+        Block::default()
+            .title("Both legs of this transfer (any key to close)")
             .borders(Borders::ALL),
     );
     frame.render_widget(paragraph, popup);
@@ -180,9 +232,7 @@ fn draw_transactions(frame: &mut Frame, app: &mut App, area: Rect) {
 }
 
 fn draw_monthly_gap(frame: &mut Frame, app: &mut App, area: Rect) {
-    let block = Block::default()
-        .title("Monthly Gap")
-        .borders(Borders::ALL);
+    let block = Block::default().title("Monthly Gap").borders(Borders::ALL);
 
     if app.monthly_spend.is_empty() {
         frame.render_widget(
@@ -293,14 +343,144 @@ fn draw_month_spend(frame: &mut Frame, app: &mut App, area: Rect) {
     frame.render_stateful_widget(table, area, &mut app.month_spend_table_state);
 }
 
+fn draw_monthly_transfers(frame: &mut Frame, app: &mut App, area: Rect) {
+    let block = Block::default()
+        .title("Monthly Transfers")
+        .borders(Borders::ALL);
+
+    if app.monthly_transfers.is_empty() {
+        frame.render_widget(
+            Paragraph::new("No internal transfers found. Run `ledgr import` first.").block(block),
+            area,
+        );
+        return;
+    }
+
+    let rows = app
+        .monthly_transfers
+        .iter()
+        .map(|month| {
+            let out = crate::format_amount_minor(month.transferred_out_minor.abs(), "GBP");
+            let inn = crate::format_amount_minor(month.transferred_in_minor, "GBP");
+            Row::new(vec![
+                Cell::from(month.month.clone()),
+                Cell::from(Line::from(out).alignment(Alignment::Right)),
+                Cell::from(Line::from(inn).alignment(Alignment::Right)),
+            ])
+        })
+        .collect::<Vec<_>>();
+
+    let header = Row::new(vec!["Month", "Transferred Out", "Transferred In"])
+        .style(Style::default().add_modifier(Modifier::BOLD));
+
+    let table = Table::new(
+        rows,
+        [
+            Constraint::Length(7),
+            Constraint::Length(16),
+            Constraint::Length(16),
+        ],
+    )
+    .header(header)
+    .column_spacing(1)
+    .block(block)
+    .highlight_style(SELECTED_STYLE);
+
+    app.monthly_transfers_table_state
+        .select(Some(app.selected_transfer_month));
+    frame.render_stateful_widget(table, area, &mut app.monthly_transfers_table_state);
+}
+
+fn draw_transfer_month(frame: &mut Frame, app: &mut App, area: Rect) {
+    let month = app
+        .monthly_transfers
+        .get(app.selected_transfer_month)
+        .map(|m| m.month.as_str())
+        .unwrap_or("Transfers");
+    let block = Block::default()
+        .title(format!("Transfers \u{2014} {month}"))
+        .borders(Borders::ALL);
+
+    if app.transfer_month_entries.is_empty() {
+        frame.render_widget(
+            Paragraph::new("No transfers for this month.").block(block),
+            area,
+        );
+        return;
+    }
+
+    let rows = app
+        .transfer_month_entries
+        .iter()
+        .map(|entry| {
+            let amount = crate::format_amount_minor(entry.amount_minor.abs(), &entry.currency);
+            let account_name = app
+                .accounts
+                .iter()
+                .find(|s| s.account.id == entry.account_id)
+                .map(|s| s.account.name.as_str())
+                .unwrap_or("?");
+            let counterparty =
+                crate::app::resolve_counterparty(entry, &app.accounts, &app.household_accounts);
+            let (from, to) = if entry.amount_minor < 0 {
+                (account_name.to_string(), counterparty)
+            } else {
+                (counterparty, account_name.to_string())
+            };
+            Row::new(vec![
+                Cell::from(entry.posted_at.clone()),
+                Cell::from(Line::from(amount).alignment(Alignment::Right)),
+                Cell::from(entry.description.clone()),
+                Cell::from(from),
+                Cell::from(to),
+            ])
+        })
+        .collect::<Vec<_>>();
+
+    let header = Row::new(vec![
+        Cell::from("Date"),
+        Cell::from(Line::from("Amount").alignment(Alignment::Right)),
+        Cell::from("Description"),
+        Cell::from("From"),
+        Cell::from("To"),
+    ])
+    .style(Style::default().add_modifier(Modifier::BOLD));
+
+    let table = Table::new(
+        rows,
+        [
+            Constraint::Length(10),
+            Constraint::Length(12),
+            Constraint::Fill(1),
+            Constraint::Length(20),
+            Constraint::Length(22),
+        ],
+    )
+    .header(header)
+    .column_spacing(1)
+    .block(block)
+    .highlight_style(SELECTED_STYLE);
+
+    app.transfer_month_table_state
+        .select(Some(app.selected_transfer_entry));
+    frame.render_stateful_widget(table, area, &mut app.transfer_month_table_state);
+}
+
 fn draw_help(frame: &mut Frame, area: Rect) {
     const BINDINGS: &[(&str, &str)] = &[
         ("j / k, \u{2193} / \u{2191}", "Move selection"),
         ("Ctrl-d / Ctrl-u", "Page down / up"),
         ("gg / G", "Jump to top / bottom"),
         ("Enter", "Open selected account, or drill into a month"),
-        ("m", "Open Monthly Gap screen"),
+        ("<space>a", "Jump to Accounts screen"),
+        ("<space>g", "Jump to Monthly Gap screen"),
+        ("<space>t", "Jump to Monthly Transfers screen"),
         ("n", "Edit note on selected spend entry (spend drill-down)"),
+        (
+            "i",
+            "Show both legs of selected transfer (transfers drill-down)",
+        ),
+        ("y", "Copy selected row to the clipboard"),
         ("Esc / q", "Back (or quit from the accounts screen)"),
         ("?", "Toggle this help screen"),
         ("Ctrl-c", "Quit"),

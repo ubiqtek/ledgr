@@ -1,6 +1,6 @@
 use super::Db;
 use crate::model::{Id, NewTransaction, Transaction};
-use rusqlite::params;
+use rusqlite::{params, OptionalExtension};
 
 impl Db {
     /// Returns `None` (inserting nothing) if `new.external_id` is `Some` and
@@ -27,6 +27,19 @@ impl Db {
             ],
         )?;
         Ok((rows > 0).then(|| self.conn().last_insert_rowid()))
+    }
+
+    pub fn get_transaction(&self, id: Id) -> rusqlite::Result<Option<Transaction>> {
+        self.conn()
+            .query_row(
+                "SELECT id, account_id, import_id, posted_at, amount_minor, currency,
+                        description, raw_description, trn_type, external_id, notes
+                 FROM transactions
+                 WHERE id = ?1",
+                params![id],
+                Self::row_to_transaction,
+            )
+            .optional()
     }
 
     pub fn list_transactions_for_account(
@@ -99,6 +112,16 @@ mod tests {
             .expect("list transactions");
         assert_eq!(txs.len(), 1);
         assert_eq!(txs[0].amount_minor, -2599);
+
+        let fetched = db
+            .get_transaction(txs[0].id)
+            .expect("get transaction")
+            .expect("transaction exists");
+        assert_eq!(fetched.description, "Groceries");
+        assert!(db
+            .get_transaction(txs[0].id + 1)
+            .expect("get transaction")
+            .is_none());
     }
 
     #[test]

@@ -81,8 +81,10 @@ impl Db {
     /// reclassification (that's still `classified_by = 'manual'`, unused by
     /// this method).
     pub fn set_spend_entry_note(&self, id: Id, note: Option<&str>) -> rusqlite::Result<()> {
-        self.conn()
-            .execute("UPDATE spend_entries SET note = ?1 WHERE id = ?2", params![note, id])?;
+        self.conn().execute(
+            "UPDATE spend_entries SET note = ?1 WHERE id = ?2",
+            params![note, id],
+        )?;
         Ok(())
     }
 

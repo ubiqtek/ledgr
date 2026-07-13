@@ -11,7 +11,7 @@
 
 use crate::config::HouseholdAccountRef;
 use crate::db::Db;
-use crate::model::{ClassifiedBy, LinkRelation, NewSpendEntry};
+use crate::model::{Account, ClassifiedBy, LinkRelation, NewSpendEntry, TransferEntry};
 use std::collections::HashSet;
 
 #[derive(Debug, Default, PartialEq, Eq)]
@@ -35,25 +35,7 @@ pub fn derive_spend_entries(
     extra_household_accounts: &[HouseholdAccountRef],
 ) -> anyhow::Result<DerivationSummary> {
     let accounts = db.list_accounts()?;
-    let mut household: HashSet<(String, String)> = accounts
-        .iter()
-        .filter_map(|a| Some((a.sort_code.clone()?, a.account_number.clone()?)))
-        .collect();
-    household.extend(
-        extra_household_accounts
-            .iter()
-            .map(|a| (a.sort_code.clone(), a.account_number.clone())),
-    );
-    let household_names: Vec<(&str, &str, &str)> = extra_household_accounts
-        .iter()
-        .filter_map(|a| {
-            Some((
-                a.name.as_deref()?,
-                a.sort_code.as_str(),
-                a.account_number.as_str(),
-            ))
-        })
-        .collect();
+    let (household, household_names) = build_household(&accounts, extra_household_accounts);
 
     let mut summary = DerivationSummary::default();
     #[allow(clippy::type_complexity)]
@@ -235,6 +217,82 @@ pub fn derive_spend_entries(
     }
 
     Ok(summary)
+}
+
+/// Builds the household lookups `classify` needs from every imported
+/// account's own sort code/account number plus any `extra_household_accounts`
+/// (e.g. a partner's, never imported) — shared by `derive_spend_entries` and
+/// `find_internal_transfers` so the two don't drift.
+#[allow(clippy::type_complexity)]
+fn build_household<'a>(
+    accounts: &[Account],
+    extra_household_accounts: &'a [HouseholdAccountRef],
+) -> (HashSet<(String, String)>, Vec<(&'a str, &'a str, &'a str)>) {
+    let mut household: HashSet<(String, String)> = accounts
+        .iter()
+        .filter_map(|a| Some((a.sort_code.clone()?, a.account_number.clone()?)))
+        .collect();
+    household.extend(
+        extra_household_accounts
+            .iter()
+            .map(|a| (a.sort_code.clone(), a.account_number.clone())),
+    );
+    let household_names: Vec<(&str, &str, &str)> = extra_household_accounts
+        .iter()
+        .filter_map(|a| {
+            Some((
+                a.name.as_deref()?,
+                a.sort_code.as_str(),
+                a.account_number.as_str(),
+            ))
+        })
+        .collect();
+    (household, household_names)
+}
+
+/// Re-runs `classify` over every transaction not yet linked to a spend entry
+/// (`Db::pending_derivation_transactions`, the same candidate set
+/// `derive_spend_entries` starts from — see its doc comment), keeping only
+/// those recognised as `Classification::InternalTransfer`. Read-only preview
+/// pass for the Monthly Transfers audit screen — never writes to the
+/// database, unlike `derive_spend_entries`.
+pub fn find_internal_transfers(
+    db: &Db,
+    household_accounts: &[HouseholdAccountRef],
+) -> anyhow::Result<Vec<TransferEntry>> {
+    let accounts = db.list_accounts()?;
+    let (household, household_names) = build_household(&accounts, household_accounts);
+
+    let mut entries = Vec::new();
+    for txn in db.pending_derivation_transactions()? {
+        let Some(account) = accounts.iter().find(|a| a.id == txn.account_id) else {
+            continue;
+        };
+
+        if let Classification::InternalTransfer {
+            counterpart_sort,
+            counterpart_account,
+        } = classify(
+            &txn.description,
+            txn.trn_type.as_deref(),
+            txn.amount_minor,
+            &household,
+            &household_names,
+        ) {
+            entries.push(TransferEntry {
+                transaction_id: txn.id,
+                account_id: account.id,
+                posted_at: txn.posted_at.clone(),
+                amount_minor: txn.amount_minor,
+                currency: txn.currency.clone(),
+                description: txn.description.clone(),
+                counterpart_sort: Some(counterpart_sort),
+                counterpart_account: Some(counterpart_account),
+            });
+        }
+    }
+
+    Ok(entries)
 }
 
 #[derive(Debug, PartialEq)]
@@ -471,7 +529,10 @@ fn looks_like_card_payment_reference(description: &str) -> bool {
     let is_pan_prefix = last.len() <= MAX_PAN_DIGITS
         && last.bytes().all(|b| b.is_ascii_digit())
         && known_card_network_prefix(last);
-    let has_name = !name_words.is_empty() && name_words.iter().all(|w| w.bytes().all(|b| b.is_ascii_alphabetic()));
+    let has_name = !name_words.is_empty()
+        && name_words
+            .iter()
+            .all(|w| w.bytes().all(|b| b.is_ascii_alphabetic()));
     is_pan_prefix && has_name
 }
 
@@ -489,8 +550,8 @@ fn known_card_network_prefix(pan_prefix: &str) -> bool {
     };
     match pan_prefix.as_bytes().first() {
         Some(b'4') => true,                            // Visa
-        Some(b'5') => (5100..=5599).contains(&first4),  // Mastercard (old range)
-        Some(b'2') => (2221..=2720).contains(&first4),  // Mastercard (new range)
+        Some(b'5') => (5100..=5599).contains(&first4), // Mastercard (old range)
+        Some(b'2') => (2221..=2720).contains(&first4), // Mastercard (new range)
         _ => false,
     }
 }
@@ -674,7 +735,13 @@ mod tests {
     #[test]
     fn classifies_a_payment_to_an_unknown_account_as_low_confidence_spend() {
         let household = HashSet::new();
-        let result = classify("609934 11112222 RENT FT", Some("OTHER"), -75000, &household, &[]);
+        let result = classify(
+            "609934 11112222 RENT FT",
+            Some("OTHER"),
+            -75000,
+            &household,
+            &[],
+        );
         assert_eq!(
             result,
             Classification::Spend {
@@ -727,7 +794,13 @@ mod tests {
     #[test]
     fn classifies_an_outbound_person_payment_as_spend() {
         let household = HashSet::new();
-        let result = classify("J SMITH WINDOW CLEAN FT", Some("OTHER"), -2500, &household, &[]);
+        let result = classify(
+            "J SMITH WINDOW CLEAN FT",
+            Some("OTHER"),
+            -2500,
+            &household,
+            &[],
+        );
         assert_eq!(
             result,
             Classification::Spend {
@@ -741,7 +814,13 @@ mod tests {
     #[test]
     fn classifies_an_inbound_person_payment_as_a_reimbursement() {
         let household = HashSet::new();
-        let result = classify("J SMITH CONCERT TICKET FT", Some("OTHER"), 3000, &household, &[]);
+        let result = classify(
+            "J SMITH CONCERT TICKET FT",
+            Some("OTHER"),
+            3000,
+            &household,
+            &[],
+        );
         assert_eq!(
             result,
             Classification::Spend {
@@ -1127,6 +1206,93 @@ mod tests {
         assert_eq!(
             summary.spend_entries_created, 1,
             "no credit card account exists yet, so this stays visible as spend"
+        );
+    }
+
+    #[test]
+    fn find_internal_transfers_returns_only_transfers_not_spend_or_out_of_scope() {
+        let db = Db::open_in_memory().expect("open db");
+        let bills_account = db
+            .insert_account(&NewAccount {
+                name: "Bills Account".into(),
+                institution: Some("Barclays".into()),
+                account_type: AccountType::Current,
+                currency: "GBP".into(),
+                sort_code: Some("209912".into()),
+                account_number: Some("12345678".into()),
+            })
+            .expect("insert bills account");
+
+        // An internal transfer to a household reference account (never
+        // imported, so only reachable via the config-supplied
+        // household_accounts list, mirroring a real Reference Household
+        // Account like Joint Annual Expense).
+        db.insert_transaction(&NewTransaction {
+            account_id: bills_account,
+            import_id: None,
+            posted_at: "2026-06-05".into(),
+            amount_minor: -12000,
+            currency: "GBP".into(),
+            description: "609934 99998888 JOINT EXPENSE FT".into(),
+            raw_description: None,
+            trn_type: Some("OTHER".into()),
+            external_id: None,
+            notes: None,
+        })
+        .expect("insert transfer transaction");
+
+        // Ordinary spend — must not appear in the transfers result.
+        db.insert_transaction(&NewTransaction {
+            account_id: bills_account,
+            import_id: None,
+            posted_at: "2026-06-06".into(),
+            amount_minor: -2599,
+            currency: "GBP".into(),
+            description: "TESCO STORES ON 06 JUN CPM".into(),
+            raw_description: None,
+            trn_type: Some("OTHER".into()),
+            external_id: None,
+            notes: None,
+        })
+        .expect("insert spend transaction");
+
+        // Out of scope (salary) — must not appear in the transfers result.
+        db.insert_transaction(&NewTransaction {
+            account_id: bills_account,
+            import_id: None,
+            posted_at: "2026-06-07".into(),
+            amount_minor: 200000,
+            currency: "GBP".into(),
+            description: "SALARY".into(),
+            raw_description: None,
+            trn_type: Some("DIRECTDEP".into()),
+            external_id: None,
+            notes: None,
+        })
+        .expect("insert out-of-scope transaction");
+
+        let household = HouseholdAccountRef {
+            sort_code: "609934".into(),
+            account_number: "99998888".into(),
+            label: Some("Joint Annual Expense".into()),
+            name: None,
+        };
+        let transfers = find_internal_transfers(&db, &[household]).expect("find transfers");
+
+        assert_eq!(transfers.len(), 1, "only the transfer should be returned");
+        assert_eq!(transfers[0].description, "609934 99998888 JOINT EXPENSE FT");
+        assert_eq!(transfers[0].amount_minor, -12000);
+        assert_eq!(transfers[0].counterpart_sort.as_deref(), Some("609934"));
+        assert_eq!(
+            transfers[0].counterpart_account.as_deref(),
+            Some("99998888")
+        );
+
+        // Read-only — must not write any spend entries or transaction links.
+        assert_eq!(
+            db.list_spend_entries().expect("list spend entries").len(),
+            0,
+            "find_internal_transfers is a preview pass and must not derive spend"
         );
     }
 }

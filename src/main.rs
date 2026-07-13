@@ -286,6 +286,24 @@ fn run_note(db: Db, id_arg: &str, text: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Copies `text` to the system clipboard via `pbcopy` (`y` on a selected
+/// row) — macOS-only, matching this app's only supported platform today.
+/// Best-effort: a missing/failing `pbcopy` is swallowed by the caller rather
+/// than surfaced, since it's not worth crashing the TUI over.
+fn copy_to_clipboard(text: &str) -> anyhow::Result<()> {
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+
+    let mut child = Command::new("pbcopy").stdin(Stdio::piped()).spawn()?;
+    child
+        .stdin
+        .as_mut()
+        .expect("stdin piped above")
+        .write_all(text.as_bytes())?;
+    child.wait()?;
+    Ok(())
+}
+
 /// Formats a signed minor-unit amount (e.g. pence) as a major-unit string
 /// with the currency code, e.g. `-4550` GBP -> `-45.50 GBP`.
 fn format_amount_minor(amount_minor: i64, currency: &str) -> String {
@@ -342,6 +360,10 @@ fn run(
     // Set when a lone `g` was just pressed, waiting to see if a second `g`
     // follows (nvim's `gg` "go to top"); cleared on any other key.
     let mut pending_g = false;
+    // Set when `<space>` (the leader key) was just pressed, waiting for the
+    // next keypress to dispatch a top-level navigation jump; cleared on any
+    // other key, same pattern as `pending_g`.
+    let mut pending_leader = false;
 
     while !app.should_quit {
         terminal.draw(|frame| ui::draw(frame, app))?;
@@ -376,34 +398,61 @@ fn run(
                     continue;
                 }
 
+                // While the transfer-detail popup is open, any key dismisses
+                // it rather than being treated as navigation.
+                if app.transfer_detail.is_some() {
+                    app.close_transfer_detail();
+                    continue;
+                }
+
                 let was_pending_g = pending_g;
                 pending_g = false;
+                let was_pending_leader = pending_leader;
+                pending_leader = false;
+
+                if was_pending_leader {
+                    match key.code {
+                        KeyCode::Char('a') => app.navigate_to(app::Screen::Accounts),
+                        KeyCode::Char('g') => app.open_monthly_gap()?,
+                        KeyCode::Char('t') => app.open_monthly_transfers()?,
+                        _ => {}
+                    }
+                    continue;
+                }
+
                 match key.code {
+                    KeyCode::Char(' ') => pending_leader = true,
                     KeyCode::Char('g') if was_pending_g => app.select_first(),
                     KeyCode::Char('g') => pending_g = true,
                     KeyCode::Char('G') => app.select_last(),
                     KeyCode::Char('c') if ctrl => app.should_quit = true,
                     KeyCode::Char('d') if ctrl => app.move_selection(page),
                     KeyCode::Char('u') if ctrl => app.move_selection(-page),
-                    KeyCode::Char('q') | KeyCode::Esc => match app.screen {
-                        app::Screen::Accounts => app.should_quit = true,
-                        app::Screen::Transactions
-                        | app::Screen::MonthlyGap
-                        | app::Screen::MonthSpend
-                        | app::Screen::Help => app.back(),
-                    },
-                    KeyCode::Char('?') => app.toggle_help(),
-                    KeyCode::Char('m') if app.screen == app::Screen::Accounts => {
-                        app.open_monthly_gap()?;
+                    KeyCode::Char('q') | KeyCode::Esc => {
+                        if app.screen == app::Screen::Accounts {
+                            app.should_quit = true;
+                        } else {
+                            app.back();
+                        }
                     }
+                    KeyCode::Char('?') => app.toggle_help(),
                     KeyCode::Char('n') if app.screen == app::Screen::MonthSpend => {
                         app.start_editing_note();
+                    }
+                    KeyCode::Char('i') if app.screen == app::Screen::TransferMonth => {
+                        app.show_transfer_detail()?;
+                    }
+                    KeyCode::Char('y') => {
+                        if let Some(text) = app.selected_row_text() {
+                            let _ = copy_to_clipboard(&text);
+                        }
                     }
                     KeyCode::Down | KeyCode::Char('j') => app.move_selection(1),
                     KeyCode::Up | KeyCode::Char('k') => app.move_selection(-1),
                     KeyCode::Enter => match app.screen {
                         app::Screen::Accounts => app.open_selected_account()?,
                         app::Screen::MonthlyGap => app.open_selected_month()?,
+                        app::Screen::MonthlyTransfers => app.open_selected_transfer_month()?,
                         _ => {}
                     },
                     _ => {}

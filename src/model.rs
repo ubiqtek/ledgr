@@ -245,6 +245,46 @@ pub struct MonthlySpend {
     pub spend_minor: i64,
 }
 
+/// One entry in the Monthly Transfers audit view — a raw transaction
+/// `derive::classify` recognised as `Classification::InternalTransfer`.
+/// Deliberately not persisted anywhere: `derive::find_internal_transfers`
+/// is a read-only preview pass, re-run on demand, not a derivation pass
+/// (contrast with `SpendEntry`, which is written by `derive_spend_entries`).
+#[derive(Debug, Clone)]
+pub struct TransferEntry {
+    pub transaction_id: Id,
+    pub account_id: Id,
+    /// ISO 8601 date, e.g. `2026-07-11` — same convention as
+    /// `Transaction::posted_at`.
+    pub posted_at: String,
+    /// Signed amount in minor currency units — negative for money leaving
+    /// `account_id`, positive for money arriving.
+    pub amount_minor: i64,
+    pub currency: String,
+    pub description: String,
+    /// The counterpart account's sort code, when the transfer was
+    /// recognised via account-number matching (household accounts always
+    /// carry this; a name-matched household member's account, see
+    /// `HouseholdAccountRef::name`, also carries it via the config entry).
+    pub counterpart_sort: Option<String>,
+    pub counterpart_account: Option<String>,
+}
+
+/// One row of the Monthly Transfers view: money moved to/from household
+/// accounts in a calendar month. Both directions are kept separate — not
+/// netted — so the user can see "£X went out, £Y came in" per month, the
+/// whole point of the screen (see `doc/planning/plan.md`).
+#[derive(Debug, Clone)]
+pub struct MonthlyTransfer {
+    /// `YYYY-MM`.
+    pub month: String,
+    /// Sum of outbound transfer amounts that month (negative — same signed
+    /// convention as `amount_minor` elsewhere).
+    pub transferred_out_minor: i64,
+    /// Sum of inbound transfer amounts that month (positive).
+    pub transferred_in_minor: i64,
+}
+
 /// Which raw transaction(s) a spend entry derives from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

@@ -1,12 +1,22 @@
 # Transfer ledger / `transaction_links` — design critique
 
+**Status: §1 and §3 resolved 2026-07-13 (Delta: Transfer Ledger, Task 4)**
+— credit card payment matching now writes `transfer_entries`
+(`pair_method = 'credit_card_payment_match'`), the `relation='transfer'`
+writer and its legacy rows are gone, and unmatched payments no longer
+permanently double-count as spend (see
+[transfer-ledger-design.md](transfer-ledger-design.md), "Credit card
+payment matching"). §2's narrower `transaction_links` (refund-only, still
+write-only) and §4/§5's remaining cleanup are unaffected — see Delta:
+Transfer Ledger, Task 5 in `doc/planning/plan.md`.
+
 External review (2026-07-13, fable-model agent, read-only — no files
 edited), requested after the user found the `transaction_links`
 explanation in
 [transfer-ledger-design.md](transfer-ledger-design.md) confusing.
 Reproduced here verbatim (lightly reformatted) so the finding has a
-durable home instead of living only in conversation. Directly informs
-the not-yet-started **Delta: Kill `transaction_links`** work — see
+durable home instead of living only in conversation. Directly informed
+the now-complete **Delta: Transfer Ledger, Task 4** work — see
 `doc/planning/plan.md`.
 
 ## 1. The flagged confusion is a symptom: credit card payment matching is an internal transfer that never migrated to `transfer_entries`

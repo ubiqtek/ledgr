@@ -126,7 +126,6 @@ pub struct NewTransaction {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum LinkRelation {
-    Transfer,
     Refund,
     DuplicateOf,
     Related,
@@ -135,7 +134,6 @@ pub enum LinkRelation {
 impl LinkRelation {
     pub fn as_str(&self) -> &'static str {
         match self {
-            LinkRelation::Transfer => "transfer",
             LinkRelation::Refund => "refund",
             LinkRelation::DuplicateOf => "duplicate_of",
             LinkRelation::Related => "related",
@@ -185,8 +183,9 @@ impl ClassifiedBy {
 }
 
 /// One entry in the derived spend ledger — real-world spending to a merchant
-/// or person. Internal transfers between household accounts never produce
-/// one of these; see `TransactionLink` with `LinkRelation::Transfer`.
+/// or person. Internal transfers between household accounts (including
+/// credit card payments) never produce one of these; see `TransferEntry`
+/// instead.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SpendEntry {
     pub id: Id,
@@ -268,6 +267,16 @@ pub enum TransferPairMethod {
     /// Weaker signal than `AmountDateMatch` (no cross-check from the
     /// candidate's own decode), so tried last.
     SelfReferenceMatch,
+    /// A **credit card payment** (see `ubiquitous-language.md`): the bank-side
+    /// debit paired with its credit card account's payment-received line by
+    /// date + exact amount (`Db::find_card_payment_counterpart`) — no
+    /// household-registry decode involved at all, since a card statement
+    /// carries no stable per-transaction identity to cross-reference (see
+    /// doc/kb/barclaycard/pdf-export-structure.md). Kept as its own variant
+    /// rather than folded into the tiers above because the matching
+    /// mechanism is unrelated (account-type lookup, not a `NAME`-field
+    /// decode).
+    CreditCardPaymentMatch,
 }
 
 impl TransferPairMethod {
@@ -276,6 +285,7 @@ impl TransferPairMethod {
             TransferPairMethod::DescriptionMatch => "description_match",
             TransferPairMethod::AmountDateMatch => "amount_date_match",
             TransferPairMethod::SelfReferenceMatch => "self_reference_match",
+            TransferPairMethod::CreditCardPaymentMatch => "credit_card_payment_match",
         }
     }
 }

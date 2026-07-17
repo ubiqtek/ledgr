@@ -101,22 +101,18 @@ entry is the derived, categorisable, human-facing record built from it.
 Ledger); given its own entry 2026-07-13 for clarity against
 **transaction**.*
 
-### Transfer Ledger — candidate
+### Transfer Ledger — established
 
 The derived ledger of internal transfers between household accounts:
 one **transfer entry** per real-world transfer between two accounts,
 built during `ledgr import`'s derivation pass and never re-derived live
 by the UI (ADR 0009 — the same principle the spend ledger already
 followed). See `doc/implementation-notes/transfer-ledger-design.md`.
-Not yet agreed as a formal term — the user asked for the transaction/
-transfer-entry terminology to be made precise (2026-07-13), which this
-records, but hasn't explicitly signed off on "Transfer Ledger" itself as
-the name.
 *Origin: the assistant, proposed 2026-07-13 (Delta: Transfer Ledger),
-naming mirrors the already-established **Spend Ledger**; pending the
-user's confirmation.*
+naming mirrors the already-established **Spend Ledger**; confirmed by
+the user 2026-07-13.*
 
-### Transfer Entry — candidate
+### Transfer Entry — established
 
 One row in the **transfer ledger**: `ledgr`'s judgement that two
 **transactions** (or one transaction and a household counterpart that
@@ -130,7 +126,7 @@ mid-session, 2026-07-13, precisely because "transfer entry" had been
 used to mean a single transaction's own row — see the design doc's
 history companion for the full correction).
 *Origin: the assistant, proposed 2026-07-13 (Delta: Transfer Ledger);
-pending the user's confirmation.*
+confirmed by the user 2026-07-13.*
 
 ### Income Ledger — established (deferred)
 
@@ -152,29 +148,27 @@ recorded only as a `transaction_links` pairing with no dedicated ledger;
 see Delta: Transfer Ledger.) *Origin: Rebel Finance ("transfers between
 your own accounts"), confirmed by the user.*
 
-### Credit Card Payment — candidate
+### Credit Card Payment — established
 
 A specific case of **internal transfer**: money moving from a household
 current/savings account to pay down a household credit card account.
 Named explicitly as "Credit Card Payment" rather than the bare "Card
 Payment" used informally in code and earlier docs (`Classification::CardPayment`
-in `src/derive.rs`, rule names `card_payment`/`card_payment_unmatched`),
-because "card payment" alone is ambiguous with a card *purchase*
-(spend) — the two are opposite ends of the household boundary (a
+in `src/derive.rs`), because "card payment" alone is ambiguous with a card
+*purchase* (spend) — the two are opposite ends of the household boundary (a
 purchase is spend; a repayment is internal money movement) and sharing
 one loose name for both risks conflating them. Recognised by matching a
 credit-card statement's payment line to its counterpart debit on a bank
 account (date + exact amount, ±3 days) — see
-`doc/implementation-notes/transfer-ledger-design.md`. As of 2026-07-13
-this matching is implemented against the older `transaction_links` edge
-table (`relation='transfer'`, `confidence=0.85`), not the newer
-**transfer entry**/**transfer ledger** machinery that now covers other
-internal transfers — flagged as a known gap, not yet resolved, since by
-this term's own definition a credit card payment is an internal
-transfer and should produce a transfer entry like any other.
+`doc/implementation-notes/transfer-ledger-design.md`. Migrated into
+**transfer entry**/**transfer ledger** 2026-07-13 (Delta: Transfer Ledger,
+Task 4): a matched payment now produces a `transfer_entries` row
+(`pair_method = 'credit_card_payment_match'`) exactly like any other
+internal transfer, rather than a `transaction_links` row — closing the gap
+flagged when this term was first recorded.
 *Origin: the user, 2026-07-13, requesting the "card payment" term used
 informally in code/docs be made explicit and distinguished from a card
-purchase; naming not yet formally confirmed.*
+purchase.*
 
 ### Household — established
 

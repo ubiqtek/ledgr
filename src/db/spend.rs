@@ -648,6 +648,7 @@ impl Db {
                 pair_method: pair_method.map(|m| match m.as_str() {
                     "description_match" => TransferPairMethod::DescriptionMatch,
                     "amount_date_match" => TransferPairMethod::AmountDateMatch,
+                    "credit_card_payment_match" => TransferPairMethod::CreditCardPaymentMatch,
                     _ => TransferPairMethod::SelfReferenceMatch,
                 }),
                 pair_confidence: row.get(15)?,
@@ -686,6 +687,30 @@ impl Db {
                 |row| row.get(0),
             )
             .optional()
+    }
+
+    /// Every one-sided `transfer_entries` row still awaiting its credit card
+    /// counterpart — i.e. a bank-side card payment debit recorded by
+    /// `run_derivation` before the matching card statement had been
+    /// imported. Retried on every subsequent run
+    /// (`find_card_payment_counterpart` searches raw `transactions`, so a
+    /// counterpart that's since been imported is found without needing the
+    /// original leg reprocessed) rather than only at the moment the debit
+    /// was first classified — see
+    /// doc/implementation-notes/transfer-ledger-critique.md, "no
+    /// retroactive completion — permanent double-count".
+    pub fn open_card_payment_entries(&self) -> rusqlite::Result<Vec<(Id, Id, i64, String)>> {
+        let mut stmt = self.conn().prepare(
+            "SELECT id, out_transaction_id, amount_minor, occurred_on
+             FROM transfer_entries
+             WHERE in_transaction_id IS NULL
+               AND out_transaction_id IS NOT NULL
+               AND rule_name = 'credit_card_payment'",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+        })?;
+        rows.collect()
     }
 
     /// Best-effort search for the original charge a card refund pays back:

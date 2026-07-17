@@ -2,13 +2,11 @@
 
 ## What's Next
 
-**Next:** [Delta: Transfer Ledger / Task 4](#task-4-migrate-credit-card-payment-matching-into-transfer_entries-retire-legacy-transaction_links-usage) — migrate credit card payment matching into `transfer_entries` and retire the legacy `transaction_links` usage it currently relies on (new session, per the user's explicit request to defer the fix).
-**Before that:**
-1. Review and commit the uncommitted working tree (leader-key nav, Monthly Transfers v1, the full Transfer Ledger build, this session's rename/doc/critique work).
-2. Get the user's sign-off to add "Transfer Entry"/"Transfer Ledger"/"Credit Card Payment" to `doc/domain/ubiquitous-language.md` as established terms.
-**Sub-doc:** `doc/implementation-notes/transfer-ledger-critique.md`
+**Next:** [Delta: Transfer Ledger / Task 5](#task-5-retire-transaction_links-entirely-by-absorbing-refund-links-into-the-spend-ledger) — retire `transaction_links` entirely by absorbing refund links into `spend_entries`, now that Task 4 has narrowed it down to refund linking as its only live purpose.
+**Before that:** review and commit the still-uncommitted Task 4 work (`git diff --stat`: 10 files — `src/derive.rs`, `src/db/{mod,schema,spend}.rs`, `src/model.rs`, `src/main.rs`, plus the domain-language sign-off and design/critique/plan doc updates). New session, per the user's request (2026-07-17) — nothing further was done this session, this is a straight hand-off.
+**Sub-doc:** none yet — Task 5's column-shape question isn't designed.
 **Blockers:** None currently.
-**Context:** [Checkpoint: Session 2026-07-13f](#checkpoint-session-2026-07-13f).
+**Context:** [Checkpoint: Session 2026-07-17](#checkpoint-session-2026-07-17).
 
 ## Summary
 
@@ -31,7 +29,7 @@
 | [Delta: Transfer Ledger](#delta-transfer-ledger) | [1. Monthly Transfers screen (v1, derive-on-the-fly)](#task-1-monthly-transfers-screen-v1-derive-on-the-fly) | ✓ DONE — uncommitted, superseded by Task 2's design |
 | | [2. Design a persisted transfer ledger + ADR](#task-2-design-a-persisted-transfer-ledger--adr) | ✓ DONE |
 | | [3. Persist the ledger and migrate the screen to query it](#task-3-persist-the-ledger-and-migrate-the-screen-to-query-it) | ✓ DONE |
-| | [4. Migrate credit card payment matching into transfer_entries; retire legacy transaction_links usage](#task-4-migrate-credit-card-payment-matching-into-transfer_entries-retire-legacy-transaction_links-usage) | TODO |
+| | [4. Migrate credit card payment matching into transfer_entries; retire legacy transaction_links usage](#task-4-migrate-credit-card-payment-matching-into-transfer_entries-retire-legacy-transaction_links-usage) | ✓ DONE |
 | | [5. Retire transaction_links entirely by absorbing refund links into the spend ledger](#task-5-retire-transaction_links-entirely-by-absorbing-refund-links-into-the-spend-ledger) | TODO |
 | [Delta: Reconciliation](#delta-reconciliation) | [1. Design account-level and household-level reconciliation checks](#task-1-design-account-level-and-household-level-reconciliation-checks) | TODO |
 | [Delta: The Gap](#delta-the-gap) | [1. Minimal income ledger](#task-1-minimal-income-ledger) | TODO |
@@ -911,30 +909,75 @@ to Task 2 below, done step by step rather than rushed).
   2's open question).
 
 ### Task 4: Migrate credit card payment matching into `transfer_entries`; retire legacy `transaction_links` usage
-- TODO — external review (fable-model agent, 2026-07-13, read-only, see
-  `doc/implementation-notes/transfer-ledger-critique.md`) found that
-  `Classification::CardPayment` matching (Delta: Credit Card Transaction
-  Import, Task 5) still writes to the legacy `transaction_links` table
-  (`relation='transfer'`, `confidence=0.85`) instead of to
-  `transfer_entries`, even though the project's own ubiquitous language
-  ("Internal Transfer") already defines credit card repayments as a kind
-  of internal transfer that should produce a transfer entry. Consequence:
-  credit card repayments are currently invisible on the Monthly Transfers
-  screen. Two related bugs also flagged: matched card payments are
-  re-matched on every `ledgr import` (no `transfer_entries` row excludes
-  them from `pending_derivation_transactions`), and an unmatched card
-  payment's low-confidence spend entry is never retroactively corrected
-  once the real card statement is later imported (permanent
-  double-count). New term **Credit Card Payment** recorded in
-  `doc/domain/ubiquitous-language.md` (candidate) to make this explicit
-  going forward. Deliberately not fixed this session — the user asked for
-  docs/plan only, fix deferred to a new session.
-- TODO — once the above lands, re-assess whether `transaction_links` can
-  be retired further: after migration its only remaining live writer is
-  refund linking (`LinkRelation::Refund`) — `duplicate_of`/`related` have
-  no writers at all today. Not a full kill, but a significant shrink. See
-  the critique doc for the full analysis.
-- Sub-doc: `doc/implementation-notes/transfer-ledger-critique.md`
+- ✓ DONE (2026-07-13 session, run autonomously) — sign-off obtained first:
+  "Transfer Entry"/"Transfer Ledger"/"Credit Card Payment" promoted from
+  `candidate` to `established` in `doc/domain/ubiquitous-language.md`.
+- ✓ DONE — `Classification::CardPayment` matching (`src/derive.rs`) now
+  writes `transfer_entries` instead of `transaction_links`: a matched
+  payment is fully paired directly (`Db::create_paired_transfer`, new
+  `TransferPairMethod::CreditCardPaymentMatch`, `pair_method =
+  'credit_card_payment_match'`, `pair_confidence = 0.85`, same value as
+  the retired mechanism used); an unmatched candidate (card statement not
+  yet imported) is recorded as a one-sided out-leg
+  (`Db::insert_transfer_leg`, `rule_name = 'credit_card_payment'`) —
+  **not** a low-confidence spend entry as before, since a credit card
+  payment is an internal transfer by definition, matched or not. New
+  `DerivationSummary.card_payments_unmatched` field (replaces the old
+  `card_payment_unmatched`-rule spend entries). Both real bugs the
+  critique flagged are fixed as a result: matched payments no longer
+  reprocess forever (they now gain a `transfer_entries` row, which
+  `pending_derivation_transactions` already excludes); an unmatched
+  payment is retried every run via new `Db::open_card_payment_entries` +
+  a fresh `find_card_payment_counterpart` lookup (works because the
+  card-side payment line, until matched, classifies `OutOfScope` and so
+  is never excluded from being found) rather than becoming a permanent
+  double-count once its old spend entry existed. Full mechanism written
+  up in `doc/implementation-notes/transfer-ledger-design.md`, "Credit
+  card payment matching".
+- ✓ DONE — `transaction_links`: `LinkRelation::Transfer` variant removed
+  (dead once its only writer was gone); schema's `relation` `CHECK`
+  narrowed to `refund`/`duplicate_of`/`related`
+  (`duplicate_of`/`related` still have no writer — untouched, that's
+  Task 5's scope). New `Db::init` migration
+  (`migrate_delete_legacy_transfer_links`) purges any stale
+  `relation='transfer'` rows on every open, unconditionally (cheap,
+  idempotent). New `Db::init` migration pair
+  (`migrate_rename_narrow_pair_method_transfer_entries` +
+  `migrate_copy_narrow_pair_method_transfer_entries`) widens an
+  already-created real `transfer_entries` table's `pair_method` `CHECK`
+  to accept `'credit_card_payment_match'` — same rename/recreate/copy/drop
+  pattern as the earlier leg-shape migration, since SQLite can't `ALTER` a
+  `CHECK` constraint in place.
+- ✓ DONE — the two existing card-payment tests were expanded rather than
+  replaced (test count unchanged, 81 total, all passing): the matched-
+  payment test now also asserts one `transfer_entries` row (not
+  `transaction_links`) and idempotency across a second `run_derivation`;
+  the unmatched-payment test (renamed
+  `run_derivation_records_an_unmatched_card_payment_as_an_open_transfer_entry`)
+  now asserts an open one-sided row (not a spend entry), then that it's
+  retroactively paired once the credit card statement "arrives" in a
+  later derivation run, with no duplicate row. `cargo build`/`test`/
+  `clippy --all-targets`: 0 errors; warnings at the same pre-existing
+  dead-code baseline (nothing new).
+- ✓ DONE — real database migration: backed up
+  `~/.local/share/ledgr/ledgr.db` first
+  (`ledgr.db.bak-20260713232858-pre-cc-payment-transfer-entries-migration`),
+  validated end-to-end on a scratch copy (via a fake `HOME` pointing
+  `directories::BaseDirs` at the scratch copy) before touching the real
+  file. Real `ledgr import`: all 32 real credit card payments (previously
+  `transaction_links relation='transfer'` rows) matched into
+  `transfer_entries` (`card_payments_matched: 32`, `0` still unmatched);
+  `transaction_links` narrowed from 35 rows (32 transfer + 3 refund) to
+  exactly the 3 refund rows. `ledgr status` confirmed no change to any
+  account balance or transaction count. Re-ran `ledgr import` a second
+  time: 0 new matches, `transfer_entries` count unchanged (202) —
+  confirmed idempotent.
+- ✓ DONE — `ledgr import`'s printed summary (`src/main.rs`) now surfaces
+  `card_payments_matched`/`card_payments_unmatched` (previously computed
+  but never printed, even before this session).
+- Sub-doc: `doc/implementation-notes/transfer-ledger-critique.md` (updated
+  with a resolution note at the top — §1/§3 resolved by this task, §2/§4/§5
+  remain Task 5's scope).
 
 ### Task 5: Retire `transaction_links` entirely by absorbing refund links into the spend ledger
 - TODO (added 2026-07-13) — once Task 4 removes the credit card payment
@@ -2062,6 +2105,60 @@ whenever, not a blocker for Task 4.
 
 **Immediate next priorities:** see "What's Next" at the top of this
 file.
+
+## Checkpoint: Session 2026-07-13g
+
+**Completed (run autonomously, per the user's request):**
+- Sign-off obtained: "Transfer Entry"/"Transfer Ledger"/"Credit Card
+  Payment" promoted `candidate` → `established` in
+  `doc/domain/ubiquitous-language.md`.
+- Delta: Transfer Ledger, Task 4 done in full — see that task's entry
+  above for the complete write-up. Headline: credit card payment
+  matching migrated off `transaction_links` onto `transfer_entries`
+  (new `TransferPairMethod::CreditCardPaymentMatch`), both real bugs the
+  critique doc flagged (endless reprocessing of matched payments;
+  permanent double-count of ever-unmatched ones) fixed as a natural
+  consequence, `LinkRelation::Transfer` removed, real database migrated
+  and validated (32/32 real credit card payments matched, idempotent on
+  a second run, no balance/transaction-count regression). 81 tests
+  total, all still passing (two existing card-payment tests expanded
+  rather than new ones added); `cargo clippy --all-targets` clean (same
+  pre-existing dead-code baseline).
+- Updated `doc/implementation-notes/transfer-ledger-design.md` (new
+  "Credit card payment matching" section) and
+  `doc/implementation-notes/transfer-ledger-critique.md` (resolution
+  note at the top) to match.
+
+**Not done / left for later:** Delta: Transfer Ledger, Task 5 (retire
+`transaction_links` entirely by absorbing refund links into
+`spend_entries`) — not started, still needs the column-shape design
+question answered (see that task's TODOs). No manual click-through of
+the live TUI this session (verified via `cargo build`/`test`/`clippy`
+and real-database SQL checks only, consistent with how Task 3 was
+verified).
+
+**Immediate next priorities:** see "What's Next" at the top of this
+file.
+
+## Checkpoint: Session 2026-07-17
+
+**Completed:** none — reorientation only, no code/doc changes. The user
+had stepped away and lost track of state; re-briefed from this file plus
+`git status`/`git diff --stat` (Session 2026-07-13g's Task 4 work is
+still fully done but **uncommitted** — 10 files changed, listed in that
+checkpoint). Also touched up
+`doc/implementation-notes/transfer-ledger-design.md` in the prior session
+(2026-07-14, not separately checkpointed): fixed three spots left stale
+by Task 4 (the `transaction_links`-tangle notes, the naming open
+question) and refreshed the real-data numbers/added a
+`credit_card_payment_match` worked example — folded into the same
+uncommitted diff.
+
+**Decision:** the user wants a fresh session for the next real work
+(Task 5) rather than continuing here.
+
+**Immediate next priorities:** see "What's Next" at the top of this
+file — review and commit the Task 4 diff first, then start Task 5.
 
 ## Implementation Notes
 

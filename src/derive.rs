@@ -25,6 +25,13 @@ pub struct DerivationSummary {
     pub transfers_paired: usize,
     pub out_of_scope: usize,
     pub card_payments_matched: usize,
+    /// Card payment legs recorded this run with no counterpart found yet
+    /// (the credit card statement hasn't been imported) — persisted as a
+    /// one-sided `transfer_entries` row, same "stay visible" treatment as
+    /// any other unpaired transfer leg, retried on future runs rather than
+    /// becoming a permanent low-confidence spend entry. See
+    /// doc/implementation-notes/transfer-ledger-critique.md.
+    pub card_payments_unmatched: usize,
     /// Pairings completed this run where at least one leg was already
     /// persisted from an earlier run — either a genuinely new leg
     /// completing an old one (see
@@ -407,36 +414,86 @@ pub fn run_derivation(
         summary.transfers_backfilled += 1;
     }
 
-    // A card-payment reference alone isn't a reliable match (see
-    // `looks_like_card_payment_reference`'s doc comment) — only exclude it
-    // from spend once a date+amount match on a credit card account
-    // confirms it. Unmatched candidates (e.g. the card statement for that
-    // period hasn't been imported yet) still become a spend entry, at
-    // reduced confidence, so they're visible for review rather than
-    // silently dropped.
+    // A card payment is, by definition, an internal transfer (see
+    // "Credit Card Payment" in doc/domain/ubiquitous-language.md) — it gets
+    // a `transfer_entries` row like any other, never a spend entry. A
+    // card-payment reference alone isn't a reliable match (see
+    // `looks_like_card_payment_reference`'s doc comment), so the leg is only
+    // ever fully paired once a date+amount match on a credit card account
+    // confirms it; an unmatched candidate (e.g. the card statement for that
+    // period hasn't been imported yet) is recorded as a one-sided row
+    // instead, exactly like any other unpaired transfer leg, and retried on
+    // future runs below rather than becoming a permanent spend entry — see
+    // doc/implementation-notes/transfer-ledger-critique.md.
     for txn in card_payment_candidates {
-        if let Some(to_id) =
-            db.find_card_payment_counterpart(txn.id, txn.amount_minor, &txn.posted_at)?
+        let leg = NewTransferLeg {
+            transaction_id: txn.id,
+            account_id: txn.account_id,
+            role: TransferLegRole::Out,
+            occurred_on: txn.posted_at.clone(),
+            amount_minor: txn.amount_minor.abs(),
+            currency: txn.currency.clone(),
+            description: txn.description.clone(),
+            counterpart_sort_code: String::new(),
+            counterpart_account_number: String::new(),
+            counterpart_account_id: None,
+            classified_by: ClassifiedBy::Rule,
+            confidence: Some(1.0),
+            rule_name: Some("credit_card_payment".to_string()),
+        };
+        match db.find_card_payment_counterpart(txn.id, txn.amount_minor, &txn.posted_at)? {
+            Some(counterpart_id) => {
+                if let Some(counterpart) = db.get_transaction(counterpart_id)? {
+                    db.create_paired_transfer(
+                        &leg,
+                        &counterpart,
+                        TransferPairMethod::CreditCardPaymentMatch,
+                        0.85,
+                    )?;
+                    summary.card_payments_matched += 1;
+                }
+            }
+            None => {
+                db.insert_transfer_leg(&leg)?;
+                summary.card_payments_unmatched += 1;
+            }
+        }
+    }
+
+    // Retry every still-open card payment leg from an earlier run: the
+    // credit card statement may have been imported since, and its
+    // counterpart transaction was never excluded from re-matching (an
+    // unmatched credit-card-side line just stays classified `OutOfScope`,
+    // which writes nothing), so a fresh lookup can succeed where an earlier
+    // run's couldn't.
+    for (row_id, out_transaction_id, amount_minor, occurred_on) in db.open_card_payment_entries()? {
+        if let Some(counterpart_id) =
+            db.find_card_payment_counterpart(out_transaction_id, -amount_minor, &occurred_on)?
         {
-            db.insert_transaction_link(txn.id, to_id, LinkRelation::Transfer, Some(0.85))?;
-            summary.card_payments_matched += 1;
-        } else {
-            db.insert_spend_entry_with_source(
-                &NewSpendEntry {
-                    occurred_on: txn.posted_at.clone(),
-                    amount_minor: txn.amount_minor,
-                    currency: txn.currency.clone(),
-                    counterparty: None,
-                    description: txn.description.clone(),
-                    note: None,
-                    category_id: None,
+            if let Some(counterpart) = db.get_transaction(counterpart_id)? {
+                let leg = NewTransferLeg {
+                    transaction_id: counterpart.id,
+                    account_id: counterpart.account_id,
+                    role: TransferLegRole::In,
+                    occurred_on: counterpart.posted_at.clone(),
+                    amount_minor: counterpart.amount_minor.abs(),
+                    currency: counterpart.currency.clone(),
+                    description: counterpart.description.clone(),
+                    counterpart_sort_code: String::new(),
+                    counterpart_account_number: String::new(),
+                    counterpart_account_id: None,
                     classified_by: ClassifiedBy::Rule,
-                    confidence: Some(0.5),
-                    rule_name: Some("card_payment_unmatched".to_string()),
-                },
-                txn.id,
-            )?;
-            summary.spend_entries_created += 1;
+                    confidence: None,
+                    rule_name: None,
+                };
+                db.complete_transfer_leg(
+                    row_id,
+                    &leg,
+                    TransferPairMethod::CreditCardPaymentMatch,
+                    0.85,
+                )?;
+                summary.card_payments_matched += 1;
+            }
         }
     }
 
@@ -1120,6 +1177,7 @@ mod tests {
                 transfers_paired: 0,
                 out_of_scope: 0,
                 card_payments_matched: 0,
+                card_payments_unmatched: 0,
                 transfers_backfilled: 0,
             }
         );
@@ -1412,10 +1470,38 @@ mod tests {
             summary.spend_entries_created, 0,
             "a matched card payment must not leak into spend"
         );
+
+        let month_rows = db
+            .transfer_entries_for_month("2026-06")
+            .expect("query month");
+        assert_eq!(
+            month_rows.len(),
+            1,
+            "a credit card payment is one transfer_entries row like any other transfer"
+        );
+        assert_eq!(month_rows[0].out_account_id, Some(current_account));
+        assert_eq!(month_rows[0].in_account_id, Some(credit_card_account));
+        assert_eq!(
+            month_rows[0].pair_method,
+            Some(TransferPairMethod::CreditCardPaymentMatch)
+        );
+
+        let second = run_derivation(&db, &[]).expect("second derive must be idempotent");
+        assert_eq!(
+            second.card_payments_matched, 0,
+            "an already-paired card payment must not be rematched on a later run"
+        );
+        assert_eq!(
+            db.transfer_entries_for_month("2026-06")
+                .expect("query month again")
+                .len(),
+            1,
+            "re-running derivation must not duplicate the transfer entry"
+        );
     }
 
     #[test]
-    fn run_derivation_records_an_unmatched_card_payment_as_low_confidence_spend() {
+    fn run_derivation_records_an_unmatched_card_payment_as_an_open_transfer_entry() {
         let db = Db::open_in_memory().expect("open db");
         let current_account = db
             .insert_account(&NewAccount {
@@ -1444,10 +1530,63 @@ mod tests {
 
         let summary = run_derivation(&db, &[]).expect("derive");
         assert_eq!(summary.card_payments_matched, 0);
+        assert_eq!(summary.card_payments_unmatched, 1);
         assert_eq!(
-            summary.spend_entries_created, 1,
-            "no credit card account exists yet, so this stays visible as spend"
+            summary.spend_entries_created, 0,
+            "a card payment is an internal transfer, not spend, even before it's paired"
         );
+
+        let month_rows = db
+            .transfer_entries_for_month("2026-06")
+            .expect("query month");
+        assert_eq!(month_rows.len(), 1);
+        assert_eq!(month_rows[0].out_account_id, Some(current_account));
+        assert_eq!(
+            month_rows[0].in_transaction_id, None,
+            "no credit card account exists yet, so this stays visible as an unpaired leg"
+        );
+
+        // The credit card statement arrives later, in a separate import.
+        let credit_card_account = db
+            .insert_account(&NewAccount {
+                name: "Barclaycard".into(),
+                institution: Some("Barclaycard".into()),
+                account_type: AccountType::CreditCard,
+                currency: "GBP".into(),
+                sort_code: None,
+                account_number: None,
+            })
+            .expect("insert credit card account");
+        db.insert_transaction(&NewTransaction {
+            account_id: credit_card_account,
+            import_id: None,
+            posted_at: "2026-06-01".into(),
+            amount_minor: 29581,
+            currency: "GBP".into(),
+            description: "PAYMENT, THANK YOU".into(),
+            raw_description: None,
+            trn_type: Some("Payment received".into()),
+            external_id: None,
+            notes: None,
+        })
+        .expect("insert card-side payment");
+
+        let second = run_derivation(&db, &[]).expect("second derive");
+        assert_eq!(
+            second.card_payments_matched, 1,
+            "the previously-unmatched leg should be retried and paired now"
+        );
+        assert_eq!(second.card_payments_unmatched, 0);
+
+        let month_rows = db
+            .transfer_entries_for_month("2026-06")
+            .expect("query month after backfill");
+        assert_eq!(
+            month_rows.len(),
+            1,
+            "the same row completes, no duplicate is created"
+        );
+        assert_eq!(month_rows[0].in_account_id, Some(credit_card_account));
     }
 
     /// The real gap this delta exists to close: a standing order between two

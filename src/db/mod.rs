@@ -8,7 +8,7 @@ mod transactions;
 
 pub use status::AccountStatus;
 
-use rusqlite::Connection;
+use rusqlite::{Connection, OptionalExtension};
 use std::path::Path;
 
 const SCHEMA: &str = include_str!("schema.sql");
@@ -37,10 +37,16 @@ impl Db {
         Self::migrate_add_transactions_notes(&conn)?;
         let renamed_leg_shaped_transfer_entries =
             Self::migrate_rename_leg_shaped_transfer_entries(&conn)?;
+        let renamed_narrow_pair_method_transfer_entries =
+            Self::migrate_rename_narrow_pair_method_transfer_entries(&conn)?;
         conn.execute_batch(SCHEMA)?;
         if renamed_leg_shaped_transfer_entries {
             Self::migrate_merge_leg_shaped_transfer_entries(&conn)?;
         }
+        if renamed_narrow_pair_method_transfer_entries {
+            Self::migrate_copy_narrow_pair_method_transfer_entries(&conn)?;
+        }
+        Self::migrate_delete_legacy_transfer_links(&conn)?;
         Ok(Self { conn })
     }
 
@@ -282,6 +288,78 @@ impl Db {
         }
 
         conn.execute_batch("DROP TABLE transfer_entries_pre_leg_merge;")?;
+        Ok(())
+    }
+
+    /// One-off migration for databases whose `transfer_entries.pair_method`
+    /// `CHECK` constraint predates `'credit_card_payment_match'` (Delta:
+    /// Transfer Ledger, Task 4 — migrating credit card payment pairing off
+    /// the legacy `transaction_links` mechanism). SQLite can't `ALTER` a
+    /// `CHECK` constraint, so — same pattern as
+    /// `migrate_rename_leg_shaped_transfer_entries` above — the existing
+    /// table is renamed aside here, letting `SCHEMA`'s
+    /// `CREATE TABLE IF NOT EXISTS` create a fresh one with the widened
+    /// `CHECK`; `migrate_copy_narrow_pair_method_transfer_entries` then
+    /// copies every row across unchanged (no shape change this time) and
+    /// drops the renamed table. Detected by inspecting the stored `CREATE
+    /// TABLE` text directly, since column presence can't distinguish a
+    /// `CHECK`-only change. No-op on a fresh database or one already
+    /// migrated.
+    fn migrate_rename_narrow_pair_method_transfer_entries(conn: &Connection) -> rusqlite::Result<bool> {
+        let existing_sql: Option<String> = conn
+            .query_row(
+                "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'transfer_entries'",
+                [],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let Some(existing_sql) = existing_sql else {
+            return Ok(false);
+        };
+        if existing_sql.contains("credit_card_payment_match") {
+            return Ok(false);
+        }
+        conn.execute_batch(
+            "ALTER TABLE transfer_entries RENAME TO transfer_entries_pre_pair_method_widen;",
+        )?;
+        Ok(true)
+    }
+
+    /// Second half of `migrate_rename_narrow_pair_method_transfer_entries`:
+    /// copies every row from the renamed-aside table into the freshly
+    /// widened `transfer_entries` unchanged, then drops the old table. Must
+    /// run after `SCHEMA` has (re-)created `transfer_entries`.
+    fn migrate_copy_narrow_pair_method_transfer_entries(conn: &Connection) -> rusqlite::Result<()> {
+        conn.execute_batch(
+            "INSERT INTO transfer_entries
+                (id, occurred_on, amount_minor, currency,
+                 out_transaction_id, out_account_id, out_sort_code, out_account_number, out_description,
+                 in_transaction_id, in_account_id, in_sort_code, in_account_number, in_description,
+                 pair_method, pair_confidence, classified_by, confidence, rule_name, classified_at)
+             SELECT id, occurred_on, amount_minor, currency,
+                    out_transaction_id, out_account_id, out_sort_code, out_account_number, out_description,
+                    in_transaction_id, in_account_id, in_sort_code, in_account_number, in_description,
+                    pair_method, pair_confidence, classified_by, confidence, rule_name, classified_at
+             FROM transfer_entries_pre_pair_method_widen;
+             DROP TABLE transfer_entries_pre_pair_method_widen;",
+        )
+    }
+
+    /// One-off cleanup: deletes any `transaction_links` rows left over from
+    /// the retired `relation='transfer'` credit card payment matching
+    /// (Delta: Transfer Ledger, Task 4 — see
+    /// doc/implementation-notes/transfer-ledger-critique.md, "credit card
+    /// payment matching is an internal transfer that never migrated to
+    /// `transfer_entries`"). Every such payment now has its own
+    /// `transfer_entries` row instead, so these are pure duplicates. Run
+    /// unconditionally on every open — cheap (indexed, small table) and a
+    /// no-op once the legacy rows are gone, so no separate "already
+    /// migrated" check is needed.
+    fn migrate_delete_legacy_transfer_links(conn: &Connection) -> rusqlite::Result<()> {
+        conn.execute(
+            "DELETE FROM transaction_links WHERE relation = 'transfer'",
+            [],
+        )?;
         Ok(())
     }
 

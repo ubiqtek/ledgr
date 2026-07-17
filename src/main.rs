@@ -56,11 +56,13 @@ fn run_import(db: Db) -> anyhow::Result<()> {
 
     let derivation = derive::run_derivation(&db, &config.household_accounts)?;
     println!(
-        "spend ledger: {} entr(y/ies) created, {} internal transfer(s) detected ({} paired, {} backfilled), {} out of scope",
+        "spend ledger: {} entries created, {} internal transfer(s) detected ({} paired, {} backfilled), {} credit card payment(s) matched ({} still unmatched), {} out of scope",
         derivation.spend_entries_created,
         derivation.transfers_detected,
         derivation.transfers_paired,
         derivation.transfers_backfilled,
+        derivation.card_payments_matched,
+        derivation.card_payments_unmatched,
         derivation.out_of_scope
     );
     Ok(())
@@ -129,7 +131,7 @@ fn run_status(db: Db) -> anyhow::Result<()> {
                 "Last Imported",
             ],
             &rows,
-            &[3],
+            &[2, 3],
         );
         println!();
     }
@@ -155,6 +157,40 @@ fn run_status(db: Db) -> anyhow::Result<()> {
         print_table(&["Label", "Account"], &rows, &[]);
         println!();
     }
+
+    let spend_ledger = db.spend_ledger_summary()?;
+    println!("Spend Ledger:");
+    println!("  {} entries", spend_ledger.entries);
+    println!();
+
+    let transfer_ledger = db.transfer_ledger_summary()?;
+    let (unpaired_reference, unpaired_unresolved) = db
+        .unpaired_transfer_counterparties()?
+        .into_iter()
+        .fold((0, 0), |(reference, unresolved), (sort, account)| {
+            match (sort, account) {
+                (Some(sort), Some(account)) if config.household_account_matches(&sort, &account) => {
+                    (reference + 1, unresolved)
+                }
+                _ => (reference, unresolved + 1),
+            }
+        });
+    println!("Transfer Ledger:");
+    println!(
+        "  {} entries ({} paired, {} unpaired: {} to reference accounts, {} unresolved)",
+        transfer_ledger.entries,
+        transfer_ledger.paired,
+        transfer_ledger.unpaired,
+        unpaired_reference,
+        unpaired_unresolved
+    );
+    if transfer_ledger.card_payments_matched > 0 || transfer_ledger.card_payments_unmatched > 0 {
+        println!(
+            "  credit card payments: {} matched, {} unmatched",
+            transfer_ledger.card_payments_matched, transfer_ledger.card_payments_unmatched
+        );
+    }
+    println!();
 
     Ok(())
 }

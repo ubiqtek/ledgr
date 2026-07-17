@@ -56,6 +56,21 @@ pub struct HouseholdAccountRef {
 }
 
 impl Config {
+    /// Whether `sort`/`account` (as decoded from a `NAME` field, possibly
+    /// truncated) identifies one of the configured Reference Household
+    /// Accounts. Same truncation-tolerant match as
+    /// `derive::household_contains` (a stored account number may be longer
+    /// than the truncated digits observed on a statement), scoped to just
+    /// the reference accounts rather than the full tracked+reference
+    /// household set, so callers can tell "this leg's counterpart is a
+    /// reference account, permanently unpairable by design" apart from
+    /// "no counterpart found at all".
+    pub fn household_account_matches(&self, sort: &str, account: &str) -> bool {
+        self.household_accounts
+            .iter()
+            .any(|a| a.sort_code == sort && (a.account_number == account || a.account_number.starts_with(account)))
+    }
+
     /// Path to the config file, XDG-style: `~/.config/ledgr/config.toml` on
     /// every platform (deliberately not the platform-native config
     /// directory — CLI users expect `~/.config`, not

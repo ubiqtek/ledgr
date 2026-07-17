@@ -121,14 +121,18 @@ CREATE TABLE IF NOT EXISTS account_card_numbers (
 
 CREATE INDEX IF NOT EXISTS idx_account_card_numbers_account ON account_card_numbers(account_id);
 
--- Generic edge table linking two transactions: transfer pairs between
--- accounts, refunds against an original charge, suspected duplicates, etc.
+-- Generic edge table linking two transactions: refunds against an original
+-- charge, suspected duplicates, etc. Transfer pairing (including credit card
+-- payments) lives in `transfer_entries` instead — 'transfer' was dropped
+-- from `relation`'s allowed values once credit card payment matching (the
+-- last writer of it) migrated there (Delta: Transfer Ledger, Task 4). See
+-- doc/implementation-notes/transfer-ledger-critique.md.
 CREATE TABLE IF NOT EXISTS transaction_links (
     id                  INTEGER PRIMARY KEY,
     from_transaction_id INTEGER NOT NULL REFERENCES transactions(id) ON DELETE CASCADE,
     to_transaction_id   INTEGER NOT NULL REFERENCES transactions(id) ON DELETE CASCADE,
     relation            TEXT NOT NULL CHECK (relation IN (
-                            'transfer', 'refund', 'duplicate_of', 'related'
+                            'refund', 'duplicate_of', 'related'
                          )),
     confidence          REAL,
     UNIQUE (from_transaction_id, to_transaction_id, relation)
@@ -140,8 +144,8 @@ CREATE INDEX IF NOT EXISTS idx_tx_links_to ON transaction_links(to_transaction_i
 -- Derived spend ledger — see doc/implementation-notes/spend-ledger-design.md.
 -- Raw transactions stay immutable evidence; this is the categorised,
 -- human-facing view of real-world spending, rebuilt by the derivation pass.
--- Internal transfers between household accounts produce no row here at all
--- (see transaction_links, relation='transfer').
+-- Internal transfers between household accounts (including credit card
+-- payments) produce no row here at all — see `transfer_entries` instead.
 CREATE TABLE IF NOT EXISTS spend_entries (
     id             INTEGER PRIMARY KEY,
     occurred_on    TEXT NOT NULL,
@@ -230,7 +234,7 @@ CREATE TABLE IF NOT EXISTS transfer_entries (
                                                      -- identify each other
                                                      -- (automated transfers,
                                                      -- mutual agreement)
-                            'self_reference_match'   -- one leg's own NAME
+                            'self_reference_match',  -- one leg's own NAME
                                                      -- decodes to *itself*
                                                      -- rather than the true
                                                      -- sender; the other
@@ -240,6 +244,14 @@ CREATE TABLE IF NOT EXISTS transfer_entries (
                                                      -- (e.g. the real SHARED
                                                      -- BILLS ACCO standing
                                                      -- order)
+                            'credit_card_payment_match' -- a credit card
+                                                     -- payment: bank-side
+                                                     -- debit paired with the
+                                                     -- card account's
+                                                     -- payment-received line
+                                                     -- by date + exact
+                                                     -- amount, no NAME decode
+                                                     -- involved
                          )),
     pair_confidence     REAL,
 

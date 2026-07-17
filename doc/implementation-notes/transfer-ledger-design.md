@@ -8,10 +8,13 @@ transfer") — see [transfer-ledger-history.md](transfer-ledger-history.md).
 Companion ADR:
 [0009 — Persisted ledgers, built at import, queried never re-derived](../adr/0009-persisted-ledgers-built-at-import.md).
 Grounding detail: [Transfer Detection — Technical Notes](../developer-docs/transfer-detection.md).
-Known design gap (credit card payments still using the legacy
-`transaction_links` mechanism instead of `transfer_entries`, and whether
-`transaction_links` can be retired once fixed): [Transfer Ledger /
-`transaction_links` — Critique](transfer-ledger-critique.md).
+Credit card payments were migrated off the legacy `transaction_links`
+mechanism onto `transfer_entries` 2026-07-13 (Delta: Transfer Ledger, Task
+4) — see [Transfer Ledger / `transaction_links` —
+Critique](transfer-ledger-critique.md) for the analysis that motivated it,
+and whether `transaction_links` can be retired further (it can't — refund
+linking is a second, independent live writer; see Delta: Transfer Ledger,
+Task 5).
 
 ## Summary
 
@@ -42,20 +45,20 @@ Known design gap (credit card payments still using the legacy
   neither leg was fresh in the run that finally pairs them (e.g. a
   pairing tier added after both legs already existed, unpaired).
 - `transaction_links` (see `src/db/schema.sql` for the exact DDL) is a
-  separate, older, generic edge table linking two transactions for
-  several unrelated reasons (`relation` — `transfer`/`refund`/
-  `duplicate_of`/`related`). It is **not** part of the transfer ledger —
-  the only reason it comes up here at all is a known, unresolved gap: a
-  **credit card payment** (see that term in `ubiquitous-language.md`) is,
-  by definition, a kind of internal transfer, but its matching code
-  (`Classification::CardPayment`) still writes to `transaction_links`
-  (`relation='transfer'`, `confidence=0.85`) instead of to
-  `transfer_entries` like every other internal transfer does. So a
-  household's credit card repayments currently do **not** appear in the
-  transfer ledger or the Monthly Transfers screen. Flagged as a follow-up
-  (not yet actioned), not a design feature of this table — full analysis,
-  including why `transaction_links` can't simply be deleted once this is
-  fixed (refund linking is a second, independent live writer), in
+  separate, older, generic edge table linking two transactions
+  (`relation` — `refund`/`duplicate_of`/`related`). It is **not** part of
+  the transfer ledger. Until 2026-07-13 it also carried credit card
+  payment pairing (`relation='transfer'`), since a **credit card payment**
+  (see that term in `ubiquitous-language.md`) is, by definition, a kind of
+  internal transfer but its matching code (`Classification::CardPayment`)
+  hadn't yet been hooked into `transfer_entries` — that migration is now
+  done (Delta: Transfer Ledger, Task 4): a matched payment produces a
+  `transfer_entries` row (`pair_method = 'credit_card_payment_match'`)
+  exactly like any other transfer, and `'transfer'` was dropped from
+  `transaction_links.relation`'s allowed values entirely. Full analysis of
+  the original gap, and why `transaction_links` can't simply be deleted
+  now that this is fixed (refund linking is a second, independent live
+  writer — see Delta: Transfer Ledger, Task 5), in
   [transfer-ledger-critique.md](transfer-ledger-critique.md).
 
 ## Schema at a glance
@@ -80,9 +83,10 @@ erDiagram
 ```
 
 `transaction_links` is deliberately left off this diagram — it's not
-part of the transfer ledger's design, only tangled up with it via the
-credit-card-payment gap noted above. See `src/db/schema.sql` for the
-full DDL of every table, including `transfer_entries`.
+part of the transfer ledger's design (the credit-card-payment gap that
+used to tangle the two together is resolved — see the Summary above). See
+`src/db/schema.sql` for the full DDL of every table, including
+`transfer_entries`.
 
 A fully paired transfer is **one** row, both `out_*` and `in_*` filled. A
 transfer to/from a Reference Household Account, or to/from an
@@ -101,9 +105,10 @@ one side (there is no second transaction to ever record) — not a
   was (correct classification, incomplete pairing).
 - `spend_entries` already established the convention of a derived ledger
   row per classified item, with its own provenance shape, separate from
-  the generic `transaction_links` edge table (which remains in use for
-  the genuinely edge-like `refund`/`duplicate_of`/`related` relations, and,
-  for now, **credit card payment** matching — see the gap noted above).
+  the generic `transaction_links` edge table (which now carries only the
+  genuinely edge-like `refund`/`duplicate_of`/`related` relations —
+  **credit card payment** matching moved here too, see "Credit card
+  payment matching" below).
 
 ## Pairing algorithm
 
@@ -149,6 +154,10 @@ in order:
    filled in from this leg's own decode, transaction/account/description
    left `NULL` on the missing side.
 
+**Credit card payments are a separate, fifth path**, run as its own step
+after the four tiers above (not part of `classify()`'s
+`InternalTransfer` branch — see "Credit card payment matching" below).
+
 **Stage 2 — a re-pairing sweep, after every transaction this run has been
 classified.** Re-attempts pairing across every currently open
 (one-sided) `transfer_entries` row, independent of whether a new
@@ -172,6 +181,50 @@ signature (the candidate's own decode points at *itself*) — a property
 that essentially never holds by coincidence, since it requires the
 candidate's own `NAME` field to happen to encode its own exact sort code
 and account number, not just plausibly.
+
+## Credit card payment matching
+
+A **credit card payment** (see that term in `ubiquitous-language.md`) is
+recognised by `classify()` as its own case, `Classification::CardPayment`
+— a cardholder-name-plus-truncated-PAN `NAME` pattern
+(`looks_like_card_payment_reference`), only for outbound money — kept
+separate from `Classification::InternalTransfer` because matching it uses
+an unrelated mechanism: a date+exact-amount lookup against any
+`CreditCard`-type account (`Db::find_card_payment_counterpart`), not a
+household-registry `NAME` decode. `run_derivation` collects every
+`CardPayment` candidate during the main classification loop and processes
+them in a dedicated step, after the four transfer-pairing tiers and their
+re-pairing sweep:
+
+1. **Matched** — the bank-side debit is paired directly with the credit
+   card account's payment-received transaction via
+   `Db::create_paired_transfer`, `pair_method =
+   'credit_card_payment_match'`, `pair_confidence = 0.85`. Counted in
+   `DerivationSummary.card_payments_matched`.
+2. **Unmatched** (the card statement for that period hasn't been imported
+   yet) — recorded as a one-sided out-leg (`Db::insert_transfer_leg`,
+   `rule_name = 'credit_card_payment'`), exactly like any other unpaired
+   transfer leg — **not** a low-confidence spend entry, since a credit
+   card payment is an internal transfer by definition, matched or not.
+   Counted in `DerivationSummary.card_payments_unmatched`.
+3. **Retry** — every run also re-attempts every still-open card-payment
+   leg from an earlier run (`Db::open_card_payment_entries`), since the
+   credit card statement may have arrived since. This works because the
+   card-side payment line, until matched, is classified `OutOfScope` (an
+   unrecognised positive-amount transaction) and so is never excluded from
+   future lookups — unlike `pending_derivation_transactions`'s exclusion
+   of anything with a `spend_entry_sources` row, which is exactly the
+   mechanism that made the pre-migration version of this permanently
+   double-count an unmatched payment once its low-confidence spend entry
+   existed (see
+   [transfer-ledger-critique.md](transfer-ledger-critique.md), "no
+   retroactive completion").
+
+Before 2026-07-13 this used `transaction_links` (`relation='transfer'`,
+`confidence=0.85`) instead, and an unmatched candidate became a permanent
+confidence-0.5 spend entry — see the critique doc for the two real bugs
+that caused (endless reprocessing of matched payments; permanent
+double-counting of ever-unmatched ones) and why moving it here cures both.
 
 ## Integration into `run_derivation`
 
@@ -266,6 +319,30 @@ tier 3 at all) — a £190 payment between "Barclays Savings Account
 | `pair_method` | `description_match` |
 | `pair_confidence` | 0.9 |
 
+A `credit_card_payment_match` example — a real £1,378.95 payment from
+Jims Premier Account (id 1) to Barclaycard (id 8):
+
+| Column | Value |
+|---|---|
+| `id` | 171 |
+| `occurred_on` | 2026-01-05 |
+| `amount_minor` | 137895 |
+| `out_transaction_id` | 557 |
+| `out_account_id` | 1 (Jims Premier Account) |
+| `out_description` | `MR JAMES BARRITT 49291364986690` |
+| `in_transaction_id` | 1229 |
+| `in_account_id` | 8 (Barclaycard) |
+| `in_description` | `PAYMENT, THANK YOU Payment, Thank You` |
+| `pair_method` | `credit_card_payment_match` |
+| `pair_confidence` | 0.85 |
+
+Unlike the tiers above, neither side was found via a `NAME`-field decode —
+`out_description`'s truncated PAN (`49291364986690`) is only ever a
+pattern-match signal (`Classification::CardPayment`), never the actual
+pairing key; the pairing itself is a plain date+exact-amount lookup
+against any `CreditCard`-type account (see "Credit card payment matching"
+above).
+
 An unpaired (one-sided) example — a real transaction from "ROMINA
 SCARAMAGLI" (a named household member without a registered account, so
 the household registry can classify the transaction as internal but
@@ -284,31 +361,33 @@ against):
 | `amount_minor` | 1000 |
 | `pair_method` / `pair_confidence` | `NULL` / `NULL` |
 
-Real full-database pairing breakdown after the shape migration: **170**
-transfer entries total (down from 300 raw legs, since a paired transfer
-is now one row, not two) — **130** fully paired (109 `description_match`,
-21 `self_reference_match`, 0 `amount_date_match` — no real case for tier
-2 specifically was found in this dataset) and **40** one-sided, all
+Real full-database pairing breakdown, as of the credit card payment
+migration (2026-07-13): **202** transfer entries total — **162** fully
+paired (109 `description_match`, 21 `self_reference_match`, 32
+`credit_card_payment_match`, 0 `amount_date_match` — no real case for
+tier 2 specifically was found in this dataset) and **40** one-sided, all
 confirmed to be Reference Household Accounts or unregistered named
-individuals like the example above — expected, not a gap.
+individuals like the example above — expected, not a gap. (Before the
+credit card migration this was 170 total/130 paired — the 32 new rows
+are exactly the real credit card payments moved over from
+`transaction_links`.)
 
 ## Open questions
 
-1. **Naming**: this doc and its ADR use "transfer entry"/"transfer
-   ledger" for the table and its rows, mirroring "spend entry"/"spend
-   ledger" — proposed as **candidate** terms in
-   `doc/domain/ubiquitous-language.md`, not yet agreed. Needs the user's
-   sign-off, per CLAUDE.md's rule on coining domain terms.
-2. **`pair_confidence = 0.6` for `self_reference_match`** — a judgement
+1. **`pair_confidence = 0.6` for `self_reference_match`** — a judgement
    call (below tier 2's 0.75), not derived from a real-data false-positive
    rate the way other confidences in this codebase were. Worth revisiting
    once there's a longer real-data track record.
-3. **Manual correction / review UX for transfer pairing** — `classified_by
+2. **Manual correction / review UX for transfer pairing** — `classified_by
    = 'manual'` exists on the schema for this purpose (mirroring
    `spend_entries`' "manual always wins" convention) but no UI/CLI path
    uses it yet (e.g. a TUI action to confirm or reject a proposed
    pairing). Out of scope so far, consistent with the spend ledger's own
    deferred review-queue UX.
-4. **Should `transfer_entries` gain a `note`/enrichment-style column**,
+3. **Should `transfer_entries` gain a `note`/enrichment-style column**,
    analogous to spend's enrichment flow? Not addressed — no concrete need
    has surfaced. Revisit only if one does.
+
+Naming ("transfer entry"/"transfer ledger"/"credit card payment") is
+settled — all three are **established** terms in
+`doc/domain/ubiquitous-language.md`.

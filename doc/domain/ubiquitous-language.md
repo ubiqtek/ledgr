@@ -128,12 +128,20 @@ history companion for the full correction).
 *Origin: the assistant, proposed 2026-07-13 (Delta: Transfer Ledger);
 confirmed by the user 2026-07-13.*
 
-### Income Ledger — established (deferred)
+### Income Ledger — established
 
-The independent derived ledger of real inflows (salary, interest,
-cashback). A separate domain from spend — it will eventually involve
-tax and pensions. Deliberately not being built yet.
-*Origin: the user, design session 2026-07-11 (ADR 0005).*
+The independent derived ledger of real inflows crossing the
+**household** boundary inward — salary, interest, cashback, gifts,
+inheritance. Membership is decided by the boundary test, not the
+money's origin; distinguishing wages from a gift is a categorisation
+question inside the ledger (taxonomy deferred). A separate domain from
+spend — it will eventually involve tax and pensions. Deferred at first
+(ADR 0005); re-confirmed 2026-07-17 against gifts/inheritance,
+assets/liabilities (ADR 0007), and a rejected "receivables ledger"
+alternative — see ADR 0005's "Revisited 2026-07-17" section. Being
+built under Delta: The Gap.
+*Origin: the user, design session 2026-07-11 (ADR 0005); scope
+re-confirmed 2026-07-17.*
 
 ### Internal Transfer — established
 

@@ -87,3 +87,36 @@ Full design: `doc/implementation-notes/spend-ledger-design.md`.
 - Transfer detection requires knowing the user's own accounts, so
   `accounts` gains sort code / account number columns plus a
   config-maintained list of own accounts not yet imported.
+
+## Revisited 2026-07-17: scope of "income", and alternatives rejected
+
+Before starting the build (Delta: The Gap, Task 1), the decision was
+re-examined against three concerns. It stands unchanged.
+
+**Gifts and inheritance are income.** The membership test for the
+income ledger is the **household boundary** (see the ubiquitous
+language doc), not the money's origin: money crossing the boundary
+inward is income, whatever its source — salary, interest, cashback, a
+gift, an inheritance. What distinguishes wages from a gift is the
+entry's *kind*, which is a categorisation question inside the income
+ledger (taxonomy still deferred), not grounds for a separate ledger or
+a broader concept.
+
+**Assets/liabilities (ADR 0007) do not compete with the income
+ledger.** Balance-snapshot accounts answer a stock question ("what is
+the household worth?"); the income ledger answers a flow question
+("what came in this period?"). The boundary cases — pension drawdown,
+selling an asset — resolve by the same household-boundary test: moving
+money out of a household-owned asset account into a current account is
+an internal transfer, not income, which is also the correct answer for
+the gap (drawing down savings must not inflate income).
+
+**A "receivables ledger" was considered and rejected.** Receivables is
+accrual-basis accounting: money owed but not yet received. ledgr is
+cash-basis throughout — derived ledgers record money that actually
+moved. A gift is not a receivable; it is income the moment it lands.
+The one genuinely receivables-shaped concept in the household — an
+expense paid out of pocket and expected back from an employer — is
+deliberately scoped to Delta: Reclaimable Work Expenses with its own
+paid/outstanding tracking, rather than generalised into an
+accrual-basis ledger.

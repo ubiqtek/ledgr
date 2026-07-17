@@ -2,19 +2,16 @@
 
 ## What's Next
 
-**Next:** [Delta: Transfer Ledger / Task 5](#task-5-retire-transaction_links-entirely-by-absorbing-refund-links-into-the-spend-ledger) — retire `transaction_links` entirely by absorbing refund links into `spend_entries`, now that Task 4 has narrowed it down to refund linking as its only live purpose.
-**Before that:** review and commit the still-uncommitted Task 4 work (`git diff --stat`: 10 files — `src/derive.rs`, `src/db/{mod,schema,spend}.rs`, `src/model.rs`, `src/main.rs`, plus the domain-language sign-off and design/critique/plan doc updates). New session, per the user's request (2026-07-17) — nothing further was done this session, this is a straight hand-off.
-**Sub-doc:** none yet — Task 5's column-shape question isn't designed.
-**Blockers:** None currently.
-**Context:** [Checkpoint: Session 2026-07-17](#checkpoint-session-2026-07-17).
+- **Next:** Task 1 — Minimal income ledger (Delta: The Gap)
+- **Sub-doc:** none
+- **Blockers:** None
+- **Context:** [Checkpoint: Session 2026-07-17b](#checkpoint-session-2026-07-17b)
 
 ## Summary
 
 | Delta | Task | Status |
 |-------|------|--------|
-| [Delta: Bank Transaction Import](#delta-bank-transaction-import) | [1. Barclays OFX parser](#task-1-barclays-ofx-parser) | ✓ DONE |
-| | [2. Import de-duplication](#task-2-import-de-duplication) | IN PROGRESS |
-| | [3. Account resolution and balance tracking](#task-3-account-resolution-and-balance-tracking) | ✓ DONE |
+| [Delta: Decide on Switching to PDF for Transaction Import](#delta-decide-on-switching-to-pdf-for-transaction-import) | [1. Decide whether to build a BarclaysStatementPdfParser](#task-1-decide-whether-to-build-a-barclaysstatementpdfparser) | TODO |
 | [Delta: Automatic Inbox Import](#delta-automatic-inbox-import) | [1. Inbox change notification](#task-1-inbox-change-notification) | TODO |
 | [Delta: Credit Card Transaction Import](#delta-credit-card-transaction-import) | [1. Credit card statement parser](#task-1-credit-card-statement-parser) | ✓ DONE |
 | | [2. Evaluate Barclaycard PDF export](#task-2-evaluate-barclaycard-pdf-export) | ✓ DONE |
@@ -23,14 +20,7 @@
 | | [5. Match credit card payments to bank-side transfers](#task-5-match-credit-card-payments-to-bank-side-transfers) | ✓ DONE |
 | [Delta: Amazon Order Import](#delta-amazon-order-import) | [1. Evaluate automation route — email scanning vs manual export](#task-1-evaluate-automation-route--email-scanning-vs-manual-export) | TODO |
 | | [2. Amazon order import](#task-2-amazon-order-import) | TODO |
-| [Delta: Spend Ledger](#delta-spend-ledger) | [1. Spend ledger design](#task-1-spend-ledger-design) | ✓ DONE |
-| | [2. Spend ledger schema and derivation](#task-2-spend-ledger-schema-and-derivation) | ✓ DONE |
-| | [3. Review and re-classification TUI](#task-3-review-and-re-classification-tui) | TODO — deprioritised below Delta: The Gap |
-| [Delta: Transfer Ledger](#delta-transfer-ledger) | [1. Monthly Transfers screen (v1, derive-on-the-fly)](#task-1-monthly-transfers-screen-v1-derive-on-the-fly) | ✓ DONE — uncommitted, superseded by Task 2's design |
-| | [2. Design a persisted transfer ledger + ADR](#task-2-design-a-persisted-transfer-ledger--adr) | ✓ DONE |
-| | [3. Persist the ledger and migrate the screen to query it](#task-3-persist-the-ledger-and-migrate-the-screen-to-query-it) | ✓ DONE |
-| | [4. Migrate credit card payment matching into transfer_entries; retire legacy transaction_links usage](#task-4-migrate-credit-card-payment-matching-into-transfer_entries-retire-legacy-transaction_links-usage) | ✓ DONE |
-| | [5. Retire transaction_links entirely by absorbing refund links into the spend ledger](#task-5-retire-transaction_links-entirely-by-absorbing-refund-links-into-the-spend-ledger) | TODO |
+| [Delta: Review and Re-classification TUI](#delta-review-and-re-classification-tui) | [1. Review queue screen](#task-1-review-queue-screen) | TODO — deprioritised below Delta: The Gap |
 | [Delta: Reconciliation](#delta-reconciliation) | [1. Design account-level and household-level reconciliation checks](#task-1-design-account-level-and-household-level-reconciliation-checks) | TODO |
 | [Delta: The Gap](#delta-the-gap) | [1. Minimal income ledger](#task-1-minimal-income-ledger) | TODO |
 | | [2. Gap calculation](#task-2-gap-calculation) | TODO |
@@ -49,154 +39,37 @@
 | | [2. Web frontend](#task-2-web-frontend) | TODO |
 | [Delta: Live Open Banking (Enable Banking)](#delta-live-open-banking-enable-banking) | [1. Evaluate feasibility & security model](#task-1-evaluate-feasibility--security-model) | IN PROGRESS |
 | [Delta: Double-Entry Accounting](#delta-double-entry-accounting) | [1. Evaluate a double-entry model for ledgr](#task-1-evaluate-a-double-entry-model-for-ledgr) | TODO |
-| [Delta: Statement/Import Naming Cleanup](#delta-statementimport-naming-cleanup) | [1. Agree the replacement term](#task-1-agree-the-replacement-term) | ✓ DONE |
-| | [2. Refactor to the agreed term](#task-2-refactor-to-the-agreed-term) | ✓ DONE |
 | [Delta: Payslip Import](#delta-payslip-import) | [1. Evaluate payslip format and scope](#task-1-evaluate-payslip-format-and-scope) | TODO |
 | [Delta: Reclaimable Work Expenses](#delta-reclaimable-work-expenses) | [1. Design the reclaimable expenses ledger and marking flow](#task-1-design-the-reclaimable-expenses-ledger-and-marking-flow) | TODO |
 | [Delta: Regular Payments](#delta-regular-payments) | [1. Design regular payment recognition and labelling](#task-1-design-regular-payment-recognition-and-labelling) | TODO |
 
-Real-world goal driving the first four deltas: analyse monthly spending
-across current account, credit card, and Amazon orders.
+Archived Deltas: see the [archive index](archive/index.md)
 
-## Delta: Bank Transaction Import
+Real-world goal driving Delta: Credit Card Transaction Import, Delta:
+Amazon Order Import, Delta: Spend Ledger, and Delta: The Gap: analyse
+monthly spending across current account, credit card, and Amazon orders.
 
-Parse a real download from the user's bank into the `ledgr` domain model
-via the `ImportFileParser` trait. Format choice decided in
-`doc/adr/0002-use-ofx-for-barclays-statement-import.md`.
+## Delta: Decide on Switching to PDF for Transaction Import
 
-A config + inbox mechanism now backs this delta (and future ones): the
-user points `ledgr` at a synced folder (their Google Drive) as a drop
-location for downloaded statements.
-- `~/.config/ledgr/config.toml` (`src/config.rs`) holds `inbox_dir`;
-  auto-created on first run — hand-edit it to point at the Google Drive
-  folder instead. XDG location per
-  `doc/adr/0004-xdg-conventions-for-local-files.md`.
-- `src/inbox.rs` — `Inbox` ensures `<inbox_dir>/processed/` exists, lists
-  pending files (dotfiles like `.DS_Store` are ignored), and moves a
-  file into `processed/` once handled.
-- `src/import/pipeline.rs` — `import_inbox()` ties it together: picks a
-  parser by extension (`.ofx`/`.qfx` → `BarclaysOfxParser`, `.csv` →
-  `GenericCsvParser`), resolves the account via the parser's own
-  `account_identity()` when the format carries one (falls back to a
-  single default account otherwise), inserts transactions and any
-  balance snapshot, moves the file to `processed/`.
-- Wired up as headless CLI commands: `ledgr import` and `ledgr status`
-  (checked in `main.rs` before the TUI starts) — no `clap`, just a
-  manual `env::args()` check to keep things minimal.
-- Account resolution: `ImportFileParser::account_identity(path)` lets a
-  format identify which account a file belongs to (e.g. OFX
-  `BANKACCTFROM`/`ACCTID`) so multiple accounts at the same institution
-  don't collapse into one shared account — `BarclaysOfxParser`
-  implements this. Formats with no such info (e.g. generic CSV) fall
-  back to a single default account per institution.
+**Split out 2026-07-17** from Bank Transaction Import, Task 1, where the
+underlying research already happened. Full findings, real-data evidence,
+and de-dup analysis: `doc/implementation-notes/optimising-import-data.md`.
 
-### Task 1: Barclays OFX parser
-- ✓ DONE — `BarclaysOfxParser` (`src/import/barclays_ofx.rs`) implemented
-  using `ofx-rs`, maps `FITID` to `Transaction::external_id`, converts
-  `OfxAmount` (`rust_decimal::Decimal`) to signed minor units via
-  `rescale(2)` + `mantissa()`. Passes unit tests against a synthetic OFX
-  fixture.
-- ✓ DONE — validated against 3 real Barclays OFX exports (939
-  transactions, 2026-01-02 to 2026-07-10, 0 parse failures, every
-  transaction got a non-null `external_id` via FITID). `ofx-rs` (v0.2)
-  handled the real files without needing parser fixes, despite being
-  newer/less battle-tested than the GPL-licensed alternative `ofxy`
-  (rejected on licensing grounds).
-- Researched (2026-07-13) whether an alternate Barclays export format
-  for the current account avoids `NAME`-field truncation (the root cause
-  of several transfer-pairing workarounds in Delta: Transfer Ledger,
-  e.g. `SHARED BILLS ACCO`). Full findings, real-data evidence, and
-  de-dup analysis in `doc/implementation-notes/optimising-import-data.md`.
-  Headline: `data.csv` and `data.qbo` add nothing over OFX (CSV shares
-  the same truncation failure mode and has no de-dup key at all; QBO is
-  literally the same OFX 1.02 payload under a different extension). The
-  current-account statement **PDF** (`Transaction.pdf`, distinct from
-  the already-built `BarclaycardPdfParser`) is a genuine lead — it keeps
-  a transfer's sort code/account number on its own line, separate from
-  the truncated label, so account numbers never get cut the way OFX's
-  `NAME` field cuts them. TODO — decide whether to build a
-  `BarclaysStatementPdfParser` for this format (sub-doc has the open
-  questions: de-dup without `FITID`, using running balance as part of
-  the de-dup key, primary-format-switch vs backfill-only).
+Headline: the Barclays current-account statement **PDF**
+(`Transaction.pdf`, distinct from the already-built `BarclaycardPdfParser`)
+keeps a transfer's sort code/account number on its own line, separate
+from the truncated label — so account numbers never get cut the way
+OFX's `NAME` field cuts them (the root cause of several transfer-pairing
+workarounds in the archived Delta: Transfer Ledger, e.g. `SHARED BILLS
+ACCO`). `data.csv` and `data.qbo` were both ruled out already (CSV
+shares OFX's truncation failure mode and has no de-dup key at all; QBO
+is the same OFX 1.02 payload under a different extension).
+
+### Task 1: Decide whether to build a BarclaysStatementPdfParser
+- TODO — open questions from the sub-doc: de-dup without `FITID`, using
+  running balance as part of the de-dup key, primary-format-switch vs
+  backfill-only.
 - Sub-doc: `doc/implementation-notes/optimising-import-data.md`
-
-### Task 2: Import de-duplication
-- ✓ DONE — whole-file de-dup: `src/import/pipeline.rs` hashes each inbox
-  file (`sha2`) and skips it if `statements.file_hash` already has that
-  hash (the schema already had the `UNIQUE` column; it just needed
-  wiring up).
-- ✓ DONE — per-transaction de-dup on `external_id`: added a partial
-  unique index `idx_transactions_account_external_id` on
-  `transactions(account_id, external_id) WHERE external_id IS NOT NULL`
-  (`src/db/schema.sql`), so it only applies to formats that carry a
-  stable external ID (e.g. Barclays OFX's `FITID`) and leaves
-  `GenericCsvParser`-imported rows (`external_id` always `NULL`)
-  unaffected. `Db::insert_transaction` (`src/db/transactions.rs`) now
-  uses `INSERT OR IGNORE` and returns `Option<Id>` (`None` when the
-  external_id already exists for that account) instead of `Id`.
-  `import_inbox` (`src/import/pipeline.rs`) counts these as
-  `transactions_deduplicated` on a new `ImportSummary` field, separate
-  from `transactions_imported`. Covered by a new unit test in each of
-  `db/transactions.rs` and `import/pipeline.rs` (the latter simulates a
-  re-saved file — same FITIDs, different file_hash — asserting zero
-  duplicate rows land in the database). Not yet validated against a
-  real re-saved Barclays file; the user is going to test this by
-  importing a new real file.
-- ✓ DONE — validated per-transaction de-dup against real data: imported
-  a new real account (Barclays Savings, `...3693`, "Adventure Fund", 28
-  transactions) alongside a 7-day-overlap re-download of the existing
-  "Jims Premier Account" (`...1892`) file. All 20 overlapping
-  transactions in the overlap file were correctly caught as duplicates
-  (account's transaction count stayed at exactly 562, confirmed one
-  FITID directly in the database), while the new account's 28
-  transactions imported cleanly.
-- ✓ DONE — added a per-file import log: `import_inbox`
-  (`src/import/pipeline.rs`) now writes a `.log` file alongside each
-  processed statement in `processed/` (same timestamp-prefixed base
-  name, `.log` extension via `Path::with_extension`), with one
-  tab-separated line per transaction: `<external_id or "->\t<imported|
-  duplicate|error>\t<message or "->`. Per-transaction insert errors
-  (`Db::insert_transaction`) are now caught individually instead of
-  propagated with `?`, so one bad row logs as `error` with the DB error
-  message instead of aborting the rest of the file's import. Also
-  fixed `Inbox::mark_processed` (`src/inbox.rs`) to prefix moved files
-  with a `YYYYMMDDHHMMSS%3f-` millisecond timestamp, since banks reuse
-  the same filename for every download (e.g. `data.ofx`), which would
-  otherwise silently overwrite the previous copy in `processed/` — the
-  timestamp also makes the `.log`'s companion file's processing time
-  obvious at a glance. Two new unit tests added (log content/naming,
-  including the duplicate-status case); verified end-to-end against a
-  real re-saved Barclays file (all 20 duplicate transactions correctly
-  logged as `duplicate`). Test count now 37, all passing.
-- TODO — de-dup strategy for `GenericCsvParser`-imported institutions,
-  which have no stable per-transaction ID.
-
-### Task 3: Account resolution and balance tracking
-- ✓ DONE — fixed a real bug found via `ledgr status`: all 3 real
-  Barclays OFX files had been collapsing into one hardcoded "Barclays
-  Current Account" instead of being recognised as 3 separate real
-  accounts (`ACCTID`s ending `...5086`, `...1892`, `...2608`). Added
-  `ImportFileParser::account_identity()` (`src/import/mod.rs`,
-  `src/import/barclays_ofx.rs`) so each OFX file resolves to its own
-  account via `BANKACCTFROM`. Real DB reset and re-imported: now shows
-  3 correctly separated accounts (562/162/215 transactions).
-- ✓ DONE — fixed a second bug: displayed balance was a naive
-  `SUM(transactions)`, which didn't match reality because a statement's
-  transaction window often doesn't reach back to account opening (2 of
-  3 real accounts were off; confirmed the parsing itself was correct by
-  manually summing raw `TRNAMT` values). Added a `balance_snapshots`
-  table (`schema.sql`) storing bank-reported balance anchors (e.g. OFX
-  `LEDGERBAL`), `src/db/balances.rs` (`insert_balance_snapshot`,
-  `latest_balance_snapshot`, and `balance_as_of(account_id, date)` which
-  reconstructs balance at any date from the nearest anchor plus
-  transactions between it and the target — built generally to support
-  future balance-history/trend views, not just "current balance"). New
-  `ImportFileParser::balance_snapshot()`; `BarclaysOfxParser` reads OFX
-  `LEDGERBAL`. Real balances now match each file's `LEDGERBAL` exactly
-  (946.26 / 7.47 / 3106.58 GBP).
-- ✓ DONE — added `ledgr status` CLI command (`src/main.rs`) printing
-  per-account balance (with as-of date), transaction count, date range,
-  and last-imported-at — this is what surfaced both bugs above.
 
 ## Delta: Automatic Inbox Import
 
@@ -406,600 +279,17 @@ this a core enrichment worth automating, not a one-off manual chore.
 - TODO — parse the chosen format so Amazon purchases show up as proper
   line items rather than one lump "Amazon" transaction per card charge.
 
-## Delta: Spend Ledger
+## Delta: Review and Re-classification TUI
 
-Derive a spend ledger — real-world spending to merchants and people —
-from the raw imported transactions, excluding internal transfers
-between household accounts (which would double-count purchases paid
-for by matching transfers). This is the layer that gets categorised
-and analysed; raw transactions stay immutable evidence. Design:
-`doc/implementation-notes/spend-ledger-design.md`. Decision trail:
-`doc/adr/0005-independent-spend-and-income-ledgers.md` (independent
-spend and income ledgers; income deferred). Supporting research:
-`doc/kb/ofx/structure.md` (OFX spec + observed Barclays NAME
-encodings that make transfer detection deterministic) and
-`doc/domain/household.md` ("Household" = the accounting entity).
+**Split out 2026-07-17** from Spend Ledger, Task 3, once Spend Ledger's
+design/schema/derivation work (Tasks 1-2) was fully done.
 
-### Task 1: Spend ledger design
-- ✓ DONE — design session 2026-07-11: full design written to
-  `doc/implementation-notes/spend-ledger-design.md` (derived
-  `spend_entries` + `spend_entry_sources` provenance edge table,
-  classification metadata rule/matcher/manual + confidence with
-  manual-always-wins, transfer detection via household account
-  registry, spend enrichment from transfers onto spend entries,
-  double-entry compatibility mapping). ADR 0005 accepted. Open
-  questions 1 (household membership → optional config) and 4
-  (derivation runs as part of `ledgr import`, provisionally) decided;
-  2, 3, 5 explained and awaiting the user's confirmation.
-
-### Task 2: Spend ledger schema and derivation
-- ✓ DONE — schema: `spend_entries` + `spend_entry_sources`
-  (`src/db/schema.sql`), `sort_code`/`account_number` on `accounts`,
-  `trn_type` added to `transactions` (needed to disambiguate
-  `DIRECTDEP`/`CASH`/`DIRECTDEBIT`/`PAYMENT`/`REPEATPMT` — not in the
-  original design doc schema sketch, added during implementation),
-  `transactions.category_id` dropped. `BarclaysOfxParser` now
-  populates `sort_code`/`account_number`/`trn_type`; existing accounts
-  get backfilled on next import via `find_or_create_account`.
-- ✓ DONE — household config: `Config.household_accounts` (hand-edit
-  the config file — no CLI setter yet, see `HouseholdAccountRef` in
-  `src/config.rs`); imported accounts are household members
-  automatically.
-- ✓ DONE — derivation pass: `src/derive.rs`, wired into `ledgr import`
-  after `import_inbox`. Implements design doc rules 1-7 (own-account
-  transfer, external-account payment, person FT payment/reimbursement,
-  card payment, card refund, DIRECTDEP/CASH out-of-scope), rule
-  precedence (account-prefix match beats TRNTYPE, so e.g. a standing
-  order into a household savings account is never misclassified as
-  spend), transfer pairing (`transaction_links relation='transfer'`,
-  ±3 day window, idempotent), refund linking
-  (`relation='refund'`, best-effort merchant-prefix match), and
-  gates spend/refund classification on `AccountType::is_spending_account`
-  (only current accounts + credit cards produce spend — savings
-  accounts only see transfers, confirmed in real data). Idempotent by
-  construction: only transactions with no `spend_entry_sources(role='source')`
-  row are re-considered, so re-running `ledgr import` never
-  double-derives.
-- Deliberately out of scope for this task (see design doc's phasing
-  note): rules 8-10 (Barclaycard CSV `Subcategory`) have no code path
-  yet since no parser produces that field (Credit Card Statement
-  Import Task 1 still TODO); spend enrichment (copying a transfer's
-  note onto a later spend entry) is deferred to a follow-up.
-- 51 unit tests total (up from 37), all passing; `cargo clippy` clean
-  (only pre-existing-style dead-code warnings for forward-looking API
-  surface not yet wired to a CLI/TUI consumer, same pattern as
-  `get_account`/`balance_as_of` already had).
-- **Follow-up session (2026-07-12) resolved the three open questions
-  from the implementation session:**
-  1. Real local `ledgr.db` migration — still TODO, deliberately not
-     done autonomously (touches real data). Needs: create
-     `spend_entries`/`spend_entry_sources`, add `accounts.sort_code`/
-     `account_number`, add `transactions.trn_type`, drop
-     `transactions.category_id` (SQLite can't drop a column in place
-     on old versions — check `ALTER TABLE ... DROP COLUMN` support, or
-     recreate the table as done for the `AccountType::Checking` →
-     `Current` rename). Do this, then run `ledgr import` for real and
-     sanity-check the derived spend entries against the actual
-     imported transactions.
-  2. **The `"fallback"` rule explained:** in `classify_inner`
-     (`src/derive.rs`), after rules 1-7 all fail to match, any
-     remaining transaction with a negative amount (money out) becomes
-     a low-confidence (0.4) spend entry (`rule_name = "fallback"`)
-     rather than being left unclassified. Reasoning: the design doc's
-     rules table doesn't cover every possible `NAME`/`TRNTYPE`
-     Barclays could produce (e.g. the foreign-currency card pattern
-     noted in the OFX KB article, `"AMOUNT IN NOK"`, doesn't match any
-     `CPM`/`CRM`/`FT` suffix). Without a fallback, an unrecognised
-     outbound transaction would just sit unclassified forever —
-     silently understating spend with no visible signal anything was
-     missed. With it, the transaction still shows up in the ledger at
-     low confidence, ready to surface in the future review queue
-     (Task 3) for a manual fix. Inbound (positive-amount) unmatched
-     transactions do **not** get this treatment — they're left out of
-     scope, since guessing "not spend" for unknown inbound money is
-     safe, but guessing "not spend" for unknown outbound money would
-     make the ledger wrong with no indication. Kept as-is; no change
-     requested.
-  3. **`is_spending_account` gate — removed.** The user's real
-     spending accounts are Jims Premier Account (main current),
-     Online Spending, the Bills Account, and the credit card (once
-     Credit Card Transaction Import lands) — i.e. most of what's
-     imported. Rather than maintain a configurable list of which
-     accounts count, the decision is to **scan every account
-     uniformly** and rely on transfer pairing/reconciliation (rules
-     1-2, `transaction_links`) to keep internal movement out of the
-     ledger — not a pre-filter by account type. **Done** (2026-07-12 session): removed the `is_spending_account` check and its call site in `derive_spend_entries` (`src/derive.rs`) — `classify()` no longer takes an `is_spending_account` bool and now scans every account uniformly, relying solely on transfer pairing/reconciliation (rules 1-2) to keep internal movement out of the ledger. Deleted `AccountType::is_spending_account` (`src/model.rs`) entirely. Updated the design doc's Account registry section to match. Recorded as ADR `doc/adr/0006-no-account-type-gate-on-spend-derivation.md`. All 51 unit tests still pass; `cargo clippy` clean (same pre-existing dead-code warnings as before, nothing new).
-- ✓ DONE — migrated the real local `ledgr.db` (2026-07-12 session): added `accounts.sort_code`/`account_number` columns, added `transactions.trn_type` column, dropped `transactions.category_id` (had to `DROP INDEX idx_transactions_category` first since SQLite's `ALTER TABLE ... DROP COLUMN` refuses if an index still references the column), then applied `schema.sql` to create `spend_entries`/`spend_entry_sources` and their indexes. Took a full file backup first (`~/.local/share/ledgr/ledgr.db.bak-20260712113230`) and validated the whole migration end-to-end on a scratch copy before touching the real file. Ran `ledgr status` and `ledgr import` against the real migrated database: 967 transactions across 4 real accounts, derivation created 804 spend entries and correctly left 163 out of scope. One known gap surfaced: the 4 existing accounts still have `NULL` `sort_code`/`account_number` since those columns are only backfilled by `find_or_create_account` when a file is actually (re-)parsed, and all 4 accounts' OFX files are already fully imported (deduped by file hash) — so household transfer detection currently finds 0 candidates for this real data until a genuinely new file per account is imported. Not fixed this session (backfilling by hand would require trusting an OFX field-mapping assumption — `BANKID`/`ACCTID` vs the sort-code+account-number split the `NAME` field actually uses — that wasn't verified); flagged as a follow-up, not blocking today's work. A stray test account/statement row (id 5 / statement 6) was created as a side effect of test-running `ledgr import` against the real inbox's pending Barclaycard CSV (which the current `GenericCsvParser` can't parse — thousands-separator amounts, unrelated to this migration) — cleaned up immediately, no transactions were ever attached to it.
-
-### Task 3: Review and re-classification TUI
+### Task 1: Review queue screen
 - TODO — **deprioritised below Delta: The Gap** (the user wants total
   spend/income/gap working before investing in a categorisation UI).
   Review queue screen for low-confidence/uncategorised spend entries;
   single-key actions to mark internal transfer / not-spend, set
   category, edit note; manual actions stamp `classified_by='manual'`.
-
-## Delta: Transfer Ledger
-
-**Reopened 2026-07-13.** The Monthly Transfers screen (built 2026-07-12
-under TUI Analysis Views Task 4) was designed and built as a **read-only
-preview**, re-deriving the full transfer list from raw transactions on
-every screen open (`derive::find_internal_transfers`), deliberately with
-**no new persisted schema** — a design choice written into that session's
-"What's Next" entry and treated as settled, but never actually agreed
-with the user, and never recorded as an ADR (checked `doc/adr/` on
-2026-07-13: nothing there covers it).
-
-While investigating a naming bug on that screen, a real, separate gap
-surfaced: `Db::find_transfer_counterpart` (the query that links both legs
-of a transfer as a `transaction_links` row during real `ledgr import`
-derivation) only reliably matches **manual** transfers, where both sides'
-`NAME` field cross-reference each other's account number — not
-**automated** transfers (standing orders/direct debits), where the
-receiving side's description often references its own account instead.
-Confirmed via direct SQL against the real database: 142 `'transfer'`
-`transaction_links` rows exist in total, but zero cover 7 real recurring
-SHARED BILLS ACCO ↔ Bills Account standing-order transactions, despite
-all 7 being correctly classified as internal transfers (so spend ledger
-correctness is unaffected — this is a missing-audit-trail gap, not a
-wrong-numbers bug).
-
-Given both findings, the user's decision: stop patching the on-the-fly
-approach and **design a real persisted transfer ledger table**,
-analogous to `spend_entries` — built once during `ledgr import`'s
-derivation pass (so the matching/pairing problem gets solved properly,
-in one place, at import time), with the UI only ever querying it, never
-re-deriving relations live. This sets a **design principle** the user
-wants applied consistently — likely to the future income ledger too
-(Delta: The Gap, Task 1) — and should be written up as a proper ADR once
-this delta's design work happens (not yet done — deliberately deferred
-to Task 2 below, done step by step rather than rushed).
-
-### Task 1: Monthly Transfers screen (v1, derive-on-the-fly)
-- ✓ DONE (2026-07-12 session, built via three sequential subagents;
-  moved here from TUI Analysis Views Task 4 on 2026-07-13 when this
-  delta was created) — the working screen + drill-down, still the live
-  implementation until Task 2/3 replace its backing store:
-  1. **Monthly Transfers screen**: new `derive::find_internal_transfers`
-     — a read-only preview pass reusing the existing pure `classify()`
-     over `Db::pending_derivation_transactions()`, keeping only
-     `Classification::InternalTransfer` results; no new persisted
-     schema. Household-set-building logic extracted into a shared
-     `build_household` helper used by both this and
-     `derive_spend_entries`. New model structs `TransferEntry` (one raw
-     transfer transaction) and `MonthlyTransfer` (per-month aggregate,
-     `transferred_out_minor`/`transferred_in_minor` kept separate, not
-     netted, so both directions are visible). `App` gained
-     `household_accounts` (loaded once at `App::new`),
-     `transfer_entries` (cached flat list), `monthly_transfers`,
-     `selected_transfer_month`; new `Screen::MonthlyTransfers` +
-     `open_monthly_transfers()`; new `draw_monthly_transfers` (`ui.rs`,
-     mirrors `draw_monthly_gap`'s layout).
-  2. **Per-month drill-down**: new `Screen::TransferMonth` (naming
-     mirrors `Screen::MonthSpend`) + `App::open_selected_transfer_month`
-     — filters the cached `transfer_entries` in memory by month, no
-     DB/derive re-run. Columns: Date, Amount (unsigned — direction is
-     conveyed by which of the next two columns holds the account name),
-     Description, **From**, **To**, resolved via new
-     `resolve_counterparty` (checks `self.accounts` — a tracked account
-     — then `self.household_accounts` — a Reference Household Account —
-     then falls back to showing the raw sort code/account number
-     digits, which is itself a visible signal something's off). New
-     `draw_transfer_month` (`ui.rs`, mirrors `draw_month_spend`).
-     `Classification::InternalTransfer` deliberately left untouched, no
-     `rule_name` added — deferred per the original design.
-  3. **`i` "show both legs" popup** (2026-07-13 session): looks up the
-     counterpart transaction live via `Db::find_transfer_counterpart`
-     (read-only, no new persistence) and shows both sides' date/amount/
-     account/description in a popup (`App::show_transfer_detail`,
-     `ui::draw_transfer_detail`). New `Db::get_transaction(id)`.
-     Explicitly reports "no matching transaction recorded" rather than
-     an error when the counterpart is a Reference Household Account
-     (which by definition has no imported transactions) — but also
-     currently under-reports for real linked transactions due to the
-     `find_transfer_counterpart` gap described above (see Task 2).
-  4. **`y` clipboard copy**: new `App::selected_row_text` + `pbcopy`
-     shell-out (`main.rs`, macOS-only) — copies the selected row's
-     visible columns as tab-separated text on every list screen
-     (Accounts, Transactions, Monthly Gap, Month Spend, Monthly
-     Transfers, Transfer Month), not just this screen.
-  - Built by three sequential subagents (one per part, in order, each
-    reviewed before the next started) rather than one large session, to
-    manage context. `cargo build`/`cargo test`/`cargo clippy` clean
-    throughout — 71 → 73 → 76 tests passing, no new clippy warnings
-    beyond the pre-existing dead-code baseline. Not verified against the
-    real TUI (deliberately kept off real data during the subagent
-    build). **Not yet committed to git** — sitting in the working tree
-    for the user's review.
-- **Bug found and fixed (2026-07-13 session) — counterpart name
-  resolution didn't handle Barclays' truncated account numbers:**
-  `SHARED BILLS ACCO 208794 231650` (Barclays truncates the account
-  number when a long label pushes the `NAME` field past its length
-  limit — real account is `...23165086`, the user's Bills Account)
-  resolved to raw digits instead of "Bills Account" on the drill-down,
-  because `resolve_counterparty` (`app.rs`) did exact string matching
-  while the classification logic (`derive::household_contains`) already
-  handled truncation via a prefix match. Fixed `resolve_counterparty` to
-  match the same way (`starts_with` on both the tracked-account and
-  household-account branches). `cargo build`/`test`/`clippy` clean, 76
-  tests still passing (no new test added — the existing
-  `resolve_transferred_to_*` tests weren't extended to cover truncation;
-  worth adding one as a follow-up, or superseded entirely once Task 2/3
-  land).
-- **Real gap found (2026-07-13 session) — `transaction_links`
-  under-covers automated transfers; root cause of this delta being
-  reopened:** `Db::find_transfer_counterpart` (`db/spend.rs`) requires
-  the counterpart transaction's own `description` to start with the
-  *origin* account's `"<sort> <account>"` prefix (`t.description LIKE
-  (?4 || '%')`) — true for manual transfers, where both sides' `NAME`
-  fields cross-reference each other's account number, but not for the
-  real SHARED BILLS ACCO standing order: the Bills Account side's
-  description (`"BARRITT J 208794 23165086 STO"`) references its *own*
-  account number, not Jims Premier's. So the transfer is correctly
-  excluded from spend (classification is fine) but the two legs never
-  get linked as a pair in `transaction_links`. Confirmed via direct
-  read-only SQL against `~/.local/share/ledgr/ledgr.db`: 142 `'transfer'`
-  rows total, zero covering the 7 real SHARED BILLS ACCO ↔ Bills Account
-  pairs (transaction ids 41/124/206/276/350/446/561 on the Jims Premier
-  side). To be solved properly by Task 2/3's persisted-ledger redesign,
-  not patched in place.
-
-### Task 2: Design a persisted transfer ledger + ADR
-- ✓ DONE (2026-07-13 session) — design written to
-  `doc/implementation-notes/transfer-ledger-design.md`: a new
-  `transfer_entries` table, one row per transaction classified as an
-  internal transfer, mirroring `spend_entries`' provenance idiom
-  (`classified_by`/`confidence`/`rule_name`/`classified_at`). Pairing is
-  modelled as extra columns on the *same* row
-  (`counterpart_sort_code`/`counterpart_account_number`/
-  `counterpart_account_id`/`counterpart_transaction_id`/`pair_method`/
-  `pair_confidence`) rather than a second edge table, since a transfer
-  has at most one counterpart — deliberately simpler than
-  `transaction_links`' general edge-table shape for this narrower case.
-  A three-tier pairing algorithm designed (tier 3 added mid-Task 3 once
-  a real-data gap surfaced — see below): **tier 1** description
-  cross-reference (the existing `find_transfer_counterpart` mechanism,
-  manual transfers, confidence 0.9); **tier 2** mutual-classification
-  amount+date match (new — both legs' own `classify()` decodes the
-  *other* leg as its counterpart, confidence 0.75, covers automated
-  transfers where both sides correctly cross-reference each other);
-  **tier 3** self-reference match (new, confidence 0.6 — see Task 3).
-  Unmatched legs stay visible (`counterpart_transaction_id` `NULL`)
-  rather than being dropped, matching the existing "stay visible for
-  review" philosophy used elsewhere (e.g. the `"fallback"` spend rule).
-  Supports retroactive backfill: an earlier unpaired leg can be
-  completed by a later derivation run once its counterpart arrives.
-- ✓ DONE — ADR written:
-  `doc/adr/0009-persisted-ledgers-built-at-import.md`, recording the
-  general principle the user wanted formalised: **every derived
-  relation is built once at import into a persisted table; the UI
-  (`app.rs`/`ui.rs`) only ever queries it, never re-derives live.**
-  Transfer ledger is the first concrete application. Income ledger
-  (Delta: The Gap, Task 1) flagged as the next expected application;
-  Delta: Reconciliation flagged as a direct beneficiary (a persisted
-  ledger is much cheaper to reconcile against than a live re-derive).
-  `doc/adr/decisions.md` index updated.
-- **Open question raised and resolved with the user, not yet actioned:**
-  "Transfer Entry"/"Transfer Ledger" are not yet agreed terms in
-  `doc/domain/ubiquitous-language.md` — only "Internal Transfer" (the
-  underlying concept) is agreed there. Per this project's
-  ubiquitous-language process, these terms are used informally in code
-  and docs already but still need the user's explicit sign-off before
-  being added to that doc formally. Flagged as an outstanding follow-up
-  TODO (see "What's Next").
-
-### Task 3: Persist the ledger and migrate the screen to query it
-- ✓ DONE (2026-07-13 session) — schema: `transfer_entries` table + 3
-  indexes added to `src/db/schema.sql`.
-- ✓ DONE — `src/derive.rs`: `derive_spend_entries` now writes an
-  unpaired `transfer_entries` row per `InternalTransfer`-classified leg,
-  then runs the three-tier pairing in order (description match, mutual
-  amount-date match, self-reference match). Pairing deliberately
-  iterates over **all** currently-unpaired persisted `transfer_entries`
-  rows (`Db::unpaired_transfer_entries`), not just the current run's
-  freshly-classified candidates — fixed after a real bug surfaced where
-  already-persisted-but-unpaired legs from an earlier run could never be
-  reconsidered once a new tier was added later, since no new transaction
-  was arriving to trigger a backfill for them. `DerivationSummary`
-  gained `transfers_backfilled`. The old `find_internal_transfers`
-  (Task 1's live-derive preview) deleted, superseded entirely.
-- ✓ DONE — `src/db/spend.rs`/`src/db/mod.rs`: new `Db` methods —
-  `insert_transfer_entry`, `pair_transfer_legs`,
-  `find_transfer_pairing_candidate` (tier 2),
-  `find_transfer_self_reference_candidate` (tier 3),
-  `unpaired_transfer_entries`, `get_transfer_counterpart_transaction_id`,
-  `monthly_transfer_totals`, `transfer_entries_for_month`. A
-  schema-migration helper (`migrate_rename_stale_transfer_entries`/
-  `migrate_copy_stale_transfer_entries`, `src/db/mod.rs`) added to
-  handle changing `transfer_entries.pair_method`'s `CHECK` constraint on
-  an already-created real table — SQLite can't `ALTER` a `CHECK`
-  constraint, so the old table is renamed aside, `schema.sql` recreates
-  it fresh, rows are copied across, and the old table is dropped — same
-  pattern used for earlier `CHECK`-constraint migrations
-  (`AccountType::Checking` → `Current`). Covered by a new test.
-- ✓ DONE — `src/model.rs`: new `TransferPairMethod` enum
-  (`DescriptionMatch`/`AmountDateMatch`/`SelfReferenceMatch`),
-  `NewTransferEntry`. `TransferEntry` kept unchanged — it already
-  matched what the UI needed.
-- ✓ DONE — `src/app.rs`: `open_monthly_transfers`/
-  `open_selected_transfer_month`/`show_transfer_detail` migrated to
-  query `transfer_entries` directly instead of calling
-  `derive::classify()` live. `src/ui.rs` needed **no changes** —
-  column/popup/clipboard-copy behaviour is unaffected, confirming the
-  design doc's claim that only the backing data source would change.
-- **Real bug found and fixed:** `derive::parse_trailing_account_suffix`
-  was rejecting a trailing marker word (e.g. `"STO"`) after the account
-  number in a `NAME` field. Real data has `"BARRITT J 208794 23165086
-  STO"` on the Bills Account side of the SHARED BILLS ACCO standing
-  order. Fixed narrowly, tested, documented inline. Necessary but not
-  sufficient on its own to close the target 7-pair gap from Delta:
-  Transfer Ledger's opening motivation — see the second bug below.
-- **Second real gap found during implementation, resolved with the user
-  via a direct question rather than assumed:** tier 2's
-  mutual-match requirement structurally cannot pair the SHARED BILLS
-  ACCO ↔ Bills Account legs, because the Bills Account's own `NAME`
-  field self-references its **own** account number, not the sender's —
-  so its own `classify()` decode resolves to itself, not to the other
-  leg, and mutual agreement can never hold no matter how the matching
-  window is tuned. The user's decision: add a third, distinct,
-  explicitly-tracked pairing tier (`self_reference_match`) rather than
-  loosen tier 2's safety property, so self-reference-derived pairs stay
-  independently auditable/reconsiderable later rather than being folded
-  silently into tier 2's confidence. Implemented: fires only after
-  tiers 1 and 2 both fail; requires the *other* leg's own decoded
-  counterpart to equal *its own* account (the self-reference signature),
-  plus exact opposite amount, a ±3 day window, and being unclaimed.
-  Confidence `SELF_REFERENCE_MATCH_CONFIDENCE = 0.6` — deliberately
-  below tier 2's 0.75 since there's no mutual cross-check (self-reference
-  + amount/date is the whole signal); still a judgement call, flagged to
-  the user, not yet revisited against a longer real-data track record.
-- ✓ DONE — tests: 80 total (up from 76 at the start of this delta's
-  Task 3), all passing — new tests cover tier 1 (unchanged behaviour
-  confirmed), tier 2 (amount-date mutual match), tier 3 (self-reference
-  match), retroactive backfill of a newly-imported leg completing an old
-  one, retroactive re-pairing of two already-persisted unpaired legs
-  once a new tier is added (the second real bug's regression test), the
-  `CHECK`-constraint schema migration, and a classification regression
-  test for the trailing-marker parsing fix. `cargo build`: 0 errors, 11
-  warnings (pre-existing dead-code baseline, nothing new). `cargo
-  clippy --all-targets`: 0 errors, 12 warnings (pre-existing baseline;
-  one new but deliberately-allowed `enum_variant_names` lint on
-  `TransferPairMethod`, all three variants ending in "Match" by design,
-  matching the `pair_method` string values).
-- ✓ DONE — real database migration: backed up
-  `~/.local/share/ledgr/ledgr.db` twice
-  (`ledgr.db.bak-20260713162825-pre-transfer-ledger` before the tier-3
-  work, `ledgr.db.bak-20260713205125-pre-self-reference-tier` before the
-  schema migration). Ran `ledgr import` to backfill `transfer_entries`
-  for all 300 already-imported internal transfers: 218 legs paired via
-  `description_match`, 21 via `self_reference_match` (including all 7
-  target SHARED BILLS ACCO pairs — transaction ids 734/765/792/830/867/
-  897/931 on the Bills Account side), 0 via `amount_date_match` (that
-  tier's real-world case, if one exists, wasn't found in this dataset),
-  40 legs permanently unpaired (all confirmed to be Reference Household
-  Accounts, unpairable by definition, not a gap). `ledgr status`
-  confirmed no regression in balances/transaction counts. Re-running
-  `ledgr import` a second time produced 0 new pairs/backfills —
-  confirmed idempotent.
-- ✓ DONE — `transaction_links` cleanup: spot-checked 5 of the original
-  `relation='transfer'` pairs against `transfer_entries` (all matched),
-  then deleted the 110 redundant `relation='transfer' AND
-  confidence=0.9` rows — the old `find_transfer_counterpart`-only
-  pairing mechanism, now fully superseded by `transfer_entries`.
-  Deliberately **kept** the 32 `relation='transfer' AND confidence=0.85`
-  rows — these are `Classification::CardPayment` pairs from the
-  separate `find_card_payment_counterpart` mechanism (Delta: Credit Card
-  Transaction Import, Task 5), which `transfer_entries` does not cover
-  at all and which derivation still actively writes.
-  `transaction_links` now holds exactly those 32 rows.
-- **Two more real bugs found via actual TUI use (2026-07-13, after the
-  above was reported done) and fixed directly, not by a subagent:**
-  1. **Counterparty display bug:** `Db::transfer_entries_for_month`
-     only ever selected the raw `counterpart_sort_code`/
-     `counterpart_account_number` digits decoded from a leg's own `NAME`
-     field — never the actual resolved pairing. For a self-referencing
-     leg (its own `NAME` names its own account, not the sender's — the
-     exact case `self_reference_match` exists to pair), this meant the
-     "From/To" columns showed the account as its own counterparty even
-     though `transfer_entries.counterpart_transaction_id` had the right
-     answer all along. Fixed: the query now `LEFT JOIN`s `transfer_entries`
-     to itself via `counterpart_transaction_id` to fetch the real
-     counterpart's `account_id`; `TransferEntry` gained
-     `counterpart_resolved_account_id`; `resolve_counterparty`
-     (`src/app.rs`) now prefers it over the raw decode. New test:
-     `resolve_counterparty_prefers_resolved_pairing_over_a_self_referencing_decode`.
-  2. **Duplicate-row display:** the per-month drill-down showed **two**
-     rows for every paired transfer (one per leg, per the original
-     design doc's explicit "both legs of a paired transfer produce two
-     rows" decision) — the user had never actually agreed to that and
-     found it confusing/duplicate-looking in the live TUI. User's
-     decision when asked directly: **one row per transfer.**
-     `Db::transfer_entries_for_month` now suppresses the incoming leg of
-     a same-month pair (the outgoing/negative-amount leg is canonical,
-     since "From/To" already reads sender-first); a leg whose counterpart
-     falls in a different month (pairing tolerates up to a 3-day gap) is
-     still shown alone, and unpaired legs are always shown. Covered by
-     new assertions appended to the existing
-     `derive_spend_entries_pairs_both_legs_of_a_real_transfer` test
-     (row count == 1). **Note for the record:** the original "two rows,
-     one per leg" design choice in
-     `doc/implementation-notes/transfer-ledger-design.md` was made
-     unilaterally by the design subagent, not agreed with the user —
-     worth a general reminder to flag UI/display shape decisions as
-     explicit open questions the same way schema/naming decisions
-     already are.
-  - Both fixes verified against the real database (the SHARED BILLS ACCO
-    pair now shows as a single correctly-directed row) and via
-    `cargo build`/`test`/`clippy` (82 tests, all passing; clippy clean,
-    same pre-existing baseline).
-- **The real fix, later the same session: `transfer_entries` was the
-  wrong shape, not just missing a display fix.** The "duplicate-row
-  display" patch above (#2) suppressed a symptom — the schema still
-  stored **two rows per paired transfer** (one per leg, linked by
-  `counterpart_transaction_id`), which is what made the duplicate-row
-  bug possible at all. The user rejected this directly: a transfer entry
-  should be *the link between two transactions*, not one transaction's
-  own row. Reworked `transfer_entries` for real: `out_transaction_id`/
-  `out_account_id`/`out_sort_code`/`out_account_number`/`out_description`
-  and a mirrored `in_*` set directly on **one row per real-world
-  transfer**, either side nullable until that leg's transaction is
-  found. This is a genuine schema change:
-  - `src/db/schema.sql`: table redefined (`out_*`/`in_*` columns,
-    `CHECK (out_transaction_id IS NOT NULL OR in_transaction_id IS NOT
-    NULL)`).
-  - `src/model.rs`: `TransferLegRole` (Out/In), `NewTransferLeg`
-    (replaces `NewTransferEntry`), `TransferEntry` rewritten to the new
-    shape, new `OpenTransferEntry` (the re-pairing sweep's candidate
-    type).
-  - `src/db/spend.rs`: `insert_transfer_leg`, `complete_transfer_leg`,
-    `create_paired_transfer`, `find_open_transfer_candidate` (shared by
-    tiers 2/3), `open_transfer_entries`, `delete_transfer_entry`,
-    `transfer_row_for_transaction` replace the old per-leg methods;
-    `transfer_entries_for_month`/`monthly_transfer_totals` rewritten for
-    the new columns (no display-layer dedup needed any more — the schema
-    itself guarantees one row per transfer).
-  - `src/derive.rs`: pairing restructured into two stages — inline
-    tiers 1-3 while classifying each transaction (mirrors the previous
-    per-leg logic's tier order, just completing/creating merged rows
-    instead of linking separate ones), plus a **new re-pairing sweep**
-    after the main loop that re-attempts pairing across every currently
-    *open* row against every *other* open row — needed because two
-    already-persisted one-sided rows (neither tied to a transaction
-    freshly classified this run) can only be merged by comparing them to
-    each other, not to a fresh transaction. This is the same shape of
-    gap tier 3's original rollout hit, re-confirmed as a recurring
-    requirement of this design rather than a one-off.
-  - `src/app.rs`/`src/ui.rs`: `resolve_counterparty` replaced by
-    `resolve_transfer_leg_name` (resolves either side directly from
-    `*_account_id`/`*_sort`/`*_account`, no join-based "resolved
-    pairing" workaround needed since the row already has the answer);
-    `show_transfer_detail`/`selected_row_text`/`draw_transfer_month`
-    updated to read `out_*`/`in_*` directly.
-  - Real database re-migrated (not just re-derived): backed up fresh
-    (`ledgr.db.bak-20260713220720-pre-transfer-entry-shape-rework`),
-    verified structurally against a scratch copy first, then the actual
-    300 old one-row-per-leg rows merged into 170 rows in the new shape
-    (130 fully paired — 109 `description_match`, 21
-    `self_reference_match`, 0 `amount_date_match` — plus 40 permanently
-    one-sided). All 7 SHARED BILLS ACCO pairs confirmed merged correctly.
-    `ledgr status` confirmed no regression in balances/transaction
-    counts.
-  - `doc/domain/ubiquitous-language.md`: "Transfer Ledger"/"Transfer
-    Entry" downgraded from `established` back to `candidate` — they'd
-    been marked established earlier this session and attributed to "the
-    user," which overclaimed; the user asked only for the terminology to
-    be made *precise*, not signed off on the terms, and the "Transfer
-    Entry" description at the time still described the now-rejected
-    one-row-per-leg shape. Corrected: attributed to the assistant,
-    description rewritten to match the corrected shape, pending the
-    user's actual sign-off.
-  - Tests: 81 total, all passing (including the migration rewritten as a
-    real column-shape merge test, not just a `CHECK`-constraint bump).
-    `cargo build`/`clippy --all-targets`: 0 errors, same pre-existing
-    dead-code baseline (plus 3 new forward-looking fields on
-    `TransferEntry`/`OpenTransferEntry`, consistent with the project's
-    existing tolerance for that pattern).
-  - Full narrative, including the exact reasoning trail and the lesson
-    about not treating a display-layer patch as if it fixed the
-    underlying model: `doc/implementation-notes/transfer-ledger-history.md`.
-- **Not yet done:** full manual click-through of the live TUI (only
-  verified via `cargo build`/`test`/`clippy` and real-database SQL
-  checks so far). Also not done: getting the user's actual sign-off to
-  formalise "Transfer Entry"/"Transfer Ledger" in
-  `doc/domain/ubiquitous-language.md` (currently `candidate`, see Task
-  2's open question).
-
-### Task 4: Migrate credit card payment matching into `transfer_entries`; retire legacy `transaction_links` usage
-- ✓ DONE (2026-07-13 session, run autonomously) — sign-off obtained first:
-  "Transfer Entry"/"Transfer Ledger"/"Credit Card Payment" promoted from
-  `candidate` to `established` in `doc/domain/ubiquitous-language.md`.
-- ✓ DONE — `Classification::CardPayment` matching (`src/derive.rs`) now
-  writes `transfer_entries` instead of `transaction_links`: a matched
-  payment is fully paired directly (`Db::create_paired_transfer`, new
-  `TransferPairMethod::CreditCardPaymentMatch`, `pair_method =
-  'credit_card_payment_match'`, `pair_confidence = 0.85`, same value as
-  the retired mechanism used); an unmatched candidate (card statement not
-  yet imported) is recorded as a one-sided out-leg
-  (`Db::insert_transfer_leg`, `rule_name = 'credit_card_payment'`) —
-  **not** a low-confidence spend entry as before, since a credit card
-  payment is an internal transfer by definition, matched or not. New
-  `DerivationSummary.card_payments_unmatched` field (replaces the old
-  `card_payment_unmatched`-rule spend entries). Both real bugs the
-  critique flagged are fixed as a result: matched payments no longer
-  reprocess forever (they now gain a `transfer_entries` row, which
-  `pending_derivation_transactions` already excludes); an unmatched
-  payment is retried every run via new `Db::open_card_payment_entries` +
-  a fresh `find_card_payment_counterpart` lookup (works because the
-  card-side payment line, until matched, classifies `OutOfScope` and so
-  is never excluded from being found) rather than becoming a permanent
-  double-count once its old spend entry existed. Full mechanism written
-  up in `doc/implementation-notes/transfer-ledger-design.md`, "Credit
-  card payment matching".
-- ✓ DONE — `transaction_links`: `LinkRelation::Transfer` variant removed
-  (dead once its only writer was gone); schema's `relation` `CHECK`
-  narrowed to `refund`/`duplicate_of`/`related`
-  (`duplicate_of`/`related` still have no writer — untouched, that's
-  Task 5's scope). New `Db::init` migration
-  (`migrate_delete_legacy_transfer_links`) purges any stale
-  `relation='transfer'` rows on every open, unconditionally (cheap,
-  idempotent). New `Db::init` migration pair
-  (`migrate_rename_narrow_pair_method_transfer_entries` +
-  `migrate_copy_narrow_pair_method_transfer_entries`) widens an
-  already-created real `transfer_entries` table's `pair_method` `CHECK`
-  to accept `'credit_card_payment_match'` — same rename/recreate/copy/drop
-  pattern as the earlier leg-shape migration, since SQLite can't `ALTER` a
-  `CHECK` constraint in place.
-- ✓ DONE — the two existing card-payment tests were expanded rather than
-  replaced (test count unchanged, 81 total, all passing): the matched-
-  payment test now also asserts one `transfer_entries` row (not
-  `transaction_links`) and idempotency across a second `run_derivation`;
-  the unmatched-payment test (renamed
-  `run_derivation_records_an_unmatched_card_payment_as_an_open_transfer_entry`)
-  now asserts an open one-sided row (not a spend entry), then that it's
-  retroactively paired once the credit card statement "arrives" in a
-  later derivation run, with no duplicate row. `cargo build`/`test`/
-  `clippy --all-targets`: 0 errors; warnings at the same pre-existing
-  dead-code baseline (nothing new).
-- ✓ DONE — real database migration: backed up
-  `~/.local/share/ledgr/ledgr.db` first
-  (`ledgr.db.bak-20260713232858-pre-cc-payment-transfer-entries-migration`),
-  validated end-to-end on a scratch copy (via a fake `HOME` pointing
-  `directories::BaseDirs` at the scratch copy) before touching the real
-  file. Real `ledgr import`: all 32 real credit card payments (previously
-  `transaction_links relation='transfer'` rows) matched into
-  `transfer_entries` (`card_payments_matched: 32`, `0` still unmatched);
-  `transaction_links` narrowed from 35 rows (32 transfer + 3 refund) to
-  exactly the 3 refund rows. `ledgr status` confirmed no change to any
-  account balance or transaction count. Re-ran `ledgr import` a second
-  time: 0 new matches, `transfer_entries` count unchanged (202) —
-  confirmed idempotent.
-- ✓ DONE — `ledgr import`'s printed summary (`src/main.rs`) now surfaces
-  `card_payments_matched`/`card_payments_unmatched` (previously computed
-  but never printed, even before this session).
-- Sub-doc: `doc/implementation-notes/transfer-ledger-critique.md` (updated
-  with a resolution note at the top — §1/§3 resolved by this task, §2/§4/§5
-  remain Task 5's scope).
-
-### Task 5: Retire `transaction_links` entirely by absorbing refund links into the spend ledger
-- TODO (added 2026-07-13) — once Task 4 removes the credit card payment
-  writer, `transaction_links`' only remaining live use is refund linking
-  (`LinkRelation::Refund`, written in `src/derive.rs` when a `Refund`-
-  classified transaction is matched to its original charge via
-  `Db::find_refund_original`). The user's decision: rather than leave
-  `transaction_links` alive for this one purpose, absorb the refund
-  relationship directly into `spend_entries` (e.g. a nullable
-  self-referencing column such as `refunds_spend_entry_id`, or an
-  equivalent shape — not yet designed), so a refund is a first-class
-  property of the spend ledger entry itself rather than a separate edge
-  row nothing else reads. Once done, `transaction_links` (including the
-  unused `duplicate_of`/`related` relations, which have no writers today
-  — see `doc/implementation-notes/transfer-ledger-critique.md`) can be
-  dropped from the schema entirely.
-- TODO — design the exact column/shape, decide whether `duplicate_of`/
-  `related` are worth preserving in some other form or are safe to drop
-  outright (no writer today, so likely just dead CHECK options), migrate
-  the real database, update `doc/implementation-notes/spend-ledger-design.md`
-  accordingly.
-- Sub-doc: `doc/implementation-notes/transfer-ledger-critique.md`
 
 ## Delta: Reconciliation
 
@@ -1299,6 +589,22 @@ Build out the TUI beyond the current scaffold.
   record having checked and accepted as legitimate.
 - Full session detail: see the dated entries under "What's Next" history
   above (2026-07-12).
+- **Renamed 2026-07-17** — `Screen::MonthlyGap`/`Screen::MonthSpend` →
+  `Screen::MonthlySpend`/`Screen::SpendMonth` (`src/app.rs`, `src/ui.rs`,
+  `src/main.rs`), since "gap" (spend minus income) doesn't exist as a
+  concept yet — only spend does, income being deferred to Delta: The Gap
+  Task 1 — so the old name overclaimed what the screen actually shows.
+  Naming pattern matches `Screen::MonthlyTransfers`/`Screen::TransferMonth`
+  exactly (`Monthly<Noun>` top level, `<Noun>Month` drill-down) rather
+  than introducing a third pattern. Leader-key binding moved `<space>g` →
+  `<space>s` to match (`main.rs`'s leader-key match arm); the drill-down's
+  own title text (`"Spend — {month}"`) was already distinct and needed no
+  change. Verified live via `tmux` against the real database: `<space>s`
+  opens "Monthly Spend", the drill-down shows "Spend — 2026-07", and the
+  help screen shows the new binding. The "Gap" concept itself (spend vs
+  income) is deferred to a future task, to be added back as a distinct
+  screen/column once Delta: The Gap's income ledger exists, rather than
+  bolted onto this one prematurely.
 
 ### Task 4: Leader-key navigation
 - ✓ DONE (2026-07-12 session) — navigation-history stack + leader key:
@@ -1380,58 +686,6 @@ should be built in a way that blocks this.
   shows a real need for postings-level detail (e.g. splitting a
   mortgage payment into interest vs. principal) that the interim model
   can't give.
-
-## Delta: Statement/Import Naming Cleanup
-
-The domain term **"statement"** (the `statements` table, `statement_id`
-columns, "Bank Statement Import"/"Credit Card Statement Import" delta
-names) didn't fit what's actually being recorded once assets/
-liabilities and non-bank sources are in scope — a manually-recorded
-house valuation or a downloaded pension report isn't a "statement" in
-the banking sense. Flagged 2026-07-12 as needing a rename across code,
-schema, and docs. Per this project's ubiquitous-language rule
-(`doc/domain/ubiquitous-language.md`, `CLAUDE.md`), the new term was
-agreed with the user before renaming anything.
-
-### Task 1: Agree the replacement term
-- ✓ DONE (2026-07-12) — agreed **"Import"**: `statements` table →
-  `imports`, `statement_id` columns → `import_id`, `StatementParser`
-  trait → `ImportFileParser`. Considered and rejected: *export*,
-  *download*, *import file*. "Import" was chosen despite already
-  naming the `ledgr import` command/run — one **import** is one file;
-  running `ledgr import` processes a batch of zero or more imports in
-  one run (`ImportSummary`), which the user confirmed is coherent, not
-  a collision. Recorded in `doc/domain/ubiquitous-language.md`. The
-  delta names themselves were also agreed to change, since they used
-  the same retired word: "Bank Statement Import" → **"Bank Transaction
-  Import"**, "Credit Card Statement Import" → **"Credit Card
-  Transaction Import"**, "Other Statement Import" → **"Other
-  Transaction Import"** — "Transaction Import" was chosen over
-  "Import" for the delta names specifically since ledgr may import
-  other things (e.g. balance-only pension reports) beyond
-  transactions.
-
-### Task 2: Refactor to the agreed term
-- ✓ DONE (2026-07-12) — renamed throughout: `statements` table →
-  `imports` (`src/db/schema.sql`), `transactions.statement_id` /
-  `balance_snapshots.statement_id` → `import_id`, `Transaction`/
-  `NewTransaction.statement_id` → `import_id` (`src/model.rs`),
-  `StatementParser` trait → `ImportFileParser` (`src/import/mod.rs` and all
-  implementations), `Db::insert_statement`/`find_statement_by_hash` →
-  `insert_import`/`find_import_by_hash`, `src/db/statements.rs` →
-  `src/db/imports.rs`, delta names (this plan's Summary table and
-  section headers), and code-identifier references in ADRs 0002/0003/
-  0007, `doc/kb/enable-banking-registration.md`,
-  `doc/implementation-notes/spend-ledger-design.md`, and `CLAUDE.md`'s
-  trait snippet. Generic English uses of "statement" (e.g. "OFX
-  statement response", "bank statement", "PDF statement export") were
-  deliberately left alone — only the retired domain term and its code/
-  schema identifiers were renamed. Real local `ledgr.db` migrated via a
-  new idempotent step in `Db::init` (`src/db/mod.rs`,
-  `migrate_statements_to_imports`): renames the `statements` table and
-  both `statement_id` columns on first open after upgrade, no-op on a
-  fresh or already-migrated database (mirrors the pattern used for the
-  `AccountType::Checking` → `Current` rename).
 
 ## Delta: Payslip Import
 
@@ -2159,6 +1413,50 @@ uncommitted diff.
 
 **Immediate next priorities:** see "What's Next" at the top of this
 file — review and commit the Task 4 diff first, then start Task 5.
+
+## Checkpoint: Session 2026-07-17b
+
+**Completed:**
+- Extended `ledgr status` (Bank Transaction Import, Task 3): Spend Ledger
+  and Transfer Ledger summary sections, unpaired-transfer split into
+  "reference accounts" (expected) vs "unresolved" (needs review), and a
+  Balance-column right-alignment fix. Prompted by the user asking how to
+  test the still-uncommitted Task 4 work, then asking where the credit
+  card payment matched/unmatched counts (until now only ever printed
+  transiently by `ledgr import`) could be seen afterwards.
+- Delta: Transfer Ledger, **Task 5 done in full** — see that task's entry
+  above. Headline: `transaction_links` dropped entirely;
+  `spend_entries.refunds_spend_entry_id` (self-referencing column)
+  replaces its one remaining live purpose (refund linking); real database
+  migrated (backfilled 3 existing refund links, dropped the table,
+  confirmed idempotent).
+- TUI Analysis Views, Task 3 addendum: `Screen::MonthlyGap`/`MonthSpend`
+  renamed to `Screen::MonthlySpend`/`SpendMonth` (matching the
+  `MonthlyTransfers`/`TransferMonth` pattern), leader key `<space>g` →
+  `<space>s` — "gap" doesn't exist as a concept yet (no income ledger),
+  so the old name overclaimed. Verified live via `tmux` against the real
+  database.
+- All work this session verified against the real `~/.local/share/ledgr/ledgr.db`
+  (backed up first: `ledgr.db.bak-20260717205948-pre-transaction-links-retirement`),
+  not just `cargo test`. 84 tests passing throughout; `cargo clippy
+  --all-targets` clean at the same pre-existing dead-code baseline
+  (nothing new) after every change.
+- Also fixed as a side effect: the `ledgr import` summary line's
+  `entr(y/ies)` pluralisation-attempt wording, at the user's request
+  ("just have entries") — simplified to plain "entries" everywhere it
+  appeared (`src/main.rs`).
+
+**Not done / left for later:** Delta: Reclaimable Work Expenses — the
+user asked what happened to this mid-session; confirmed it's still just
+the sketch already in this file (Task 1, TODO), nothing built, not
+started this session.
+
+**Decision:** the user is committing this session's work themselves; no
+git operations performed by the assistant this session.
+
+**Immediate next priorities:** see "What's Next" at the top of this
+file — next delta not yet chosen (candidates: Reconciliation, or
+resuming the Credit Card/Amazon/Gap chain).
 
 ## Implementation Notes
 

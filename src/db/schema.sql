@@ -1,9 +1,13 @@
 -- ledgr's initial schema.
 --
 -- Storage is plain SQLite. Relationships that don't fit a single table
--- (category hierarchies, transfer pairs, refund links) are modeled as edge
--- tables (`categories.parent_id`, `transaction_links`) rather than reaching
--- for a dedicated graph database, and traversed with recursive CTEs.
+-- (category hierarchies, transfer pairs, refund links) are modeled as
+-- self-referencing columns on the row that needs the relation
+-- (`categories.parent_id`, `transfer_entries`' counterpart_* columns,
+-- `spend_entries.refunds_spend_entry_id`) rather than a general-purpose edge
+-- table or a dedicated graph database — every one of these relations is at
+-- most one-to-one from the referencing row's side, which a column captures
+-- more simply than an edge table's extra join.
 --
 -- Money is stored as integer minor units (e.g. pence) to avoid floating
 -- point drift.
@@ -121,26 +125,6 @@ CREATE TABLE IF NOT EXISTS account_card_numbers (
 
 CREATE INDEX IF NOT EXISTS idx_account_card_numbers_account ON account_card_numbers(account_id);
 
--- Generic edge table linking two transactions: refunds against an original
--- charge, suspected duplicates, etc. Transfer pairing (including credit card
--- payments) lives in `transfer_entries` instead — 'transfer' was dropped
--- from `relation`'s allowed values once credit card payment matching (the
--- last writer of it) migrated there (Delta: Transfer Ledger, Task 4). See
--- doc/implementation-notes/transfer-ledger-critique.md.
-CREATE TABLE IF NOT EXISTS transaction_links (
-    id                  INTEGER PRIMARY KEY,
-    from_transaction_id INTEGER NOT NULL REFERENCES transactions(id) ON DELETE CASCADE,
-    to_transaction_id   INTEGER NOT NULL REFERENCES transactions(id) ON DELETE CASCADE,
-    relation            TEXT NOT NULL CHECK (relation IN (
-                            'refund', 'duplicate_of', 'related'
-                         )),
-    confidence          REAL,
-    UNIQUE (from_transaction_id, to_transaction_id, relation)
-);
-
-CREATE INDEX IF NOT EXISTS idx_tx_links_from ON transaction_links(from_transaction_id);
-CREATE INDEX IF NOT EXISTS idx_tx_links_to ON transaction_links(to_transaction_id);
-
 -- Derived spend ledger — see doc/implementation-notes/spend-ledger-design.md.
 -- Raw transactions stay immutable evidence; this is the categorised,
 -- human-facing view of real-world spending, rebuilt by the derivation pass.
@@ -157,6 +141,15 @@ CREATE TABLE IF NOT EXISTS spend_entries (
     description    TEXT NOT NULL,
     note           TEXT,
     category_id    INTEGER REFERENCES categories(id) ON DELETE SET NULL,
+    -- The original charge this entry refunds, if this entry is itself a
+    -- refund — replaces the old `transaction_links(relation='refund')` edge
+    -- table (Delta: Transfer Ledger, Task 5): a refund has at most one
+    -- original, so a self-referencing column on the refund's own row is
+    -- simpler than a separate edge table, same reasoning as
+    -- `transfer_entries`' counterpart_* columns. `NULL` for every
+    -- non-refund entry, and for a refund whose original charge wasn't found
+    -- (best-effort merchant-prefix match, see `Db::find_refund_original`).
+    refunds_spend_entry_id INTEGER REFERENCES spend_entries(id) ON DELETE SET NULL,
     classified_by  TEXT NOT NULL CHECK (classified_by IN
                        ('rule', 'matcher', 'manual')),
     confidence     REAL,

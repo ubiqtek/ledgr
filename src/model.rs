@@ -123,36 +123,6 @@ pub struct NewTransaction {
     pub notes: Option<String>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum LinkRelation {
-    Refund,
-    DuplicateOf,
-    Related,
-}
-
-impl LinkRelation {
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            LinkRelation::Refund => "refund",
-            LinkRelation::DuplicateOf => "duplicate_of",
-            LinkRelation::Related => "related",
-        }
-    }
-}
-
-/// An edge between two transactions, e.g. the two legs of a transfer between
-/// accounts, or a refund pointing back at its original charge.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct TransactionLink {
-    pub id: Id,
-    pub from_transaction_id: Id,
-    pub to_transaction_id: Id,
-    pub relation: LinkRelation,
-    /// Set when the link was inferred rather than user-confirmed.
-    pub confidence: Option<f64>,
-}
-
 /// Provenance of a spend entry's classification (counterparty + category).
 /// See doc/implementation-notes/spend-ledger-design.md.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -196,6 +166,9 @@ pub struct SpendEntry {
     pub description: String,
     pub note: Option<String>,
     pub category_id: Option<Id>,
+    /// The original charge this entry refunds, if this entry is itself a
+    /// refund. See `schema.sql`'s doc comment on the column.
+    pub refunds_spend_entry_id: Option<Id>,
     pub classified_by: ClassifiedBy,
     pub confidence: Option<f64>,
     pub rule_name: Option<String>,
@@ -212,6 +185,7 @@ pub struct NewSpendEntry {
     pub description: String,
     pub note: Option<String>,
     pub category_id: Option<Id>,
+    pub refunds_spend_entry_id: Option<Id>,
     pub classified_by: ClassifiedBy,
     pub confidence: Option<f64>,
     pub rule_name: Option<String>,

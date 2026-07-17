@@ -9,8 +9,8 @@ use ratatui::widgets::TableState;
 pub enum Screen {
     Accounts,
     Transactions,
-    MonthlyGap,
-    MonthSpend,
+    MonthlySpend,
+    SpendMonth,
     MonthlyTransfers,
     TransferMonth,
     Help,
@@ -34,10 +34,10 @@ pub struct App {
     pub transactions_table_state: TableState,
     pub monthly_spend: Vec<MonthlySpend>,
     pub selected_month: usize,
-    pub monthly_gap_table_state: TableState,
-    pub month_spend_entries: Vec<SpendEntryWithAccount>,
+    pub monthly_spend_table_state: TableState,
+    pub spend_month_entries: Vec<SpendEntryWithAccount>,
     pub selected_spend_entry: usize,
-    pub month_spend_table_state: TableState,
+    pub spend_month_table_state: TableState,
     /// Reference household accounts (e.g. a partner's — see ADR 0008),
     /// loaded once from `config.toml` at startup, same lifecycle as the
     /// account-name overrides applied in `App::new`, so
@@ -54,7 +54,7 @@ pub struct App {
     pub selected_transfer_entry: usize,
     pub transfer_month_table_state: TableState,
     /// `Some(buffer)` while editing the selected spend entry's note (`n` on
-    /// `Screen::MonthSpend`) — its presence is what routes key events to
+    /// `Screen::SpendMonth`) — its presence is what routes key events to
     /// text editing instead of navigation, see `main.rs`'s event loop.
     pub note_edit: Option<String>,
     /// `Some` while the "both legs of this transfer" popup is open (`i` on
@@ -95,10 +95,10 @@ impl App {
             transactions_table_state: TableState::default(),
             monthly_spend: Vec::new(),
             selected_month: 0,
-            monthly_gap_table_state: TableState::default(),
-            month_spend_entries: Vec::new(),
+            monthly_spend_table_state: TableState::default(),
+            spend_month_entries: Vec::new(),
             selected_spend_entry: 0,
-            month_spend_table_state: TableState::default(),
+            spend_month_table_state: TableState::default(),
             household_accounts: config.household_accounts,
             monthly_transfers: Vec::new(),
             selected_transfer_month: 0,
@@ -124,10 +124,10 @@ impl App {
         Ok(())
     }
 
-    pub fn open_monthly_gap(&mut self) -> anyhow::Result<()> {
+    pub fn open_monthly_spend(&mut self) -> anyhow::Result<()> {
         self.monthly_spend = self.db.monthly_spend_totals()?;
         self.selected_month = 0;
-        self.navigate_to(Screen::MonthlyGap);
+        self.navigate_to(Screen::MonthlySpend);
         Ok(())
     }
 
@@ -135,9 +135,9 @@ impl App {
         let Some(month) = self.monthly_spend.get(self.selected_month) else {
             return Ok(());
         };
-        self.month_spend_entries = self.db.spend_entries_for_month(&month.month)?;
+        self.spend_month_entries = self.db.spend_entries_for_month(&month.month)?;
         self.selected_spend_entry = 0;
-        self.navigate_to(Screen::MonthSpend);
+        self.navigate_to(Screen::SpendMonth);
         Ok(())
     }
 
@@ -255,12 +255,12 @@ impl App {
     }
 
     /// Opens the note editor for the selected spend entry on
-    /// `Screen::MonthSpend`, pre-filled with its existing note (if any).
+    /// `Screen::SpendMonth`, pre-filled with its existing note (if any).
     pub fn start_editing_note(&mut self) {
-        if self.screen != Screen::MonthSpend {
+        if self.screen != Screen::SpendMonth {
             return;
         }
-        let Some(row) = self.month_spend_entries.get(self.selected_spend_entry) else {
+        let Some(row) = self.spend_month_entries.get(self.selected_spend_entry) else {
             return;
         };
         self.note_edit = Some(row.entry.note.clone().unwrap_or_default());
@@ -279,7 +279,7 @@ impl App {
         let Some(buffer) = self.note_edit.take() else {
             return Ok(());
         };
-        let Some(row) = self.month_spend_entries.get_mut(self.selected_spend_entry) else {
+        let Some(row) = self.spend_month_entries.get_mut(self.selected_spend_entry) else {
             return Ok(());
         };
         let trimmed = buffer.trim();
@@ -298,8 +298,8 @@ impl App {
         let len = match self.screen {
             Screen::Accounts => self.accounts.len(),
             Screen::Transactions => self.transactions.len(),
-            Screen::MonthlyGap => self.monthly_spend.len(),
-            Screen::MonthSpend => self.month_spend_entries.len(),
+            Screen::MonthlySpend => self.monthly_spend.len(),
+            Screen::SpendMonth => self.spend_month_entries.len(),
             Screen::MonthlyTransfers => self.monthly_transfers.len(),
             Screen::TransferMonth => self.transfer_month_entries.len(),
             Screen::Help => return,
@@ -310,8 +310,8 @@ impl App {
         let selected = match self.screen {
             Screen::Accounts => &mut self.selected_account,
             Screen::Transactions => &mut self.selected_transaction,
-            Screen::MonthlyGap => &mut self.selected_month,
-            Screen::MonthSpend => &mut self.selected_spend_entry,
+            Screen::MonthlySpend => &mut self.selected_month,
+            Screen::SpendMonth => &mut self.selected_spend_entry,
             Screen::MonthlyTransfers => &mut self.selected_transfer_month,
             Screen::TransferMonth => &mut self.selected_transfer_entry,
             Screen::Help => return,
@@ -325,8 +325,8 @@ impl App {
         let selected = match self.screen {
             Screen::Accounts => &mut self.selected_account,
             Screen::Transactions => &mut self.selected_transaction,
-            Screen::MonthlyGap => &mut self.selected_month,
-            Screen::MonthSpend => &mut self.selected_spend_entry,
+            Screen::MonthlySpend => &mut self.selected_month,
+            Screen::SpendMonth => &mut self.selected_spend_entry,
             Screen::MonthlyTransfers => &mut self.selected_transfer_month,
             Screen::TransferMonth => &mut self.selected_transfer_entry,
             Screen::Help => return,
@@ -339,8 +339,8 @@ impl App {
         let len = match self.screen {
             Screen::Accounts => self.accounts.len(),
             Screen::Transactions => self.transactions.len(),
-            Screen::MonthlyGap => self.monthly_spend.len(),
-            Screen::MonthSpend => self.month_spend_entries.len(),
+            Screen::MonthlySpend => self.monthly_spend.len(),
+            Screen::SpendMonth => self.spend_month_entries.len(),
             Screen::MonthlyTransfers => self.monthly_transfers.len(),
             Screen::TransferMonth => self.transfer_month_entries.len(),
             Screen::Help => return,
@@ -351,8 +351,8 @@ impl App {
         let selected = match self.screen {
             Screen::Accounts => &mut self.selected_account,
             Screen::Transactions => &mut self.selected_transaction,
-            Screen::MonthlyGap => &mut self.selected_month,
-            Screen::MonthSpend => &mut self.selected_spend_entry,
+            Screen::MonthlySpend => &mut self.selected_month,
+            Screen::SpendMonth => &mut self.selected_spend_entry,
             Screen::MonthlyTransfers => &mut self.selected_transfer_month,
             Screen::TransferMonth => &mut self.selected_transfer_entry,
             Screen::Help => return,
@@ -390,7 +390,7 @@ impl App {
                     txn.description
                 ))
             }
-            Screen::MonthlyGap => {
+            Screen::MonthlySpend => {
                 let month = self.monthly_spend.get(self.selected_month)?;
                 Some(format!(
                     "{}\t{}",
@@ -398,8 +398,8 @@ impl App {
                     crate::format_amount_minor(month.spend_minor.abs(), "GBP")
                 ))
             }
-            Screen::MonthSpend => {
-                let row = self.month_spend_entries.get(self.selected_spend_entry)?;
+            Screen::SpendMonth => {
+                let row = self.spend_month_entries.get(self.selected_spend_entry)?;
                 let entry = &row.entry;
                 let account_name = self
                     .accounts

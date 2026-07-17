@@ -450,7 +450,7 @@ fn run(
                 if was_pending_leader {
                     match key.code {
                         KeyCode::Char('a') => app.navigate_to(app::Screen::Accounts),
-                        KeyCode::Char('g') => app.open_monthly_gap()?,
+                        KeyCode::Char('s') => app.open_monthly_spend()?,
                         KeyCode::Char('t') => app.open_monthly_transfers()?,
                         _ => {}
                     }
@@ -473,7 +473,7 @@ fn run(
                         }
                     }
                     KeyCode::Char('?') => app.toggle_help(),
-                    KeyCode::Char('n') if app.screen == app::Screen::MonthSpend => {
+                    KeyCode::Char('n') if app.screen == app::Screen::SpendMonth => {
                         app.start_editing_note();
                     }
                     KeyCode::Char('i') if app.screen == app::Screen::TransferMonth => {
@@ -488,7 +488,7 @@ fn run(
                     KeyCode::Up | KeyCode::Char('k') => app.move_selection(-1),
                     KeyCode::Enter => match app.screen {
                         app::Screen::Accounts => app.open_selected_account()?,
-                        app::Screen::MonthlyGap => app.open_selected_month()?,
+                        app::Screen::MonthlySpend => app.open_selected_month()?,
                         app::Screen::MonthlyTransfers => app.open_selected_transfer_month()?,
                         _ => {}
                     },

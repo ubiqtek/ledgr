@@ -13,8 +13,7 @@
 use crate::config::HouseholdAccountRef;
 use crate::db::Db;
 use crate::model::{
-    Account, ClassifiedBy, LinkRelation, NewSpendEntry, NewTransferLeg, TransferLegRole,
-    TransferPairMethod,
+    Account, ClassifiedBy, NewSpendEntry, NewTransferLeg, TransferLegRole, TransferPairMethod,
 };
 use std::collections::HashSet;
 
@@ -256,6 +255,7 @@ pub fn run_derivation(
                         description: txn.description.clone(),
                         note: None,
                         category_id: None,
+                        refunds_spend_entry_id: None,
                         classified_by: ClassifiedBy::Rule,
                         confidence: Some(confidence),
                         rule_name: Some(rule_name.to_string()),
@@ -268,15 +268,30 @@ pub fn run_derivation(
                 counterparty,
                 rule_name,
             } => {
+                // Best-effort: the original charge may not be found (no
+                // matching prefix/amount/date), or may itself predate the
+                // spend ledger existing — either way the refund is still
+                // recorded as its own spend entry, just with
+                // `refunds_spend_entry_id` left `NULL`.
+                let refunds_spend_entry_id = match &counterparty {
+                    Some(prefix) => db
+                        .find_refund_original(account.id, prefix, txn.amount_minor, &txn.posted_at)?
+                        .map(|original_id| db.spend_entry_id_for_transaction(original_id))
+                        .transpose()?
+                        .flatten(),
+                    None => None,
+                };
+
                 db.insert_spend_entry_with_source(
                     &NewSpendEntry {
                         occurred_on: txn.posted_at.clone(),
                         amount_minor: txn.amount_minor,
                         currency: txn.currency.clone(),
-                        counterparty: counterparty.clone(),
+                        counterparty,
                         description: txn.description.clone(),
                         note: None,
                         category_id: None,
+                        refunds_spend_entry_id,
                         classified_by: ClassifiedBy::Rule,
                         confidence: Some(0.7),
                         rule_name: Some(rule_name.to_string()),
@@ -284,22 +299,6 @@ pub fn run_derivation(
                     txn.id,
                 )?;
                 summary.spend_entries_created += 1;
-
-                if let Some(prefix) = counterparty {
-                    if let Some(original_id) = db.find_refund_original(
-                        account.id,
-                        &prefix,
-                        txn.amount_minor,
-                        &txn.posted_at,
-                    )? {
-                        db.insert_transaction_link(
-                            original_id,
-                            txn.id,
-                            LinkRelation::Refund,
-                            None,
-                        )?;
-                    }
-                }
             }
             Classification::OutOfScope => {
                 summary.out_of_scope += 1;
@@ -1216,6 +1215,61 @@ mod tests {
             second.spend_entries_created, 0,
             "must not double-derive an already-linked transaction"
         );
+    }
+
+    #[test]
+    fn run_derivation_links_a_refund_to_its_original_charges_spend_entry() {
+        let db = Db::open_in_memory().expect("open db");
+        let account_id = db
+            .insert_account(&NewAccount {
+                name: "Current Account".into(),
+                institution: Some("Barclays".into()),
+                account_type: AccountType::Current,
+                currency: "GBP".into(),
+                sort_code: Some("203040".into()),
+                account_number: Some("12345678".into()),
+            })
+            .expect("insert account");
+        db.insert_transaction(&NewTransaction {
+            account_id,
+            import_id: None,
+            posted_at: "2026-02-26".into(),
+            amount_minor: -4000,
+            currency: "GBP".into(),
+            description: "GARAGE SERVICES ON 26 FEB CPM".into(),
+            raw_description: None,
+            trn_type: Some("OTHER".into()),
+            external_id: None,
+            notes: None,
+        })
+        .expect("insert charge");
+        db.insert_transaction(&NewTransaction {
+            account_id,
+            import_id: None,
+            posted_at: "2026-02-28".into(),
+            amount_minor: 4000,
+            currency: "GBP".into(),
+            description: "GARAGE SERVICES ON 28 FEB CRM".into(),
+            raw_description: None,
+            trn_type: Some("OTHER".into()),
+            external_id: None,
+            notes: None,
+        })
+        .expect("insert refund");
+
+        run_derivation(&db, &[]).expect("derive");
+
+        let entries = db.list_spend_entries().expect("list spend entries");
+        let charge = entries
+            .iter()
+            .find(|e| e.amount_minor == -4000)
+            .expect("charge spend entry");
+        let refund = entries
+            .iter()
+            .find(|e| e.amount_minor == 4000)
+            .expect("refund spend entry");
+        assert_eq!(refund.refunds_spend_entry_id, Some(charge.id));
+        assert_eq!(charge.refunds_spend_entry_id, None);
     }
 
     #[test]

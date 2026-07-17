@@ -1,14 +1,13 @@
 //! Persistence for the derived spend ledger — `spend_entries` and
 //! `spend_entry_sources` — plus the derived transfer ledger
-//! (`transfer_entries`) and `transaction_links` access used by refund
-//! linking. See doc/implementation-notes/spend-ledger-design.md and
-//! doc/implementation-notes/transfer-ledger-design.md. Classification logic
-//! itself lives in `crate::derive`, kept separate from persistence so the
-//! rules stay unit-testable without a database.
+//! (`transfer_entries`). See doc/implementation-notes/spend-ledger-design.md
+//! and doc/implementation-notes/transfer-ledger-design.md. Classification
+//! logic itself lives in `crate::derive`, kept separate from persistence so
+//! the rules stay unit-testable without a database.
 
 use super::Db;
 use crate::model::{
-    ClassifiedBy, Id, LinkRelation, MonthlySpend, MonthlyTransfer, NewSpendEntry, NewTransferLeg,
+    ClassifiedBy, Id, MonthlySpend, MonthlyTransfer, NewSpendEntry, NewTransferLeg,
     OpenTransferEntry, SpendEntry, SpendEntrySourceRole, SpendEntryWithAccount, Transaction,
     TransferEntry, TransferLegRole, TransferPairMethod,
 };
@@ -62,8 +61,9 @@ impl Db {
         self.conn().execute(
             "INSERT INTO spend_entries
                 (occurred_on, amount_minor, currency, counterparty, description, note,
-                 category_id, classified_by, confidence, rule_name, classified_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))",
+                 category_id, refunds_spend_entry_id, classified_by, confidence, rule_name,
+                 classified_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))",
             params![
                 new.occurred_on,
                 new.amount_minor,
@@ -72,6 +72,7 @@ impl Db {
                 new.description,
                 new.note,
                 new.category_id,
+                new.refunds_spend_entry_id,
                 new.classified_by.as_str(),
                 new.confidence,
                 new.rule_name,
@@ -101,12 +102,13 @@ impl Db {
     pub fn list_spend_entries(&self) -> rusqlite::Result<Vec<SpendEntry>> {
         let mut stmt = self.conn().prepare(
             "SELECT id, occurred_on, amount_minor, currency, counterparty, description,
-                    note, category_id, classified_by, confidence, rule_name, classified_at
+                    note, category_id, refunds_spend_entry_id, classified_by, confidence,
+                    rule_name, classified_at
              FROM spend_entries
              ORDER BY occurred_on DESC, id DESC",
         )?;
         let rows = stmt.query_map([], |row| {
-            let classified_by_str: String = row.get(8)?;
+            let classified_by_str: String = row.get(9)?;
             Ok(SpendEntry {
                 id: row.get(0)?,
                 occurred_on: row.get(1)?,
@@ -116,11 +118,12 @@ impl Db {
                 description: row.get(5)?,
                 note: row.get(6)?,
                 category_id: row.get(7)?,
+                refunds_spend_entry_id: row.get(8)?,
                 classified_by: ClassifiedBy::parse(&classified_by_str)
                     .unwrap_or(ClassifiedBy::Rule),
-                confidence: row.get(9)?,
-                rule_name: row.get(10)?,
-                classified_at: row.get(11)?,
+                confidence: row.get(10)?,
+                rule_name: row.get(11)?,
+                classified_at: row.get(12)?,
             })
         })?;
         rows.collect()
@@ -140,8 +143,8 @@ impl Db {
     ) -> rusqlite::Result<Vec<SpendEntryWithAccount>> {
         let mut stmt = self.conn().prepare(
             "SELECT se.id, se.occurred_on, se.amount_minor, se.currency, se.counterparty,
-                    se.description, se.note, se.category_id, se.classified_by, se.confidence,
-                    se.rule_name, se.classified_at, t.account_id
+                    se.description, se.note, se.category_id, se.refunds_spend_entry_id,
+                    se.classified_by, se.confidence, se.rule_name, se.classified_at, t.account_id
              FROM spend_entries se
              JOIN spend_entry_sources ses ON ses.spend_entry_id = se.id AND ses.role = 'source'
              JOIN transactions t ON t.id = ses.transaction_id
@@ -149,7 +152,7 @@ impl Db {
              ORDER BY se.occurred_on, se.id",
         )?;
         let rows = stmt.query_map([month], |row| {
-            let classified_by_str: String = row.get(8)?;
+            let classified_by_str: String = row.get(9)?;
             Ok(SpendEntryWithAccount {
                 entry: SpendEntry {
                     id: row.get(0)?,
@@ -160,13 +163,14 @@ impl Db {
                     description: row.get(5)?,
                     note: row.get(6)?,
                     category_id: row.get(7)?,
+                    refunds_spend_entry_id: row.get(8)?,
                     classified_by: ClassifiedBy::parse(&classified_by_str)
                         .unwrap_or(ClassifiedBy::Rule),
-                    confidence: row.get(9)?,
-                    rule_name: row.get(10)?,
-                    classified_at: row.get(11)?,
+                    confidence: row.get(10)?,
+                    rule_name: row.get(11)?,
+                    classified_at: row.get(12)?,
                 },
-                account_id: row.get(12)?,
+                account_id: row.get(13)?,
             })
         })?;
         rows.collect()
@@ -205,30 +209,23 @@ impl Db {
         Ok(())
     }
 
-    /// Records an edge between two transactions (e.g. both legs of a
-    /// transfer, or a refund pointing back at its original charge).
-    /// `INSERT OR IGNORE` because a re-run derivation pass may attempt the
-    /// same link twice — the `UNIQUE(from, to, relation)` constraint makes
-    /// that a no-op rather than an error.
-    pub fn insert_transaction_link(
+    /// The spend entry a transaction is the `source` of, if any — used to
+    /// resolve a refund's original *transaction* (found via
+    /// `find_refund_original`) to the original charge's own spend entry, so
+    /// `refunds_spend_entry_id` can point at the ledger row directly rather
+    /// than the raw transaction.
+    pub fn spend_entry_id_for_transaction(
         &self,
-        from_transaction_id: Id,
-        to_transaction_id: Id,
-        relation: LinkRelation,
-        confidence: Option<f64>,
-    ) -> rusqlite::Result<()> {
-        self.conn().execute(
-            "INSERT OR IGNORE INTO transaction_links
-                (from_transaction_id, to_transaction_id, relation, confidence)
-             VALUES (?1, ?2, ?3, ?4)",
-            params![
-                from_transaction_id,
-                to_transaction_id,
-                relation.as_str(),
-                confidence
-            ],
-        )?;
-        Ok(())
+        transaction_id: Id,
+    ) -> rusqlite::Result<Option<Id>> {
+        self.conn()
+            .query_row(
+                "SELECT spend_entry_id FROM spend_entry_sources
+                 WHERE transaction_id = ?1 AND role = 'source'",
+                params![transaction_id],
+                |row| row.get(0),
+            )
+            .optional()
     }
 
     /// Best-effort search for a transfer's counterpart: the other leg,

@@ -35,6 +35,7 @@ impl Db {
         conn.pragma_update(None, "foreign_keys", true)?;
         Self::migrate_statements_to_imports(&conn)?;
         Self::migrate_add_transactions_notes(&conn)?;
+        Self::migrate_add_spend_entries_refunds_column(&conn)?;
         let renamed_leg_shaped_transfer_entries =
             Self::migrate_rename_leg_shaped_transfer_entries(&conn)?;
         let renamed_narrow_pair_method_transfer_entries =
@@ -46,7 +47,7 @@ impl Db {
         if renamed_narrow_pair_method_transfer_entries {
             Self::migrate_copy_narrow_pair_method_transfer_entries(&conn)?;
         }
-        Self::migrate_delete_legacy_transfer_links(&conn)?;
+        Self::migrate_retire_transaction_links(&conn)?;
         Ok(Self { conn })
     }
 
@@ -94,6 +95,36 @@ impl Db {
             return Ok(());
         }
         conn.execute_batch("ALTER TABLE transactions ADD COLUMN notes TEXT;")
+    }
+
+    /// One-off migration for databases created before `refunds_spend_entry_id`
+    /// was added to `spend_entries` (Delta: Transfer Ledger, Task 5 — see
+    /// doc/implementation-notes/transfer-ledger-critique.md). Same
+    /// `ALTER TABLE ... ADD COLUMN` pattern as
+    /// `migrate_add_transactions_notes`; no-op if it's already present. Must
+    /// run before `migrate_retire_transaction_links`, which backfills this
+    /// column from the table being retired.
+    fn migrate_add_spend_entries_refunds_column(conn: &Connection) -> rusqlite::Result<()> {
+        let has_table: bool = conn.query_row(
+            "SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name = 'spend_entries'",
+            [],
+            |row| row.get::<_, i64>(0),
+        )? > 0;
+        if !has_table {
+            return Ok(());
+        }
+        let has_column: bool = conn
+            .prepare(
+                "SELECT 1 FROM pragma_table_info('spend_entries') WHERE name = 'refunds_spend_entry_id'",
+            )?
+            .exists([])?;
+        if has_column {
+            return Ok(());
+        }
+        conn.execute_batch(
+            "ALTER TABLE spend_entries ADD COLUMN refunds_spend_entry_id INTEGER
+                REFERENCES spend_entries(id) ON DELETE SET NULL;",
+        )
     }
 
     /// One-off migration for databases whose `transfer_entries` table still
@@ -345,22 +376,56 @@ impl Db {
         )
     }
 
-    /// One-off cleanup: deletes any `transaction_links` rows left over from
-    /// the retired `relation='transfer'` credit card payment matching
-    /// (Delta: Transfer Ledger, Task 4 — see
-    /// doc/implementation-notes/transfer-ledger-critique.md, "credit card
-    /// payment matching is an internal transfer that never migrated to
-    /// `transfer_entries`"). Every such payment now has its own
-    /// `transfer_entries` row instead, so these are pure duplicates. Run
-    /// unconditionally on every open — cheap (indexed, small table) and a
-    /// no-op once the legacy rows are gone, so no separate "already
-    /// migrated" check is needed.
-    fn migrate_delete_legacy_transfer_links(conn: &Connection) -> rusqlite::Result<()> {
-        conn.execute(
-            "DELETE FROM transaction_links WHERE relation = 'transfer'",
+    /// One-off migration retiring `transaction_links` entirely (Delta:
+    /// Transfer Ledger, Task 5 — see
+    /// doc/implementation-notes/transfer-ledger-critique.md). By this point
+    /// the table's only live purpose was `relation = 'refund'` rows (its
+    /// `relation = 'transfer'` rows — credit card payment matching — were
+    /// already superseded by `transfer_entries` and deleted by an earlier
+    /// migration); this backfills each such row onto the refund's own
+    /// `spend_entries.refunds_spend_entry_id` — resolving both the original
+    /// charge's and the refund's transaction ids to their respective spend
+    /// entries via `spend_entry_sources` — then drops the table outright.
+    /// A row whose either side has no spend entry (predates the spend
+    /// ledger, or the transaction was since deleted) is skipped rather than
+    /// erroring — best-effort, same as the live refund-linking path. No-op
+    /// if the table doesn't exist (fresh database, or already migrated).
+    fn migrate_retire_transaction_links(conn: &Connection) -> rusqlite::Result<()> {
+        let has_table: bool = conn.query_row(
+            "SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name = 'transaction_links'",
             [],
-        )?;
-        Ok(())
+            |row| row.get::<_, i64>(0),
+        )? > 0;
+        if !has_table {
+            return Ok(());
+        }
+        conn.execute_batch(
+            "UPDATE spend_entries
+             SET refunds_spend_entry_id = (
+                 SELECT original_source.spend_entry_id
+                 FROM transaction_links tl
+                 JOIN spend_entry_sources refund_source
+                     ON refund_source.transaction_id = tl.to_transaction_id
+                    AND refund_source.role = 'source'
+                 JOIN spend_entry_sources original_source
+                     ON original_source.transaction_id = tl.from_transaction_id
+                    AND original_source.role = 'source'
+                 WHERE tl.relation = 'refund'
+                   AND refund_source.spend_entry_id = spend_entries.id
+             )
+             WHERE id IN (
+                 SELECT refund_source.spend_entry_id
+                 FROM transaction_links tl
+                 JOIN spend_entry_sources refund_source
+                     ON refund_source.transaction_id = tl.to_transaction_id
+                    AND refund_source.role = 'source'
+                 JOIN spend_entry_sources original_source
+                     ON original_source.transaction_id = tl.from_transaction_id
+                    AND original_source.role = 'source'
+                 WHERE tl.relation = 'refund'
+             );
+             DROP TABLE transaction_links;",
+        )
     }
 
     pub fn conn(&self) -> &Connection {

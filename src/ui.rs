@@ -25,8 +25,8 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     match app.screen {
         Screen::Accounts => draw_accounts(frame, app, chunks[0]),
         Screen::Transactions => draw_transactions(frame, app, chunks[0]),
-        Screen::MonthlyGap => draw_monthly_gap(frame, app, chunks[0]),
-        Screen::MonthSpend => draw_month_spend(frame, app, chunks[0]),
+        Screen::MonthlySpend => draw_monthly_spend(frame, app, chunks[0]),
+        Screen::SpendMonth => draw_spend_month(frame, app, chunks[0]),
         Screen::MonthlyTransfers => draw_monthly_transfers(frame, app, chunks[0]),
         Screen::TransferMonth => draw_transfer_month(frame, app, chunks[0]),
         Screen::Help => draw_help(frame, chunks[0]),
@@ -43,7 +43,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
 }
 
 /// A small centred popup for editing a spend entry's note, overlaid on top
-/// of whatever screen is behind it (always `Screen::MonthSpend` today).
+/// of whatever screen is behind it (always `Screen::SpendMonth` today).
 fn draw_note_editor(frame: &mut Frame, buffer: &str, area: Rect) {
     let popup = centered_rect(60, 3, area);
     frame.render_widget(Clear, popup);
@@ -231,8 +231,8 @@ fn draw_transactions(frame: &mut Frame, app: &mut App, area: Rect) {
     frame.render_stateful_widget(table, area, &mut app.transactions_table_state);
 }
 
-fn draw_monthly_gap(frame: &mut Frame, app: &mut App, area: Rect) {
-    let block = Block::default().title("Monthly Gap").borders(Borders::ALL);
+fn draw_monthly_spend(frame: &mut Frame, app: &mut App, area: Rect) {
+    let block = Block::default().title("Monthly Spend").borders(Borders::ALL);
 
     if app.monthly_spend.is_empty() {
         frame.render_widget(
@@ -259,11 +259,11 @@ fn draw_monthly_gap(frame: &mut Frame, app: &mut App, area: Rect) {
         .block(block)
         .highlight_style(SELECTED_STYLE);
 
-    app.monthly_gap_table_state.select(Some(app.selected_month));
-    frame.render_stateful_widget(table, area, &mut app.monthly_gap_table_state);
+    app.monthly_spend_table_state.select(Some(app.selected_month));
+    frame.render_stateful_widget(table, area, &mut app.monthly_spend_table_state);
 }
 
-fn draw_month_spend(frame: &mut Frame, app: &mut App, area: Rect) {
+fn draw_spend_month(frame: &mut Frame, app: &mut App, area: Rect) {
     let month = app
         .monthly_spend
         .get(app.selected_month)
@@ -273,7 +273,7 @@ fn draw_month_spend(frame: &mut Frame, app: &mut App, area: Rect) {
         .title(format!("Spend \u{2014} {month}"))
         .borders(Borders::ALL);
 
-    if app.month_spend_entries.is_empty() {
+    if app.spend_month_entries.is_empty() {
         frame.render_widget(
             Paragraph::new("No spend entries for this month.").block(block),
             area,
@@ -282,7 +282,7 @@ fn draw_month_spend(frame: &mut Frame, app: &mut App, area: Rect) {
     }
 
     let rows = app
-        .month_spend_entries
+        .spend_month_entries
         .iter()
         .map(|row| {
             let entry = &row.entry;
@@ -338,9 +338,9 @@ fn draw_month_spend(frame: &mut Frame, app: &mut App, area: Rect) {
     .block(block)
     .highlight_style(SELECTED_STYLE);
 
-    app.month_spend_table_state
+    app.spend_month_table_state
         .select(Some(app.selected_spend_entry));
-    frame.render_stateful_widget(table, area, &mut app.month_spend_table_state);
+    frame.render_stateful_widget(table, area, &mut app.spend_month_table_state);
 }
 
 fn draw_monthly_transfers(frame: &mut Frame, app: &mut App, area: Rect) {
@@ -479,7 +479,7 @@ fn draw_help(frame: &mut Frame, area: Rect) {
         ("gg / G", "Jump to top / bottom"),
         ("Enter", "Open selected account, or drill into a month"),
         ("<space>a", "Jump to Accounts screen"),
-        ("<space>g", "Jump to Monthly Gap screen"),
+        ("<space>s", "Jump to Monthly Spend screen"),
         ("<space>t", "Jump to Monthly Transfers screen"),
         ("n", "Edit note on selected spend entry (spend drill-down)"),
         (

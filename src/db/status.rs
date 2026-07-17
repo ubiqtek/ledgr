@@ -306,6 +306,7 @@ mod tests {
                 description: "COFFEE SHOP".into(),
                 note: None,
                 category_id: None,
+                refunds_spend_entry_id: None,
                 classified_by: crate::model::ClassifiedBy::Rule,
                 confidence: Some(0.4),
                 rule_name: Some("fallback".into()),

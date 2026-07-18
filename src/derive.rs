@@ -13,13 +13,15 @@
 use crate::config::HouseholdAccountRef;
 use crate::db::Db;
 use crate::model::{
-    Account, ClassifiedBy, NewSpendEntry, NewTransferLeg, TransferLegRole, TransferPairMethod,
+    Account, ClassifiedBy, NewIncomeEntry, NewSpendEntry, NewTransferLeg, TransferLegRole,
+    TransferPairMethod,
 };
 use std::collections::HashSet;
 
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct DerivationSummary {
     pub spend_entries_created: usize,
+    pub income_entries_created: usize,
     pub transfers_detected: usize,
     pub transfers_paired: usize,
     pub out_of_scope: usize,
@@ -263,6 +265,27 @@ pub fn run_derivation(
                     txn.id,
                 )?;
                 summary.spend_entries_created += 1;
+            }
+            Classification::Income {
+                counterparty,
+                rule_name,
+                confidence,
+            } => {
+                db.insert_income_entry_with_source(
+                    &NewIncomeEntry {
+                        occurred_on: txn.posted_at.clone(),
+                        amount_minor: txn.amount_minor,
+                        currency: txn.currency.clone(),
+                        counterparty,
+                        description: txn.description.clone(),
+                        note: None,
+                        classified_by: ClassifiedBy::Rule,
+                        confidence: Some(confidence),
+                        rule_name: Some(rule_name.to_string()),
+                    },
+                    txn.id,
+                )?;
+                summary.income_entries_created += 1;
             }
             Classification::Refund {
                 counterparty,
@@ -548,6 +571,13 @@ enum Classification {
         rule_name: &'static str,
         confidence: f64,
     },
+    /// Real-world money crossing the household boundary inward — see
+    /// **Income Ledger** in doc/domain/ubiquitous-language.md.
+    Income {
+        counterparty: Option<String>,
+        rule_name: &'static str,
+        confidence: f64,
+    },
     Refund {
         counterparty: Option<String>,
         rule_name: &'static str,
@@ -650,15 +680,30 @@ fn classify(
                     confidence: 0.7,
                 }
             } else {
-                // Reimbursements and Refunds: inbound money paying back
-                // earlier spend from a person outside the household — a
-                // sign-reversed spend entry, never income. See the
-                // ubiquitous language doc.
+                // Reimbursement: inbound money paying back earlier spend
+                // from a person outside the household — a sign-reversed
+                // spend entry, never income. See the ubiquitous language
+                // doc.
                 Classification::Spend {
                     counterparty: None,
                     rule_name: "reimbursement",
                     confidence: 0.6,
                 }
+            };
+        }
+        // "BGC" = Bank Giro Credit — real Barclays OFX exports carry no
+        // TRNTYPE at all for these (confirmed against real data: salary
+        // deposits like "AZIMO LTD Pleo Technologies BGC" have an empty
+        // TRNTYPE element), so the TRNTYPE-based DIRECTDEP rule below never
+        // fires for them and they were silently falling through to
+        // OutOfScope. Only reached once rules 1-2c above have ruled out an
+        // internal (household) transfer, so this is real money entering the
+        // household — matches the Income Ledger's definition exactly.
+        Some("BGC") if amount_minor > 0 => {
+            return Classification::Income {
+                counterparty: None,
+                rule_name: "bank_giro_credit",
+                confidence: 0.75,
             };
         }
         _ => {}
@@ -681,8 +726,25 @@ fn classify(
             rule_name: "repeat_payment",
             confidence: 0.85,
         },
-        // DIRECTDEP = income (out of scope until the income ledger exists).
-        // CASH = cash withdrawal (out of scope — see the design doc's rule 7).
+        // DIRECTDEP = salary/wages hitting the bank account — income. See
+        // Delta: The Gap, Task 1.
+        Some("DIRECTDEP") if amount_minor > 0 => Classification::Income {
+            counterparty: None,
+            rule_name: "direct_deposit",
+            confidence: 0.9,
+        },
+        // "Other" is the Barclaycard PDF export's own type tag (Title
+        // case — distinct from the generic OFX "OTHER" fallback used
+        // elsewhere), seen so far only as Barclaycard Cashback: real money
+        // in, not a transfer counterpart like "Payment received" is. See
+        // doc/kb/barclaycard/pdf-export-structure.md.
+        Some("Other") if amount_minor > 0 => Classification::Income {
+            counterparty: None,
+            rule_name: "credit_card_cashback",
+            confidence: 0.9,
+        },
+        // Any other DIRECTDEP (unexpected sign) and CASH (withdrawal) stay
+        // out of scope — see the design doc's rule 7.
         Some("DIRECTDEP") | Some("CASH") => Classification::OutOfScope,
         _ => {
             if amount_minor < 0 {
@@ -1127,10 +1189,76 @@ mod tests {
     }
 
     #[test]
-    fn classifies_a_direct_deposit_as_out_of_scope() {
+    fn classifies_a_direct_deposit_as_income() {
         let household = HashSet::new();
         let result = classify("SALARY", Some("DIRECTDEP"), 150000, &household, &[]);
-        assert_eq!(result, Classification::OutOfScope);
+        assert_eq!(
+            result,
+            Classification::Income {
+                counterparty: None,
+                rule_name: "direct_deposit",
+                confidence: 0.9,
+            }
+        );
+    }
+
+    #[test]
+    fn classifies_a_credit_card_cashback_as_income() {
+        let household = HashSet::new();
+        let result = classify("CASHBACK", Some("Other"), 500, &household, &[]);
+        assert_eq!(
+            result,
+            Classification::Income {
+                counterparty: None,
+                rule_name: "credit_card_cashback",
+                confidence: 0.9,
+            }
+        );
+    }
+
+    #[test]
+    fn classifies_a_bank_giro_credit_as_income() {
+        // Real Barclays OFX exports carry no TRNTYPE at all for salary BGC
+        // credits, so this can't rely on the DIRECTDEP rule.
+        let household = HashSet::new();
+        let result = classify(
+            "AZIMO LTD Pleo Technologies BGC",
+            None,
+            597912,
+            &household,
+            &[],
+        );
+        assert_eq!(
+            result,
+            Classification::Income {
+                counterparty: None,
+                rule_name: "bank_giro_credit",
+                confidence: 0.75,
+            }
+        );
+    }
+
+    #[test]
+    fn a_household_members_bgc_credit_is_still_an_internal_transfer() {
+        // Rule 1c (household name match) runs before the BGC suffix rule,
+        // so a household member's own inbound BGC is never misclassified
+        // as income.
+        let household = HashSet::new();
+        let household_names = [("ROMINA SCARAMAGLI", "206325", "40531189")];
+        let result = classify(
+            "ROMINA SCARAMAGLI pizza BGC",
+            None,
+            1000,
+            &household,
+            &household_names,
+        );
+        assert_eq!(
+            result,
+            Classification::InternalTransfer {
+                counterpart_sort: "206325".to_string(),
+                counterpart_account: "40531189".to_string(),
+            }
+        );
     }
 
     #[test]
@@ -1172,6 +1300,7 @@ mod tests {
             summary,
             DerivationSummary {
                 spend_entries_created: 1,
+                income_entries_created: 0,
                 transfers_detected: 0,
                 transfers_paired: 0,
                 out_of_scope: 0,
@@ -1214,6 +1343,64 @@ mod tests {
         assert_eq!(
             second.spend_entries_created, 0,
             "must not double-derive an already-linked transaction"
+        );
+    }
+
+    #[test]
+    fn run_derivation_creates_an_income_entry_for_a_direct_deposit() {
+        let db = Db::open_in_memory().expect("open db");
+        let account_id = db
+            .insert_account(&NewAccount {
+                name: "Current Account".into(),
+                institution: Some("Barclays".into()),
+                account_type: AccountType::Current,
+                currency: "GBP".into(),
+                sort_code: Some("203040".into()),
+                account_number: Some("12345678".into()),
+            })
+            .expect("insert account");
+        db.insert_transaction(&NewTransaction {
+            account_id,
+            import_id: None,
+            posted_at: "2026-07-01".into(),
+            amount_minor: 150000,
+            currency: "GBP".into(),
+            description: "SALARY".into(),
+            raw_description: None,
+            trn_type: Some("DIRECTDEP".into()),
+            external_id: None,
+            notes: None,
+        })
+        .expect("insert transaction");
+
+        let summary = run_derivation(&db, &[]).expect("derive");
+        assert_eq!(summary.income_entries_created, 1);
+        assert_eq!(summary.spend_entries_created, 0);
+        assert_eq!(summary.out_of_scope, 0);
+
+        let month_rows = db
+            .income_entries_for_month("2026-07")
+            .expect("query month");
+        assert_eq!(month_rows.len(), 1);
+        assert_eq!(month_rows[0].entry.amount_minor, 150000);
+        assert_eq!(month_rows[0].account_id, account_id);
+
+        let monthly = db.monthly_income_totals().expect("monthly totals");
+        assert_eq!(monthly.len(), 1);
+        assert_eq!(monthly[0].month, "2026-07");
+        assert_eq!(monthly[0].income_minor, 150000);
+
+        let second = run_derivation(&db, &[]).expect("second derive");
+        assert_eq!(
+            second.income_entries_created, 0,
+            "must not double-derive an already-linked transaction"
+        );
+        assert_eq!(
+            db.income_entries_for_month("2026-07")
+                .expect("query month again")
+                .len(),
+            1,
+            "re-running derivation must not duplicate the income entry"
         );
     }
 

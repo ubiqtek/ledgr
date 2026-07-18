@@ -65,6 +65,10 @@ fn run_import(db: Db) -> anyhow::Result<()> {
         derivation.card_payments_unmatched,
         derivation.out_of_scope
     );
+    println!(
+        "income ledger: {} entries created",
+        derivation.income_entries_created
+    );
     Ok(())
 }
 
@@ -442,6 +446,13 @@ fn run(
                     continue;
                 }
 
+                // While the income-detail popup is open, any key dismisses
+                // it rather than being treated as navigation.
+                if app.income_detail.is_some() {
+                    app.close_income_detail();
+                    continue;
+                }
+
                 let was_pending_g = pending_g;
                 pending_g = false;
                 let was_pending_leader = pending_leader;
@@ -451,6 +462,7 @@ fn run(
                     match key.code {
                         KeyCode::Char('a') => app.navigate_to(app::Screen::Accounts),
                         KeyCode::Char('s') => app.open_monthly_spend()?,
+                        KeyCode::Char('i') => app.open_monthly_income()?,
                         KeyCode::Char('t') => app.open_monthly_transfers()?,
                         _ => {}
                     }
@@ -479,6 +491,9 @@ fn run(
                     KeyCode::Char('i') if app.screen == app::Screen::TransferMonth => {
                         app.show_transfer_detail()?;
                     }
+                    KeyCode::Char('i') if app.screen == app::Screen::IncomeMonth => {
+                        app.show_income_detail()?;
+                    }
                     KeyCode::Char('y') => {
                         if let Some(text) = app.selected_row_text() {
                             let _ = copy_to_clipboard(&text);
@@ -489,6 +504,7 @@ fn run(
                     KeyCode::Enter => match app.screen {
                         app::Screen::Accounts => app.open_selected_account()?,
                         app::Screen::MonthlySpend => app.open_selected_month()?,
+                        app::Screen::MonthlyIncome => app.open_selected_income_month()?,
                         app::Screen::MonthlyTransfers => app.open_selected_transfer_month()?,
                         _ => {}
                     },

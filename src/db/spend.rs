@@ -14,13 +14,13 @@ use crate::model::{
 use rusqlite::{params, OptionalExtension};
 
 impl Db {
-    /// Transactions not yet linked to a spend entry as their `source`, and
-    /// not yet recorded in `transfer_entries` either — the candidate set for
-    /// a derivation pass. An out-of-scope transaction (income, cash) gains
-    /// neither, so it stays in this set forever; re-processing it is
-    /// harmless (re-classifying it is a no-op). An internal transfer now
-    /// gets a `transfer_entries` row on first derivation, so it's excluded
-    /// from future runs — see
+    /// Transactions not yet linked to a spend entry as their `source`, not
+    /// yet recorded in `transfer_entries`, and not yet linked to an income
+    /// entry either — the candidate set for a derivation pass. An
+    /// out-of-scope transaction (cash) gains none of these, so it stays in
+    /// this set forever; re-processing it is harmless (re-classifying it is
+    /// a no-op). An internal transfer or a piece of income gets its own row
+    /// on first derivation, so it's excluded from future runs — see
     /// doc/implementation-notes/transfer-ledger-design.md, "Integration into
     /// run_derivation".
     pub fn pending_derivation_transactions(&self) -> rusqlite::Result<Vec<Transaction>> {
@@ -33,7 +33,9 @@ impl Db {
                     ON s.transaction_id = t.id AND s.role = 'source'
              LEFT JOIN transfer_entries te
                     ON te.out_transaction_id = t.id OR te.in_transaction_id = t.id
-             WHERE s.transaction_id IS NULL AND te.id IS NULL
+             LEFT JOIN income_entry_sources ies
+                    ON ies.transaction_id = t.id
+             WHERE s.transaction_id IS NULL AND te.id IS NULL AND ies.transaction_id IS NULL
              ORDER BY t.posted_at, t.id",
         )?;
         let rows = stmt.query_map([], Self::row_to_transaction)?;

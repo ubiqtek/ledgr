@@ -27,6 +27,8 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         Screen::Transactions => draw_transactions(frame, app, chunks[0]),
         Screen::MonthlySpend => draw_monthly_spend(frame, app, chunks[0]),
         Screen::SpendMonth => draw_spend_month(frame, app, chunks[0]),
+        Screen::MonthlyIncome => draw_monthly_income(frame, app, chunks[0]),
+        Screen::IncomeMonth => draw_income_month(frame, app, chunks[0]),
         Screen::MonthlyTransfers => draw_monthly_transfers(frame, app, chunks[0]),
         Screen::TransferMonth => draw_transfer_month(frame, app, chunks[0]),
         Screen::Help => draw_help(frame, chunks[0]),
@@ -39,6 +41,10 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
 
     if let Some(detail) = &app.transfer_detail {
         draw_transfer_detail(frame, detail, frame.area());
+    }
+
+    if let Some(transaction) = &app.income_detail {
+        draw_income_detail(frame, transaction, frame.area());
     }
 }
 
@@ -96,6 +102,31 @@ fn draw_transfer_detail(frame: &mut Frame, detail: &crate::app::TransferDetail, 
     let paragraph = Paragraph::new(lines.join("\n")).block(
         Block::default()
             .title("Both legs of this transfer (any key to close)")
+            .borders(Borders::ALL),
+    );
+    frame.render_widget(paragraph, popup);
+}
+
+/// Shows the raw imported transaction behind the selected income entry
+/// (`i` on `Screen::IncomeMonth`) — lets the user verify an income entry's
+/// derived description/amount against what was actually imported.
+fn draw_income_detail(frame: &mut Frame, transaction: &crate::model::Transaction, area: Rect) {
+    let popup = centered_rect(70, 7, area);
+    frame.render_widget(Clear, popup);
+
+    let amount = crate::format_amount_minor(transaction.amount_minor, &transaction.currency);
+    let lines = [
+        format!("{}  {}", transaction.posted_at, amount),
+        transaction.description.clone(),
+        format!(
+            "trn_type: {}",
+            transaction.trn_type.as_deref().unwrap_or("(none)")
+        ),
+    ];
+
+    let paragraph = Paragraph::new(lines.join("\n")).block(
+        Block::default()
+            .title("Source transaction (any key to close)")
             .borders(Borders::ALL),
     );
     frame.render_widget(paragraph, popup);
@@ -264,14 +295,16 @@ fn draw_monthly_spend(frame: &mut Frame, app: &mut App, area: Rect) {
 }
 
 fn draw_spend_month(frame: &mut Frame, app: &mut App, area: Rect) {
-    let month = app
-        .monthly_spend
-        .get(app.selected_month)
-        .map(|m| m.month.as_str())
-        .unwrap_or("Spend");
-    let block = Block::default()
-        .title(format!("Spend \u{2014} {month}"))
-        .borders(Borders::ALL);
+    let selected = app.monthly_spend.get(app.selected_month);
+    let month = selected.map(|m| m.month.as_str()).unwrap_or("Spend");
+    let title = match selected {
+        Some(m) => format!(
+            "Spend \u{2014} {month} \u{2014} {}",
+            crate::format_amount_minor(m.spend_minor, "GBP")
+        ),
+        None => format!("Spend \u{2014} {month}"),
+    };
+    let block = Block::default().title(title).borders(Borders::ALL);
 
     if app.spend_month_entries.is_empty() {
         frame.render_widget(
@@ -341,6 +374,117 @@ fn draw_spend_month(frame: &mut Frame, app: &mut App, area: Rect) {
     app.spend_month_table_state
         .select(Some(app.selected_spend_entry));
     frame.render_stateful_widget(table, area, &mut app.spend_month_table_state);
+}
+
+fn draw_monthly_income(frame: &mut Frame, app: &mut App, area: Rect) {
+    let block = Block::default().title("Monthly Income").borders(Borders::ALL);
+
+    if app.monthly_income.is_empty() {
+        frame.render_widget(
+            Paragraph::new("No income entries yet. Run `ledgr import` first.").block(block),
+            area,
+        );
+        return;
+    }
+
+    let rows = app
+        .monthly_income
+        .iter()
+        .map(|month| {
+            let income = crate::format_amount_minor(month.income_minor, "GBP");
+            Row::new(vec![
+                Cell::from(month.month.clone()),
+                Cell::from(Line::from(income).alignment(Alignment::Right)),
+            ])
+        })
+        .collect::<Vec<_>>();
+
+    let table = Table::new(rows, [Constraint::Length(7), Constraint::Length(15)])
+        .column_spacing(1)
+        .block(block)
+        .highlight_style(SELECTED_STYLE);
+
+    app.monthly_income_table_state
+        .select(Some(app.selected_income_month));
+    frame.render_stateful_widget(table, area, &mut app.monthly_income_table_state);
+}
+
+fn draw_income_month(frame: &mut Frame, app: &mut App, area: Rect) {
+    let selected = app.monthly_income.get(app.selected_income_month);
+    let month = selected.map(|m| m.month.as_str()).unwrap_or("Income");
+    let title = match selected {
+        Some(m) => format!(
+            "Income \u{2014} {month} \u{2014} {}",
+            crate::format_amount_minor(m.income_minor, "GBP")
+        ),
+        None => format!("Income \u{2014} {month}"),
+    };
+    let block = Block::default().title(title).borders(Borders::ALL);
+
+    if app.income_month_entries.is_empty() {
+        frame.render_widget(
+            Paragraph::new("No income entries for this month.").block(block),
+            area,
+        );
+        return;
+    }
+
+    let rows = app
+        .income_month_entries
+        .iter()
+        .map(|row| {
+            let entry = &row.entry;
+            let amount = crate::format_amount_minor(entry.amount_minor, &entry.currency);
+            let rule = entry
+                .rule_name
+                .clone()
+                .unwrap_or_else(|| entry.classified_by.as_str().to_string());
+            let account_name = app
+                .accounts
+                .iter()
+                .find(|s| s.account.id == row.account_id)
+                .map(|s| s.account.name.as_str())
+                .unwrap_or("?");
+            Row::new(vec![
+                Cell::from(entry.occurred_on.clone()),
+                Cell::from(Line::from(amount).alignment(Alignment::Right)),
+                Cell::from(entry.counterparty.clone().unwrap_or_default()),
+                Cell::from(entry.description.clone()),
+                Cell::from(rule),
+                Cell::from(account_name.to_string()),
+            ])
+        })
+        .collect::<Vec<_>>();
+
+    let header = Row::new(vec![
+        "Date",
+        "Amount",
+        "Counterparty",
+        "Description",
+        "Rule",
+        "Account",
+    ])
+    .style(Style::default().add_modifier(Modifier::BOLD));
+
+    let table = Table::new(
+        rows,
+        [
+            Constraint::Length(10),
+            Constraint::Length(12),
+            Constraint::Length(20),
+            Constraint::Fill(1),
+            Constraint::Length(20),
+            Constraint::Length(22),
+        ],
+    )
+    .header(header)
+    .column_spacing(1)
+    .block(block)
+    .highlight_style(SELECTED_STYLE);
+
+    app.income_month_table_state
+        .select(Some(app.selected_income_entry));
+    frame.render_stateful_widget(table, area, &mut app.income_month_table_state);
 }
 
 fn draw_monthly_transfers(frame: &mut Frame, app: &mut App, area: Rect) {
@@ -480,11 +624,13 @@ fn draw_help(frame: &mut Frame, area: Rect) {
         ("Enter", "Open selected account, or drill into a month"),
         ("<space>a", "Jump to Accounts screen"),
         ("<space>s", "Jump to Monthly Spend screen"),
+        ("<space>i", "Jump to Monthly Income screen"),
         ("<space>t", "Jump to Monthly Transfers screen"),
         ("n", "Edit note on selected spend entry (spend drill-down)"),
         (
             "i",
-            "Show both legs of selected transfer (transfers drill-down)",
+            "Show both legs of selected transfer (transfers drill-down), or \
+             source transaction of selected income entry (income drill-down)",
         ),
         ("y", "Copy selected row to the clipboard"),
         ("Esc / q", "Back (or quit from the accounts screen)"),

@@ -204,16 +204,39 @@ as spend. The `NAME`-prefix account check must run first, regardless of
 
 | # | Raw pattern | Classification |
 |---|---|---|
-| 1 | `NAME` starts `<sort code> <acct no>` and that account ∈ household accounts | **Internal transfer** — no ledger entry; pair with counterpart if imported (`transaction_links`) |
-| 2 | `NAME` starts `<sort code> <acct no>` and account unknown | Payment to an external account — **spend** if outbound, low confidence, review; inbound left for the income ledger |
-| 3 | `NAME` = `<PERSON> \t<ref> FT` (no account visible) | **Spend** to a person (window cleaner, family) if outbound; inbound: reimbursement (see open questions) |
+| 1 | `NAME` starts `<sort code> <acct no>` and that account ∈ household accounts | **Internal transfer** — no ledger entry; pair with counterpart if imported (`transfer_entries`) |
+| 1b | `NAME` ends `<label> <sort code> <acct no>` and that account ∈ household accounts | **Internal transfer**, same as rule 1 with the account reference trailing instead of leading |
+| 1c | `NAME` matches a registered household member's name, no account digits at all | **Internal transfer** against that member's Reference Household Account |
+| 2 | `NAME` starts `<sort code> <acct no>` and account unknown | Payment to an external account — **spend** if outbound, low confidence, review; inbound out of scope |
+| 2c | `NAME` = `<cardholder name> <truncated PAN>` (outbound only) | **Card payment** — internal transfer once matched to a same/opposite-amount `CreditCard`-account transaction within ±3 days; unmatched stays a low-confidence spend entry |
+| 3 | `NAME` = `<PERSON> \t<ref> FT` (no account visible) | **Spend** to a person (window cleaner, family) if outbound; inbound: reimbursement — sign-reversed spend entry, never income |
 | 4 | Card payment (`ON <dd MMM> CPM`, `DIRECTDEBIT`, `PAYMENT`, `REPEATPMT` to a merchant) | **Spend** |
-| 5 | Card refund (`CRM`/`CRE`/`BCC` suffix, positive amount) | **Refund** — positive-amount spend entry, linked to the original entry via `transaction_links` `relation='refund'` when findable |
-| 6 | `DIRECTDEP`, other inbound credits from external parties | Income — **out of scope**, no spend entry; left untouched until the income ledger exists |
+| 5 | Card refund (`CRM`/`CRE`/`BCC` suffix, positive amount) | **Refund** — positive-amount spend entry, linked to the original entry via `refunds_spend_entry_id` when findable |
+| 6 | `TRNTYPE=DIRECTDEP` (positive amount) | **Income** |
+| 6b | `NAME` ends `BGC` (Bank Giro Credit), positive amount, no other rule above matched | **Income** — defence-in-depth fallback for the (so far theoretical) case of a BGC credit with no `TRNTYPE`; every BGC credit seen in real data so far does carry `TRNTYPE=DIRECTDEP` and hits rule 6 first (see the stale-data note below) |
 | 7 | `TRNTYPE=CASH` (cash withdrawal) | **Out of scope for now** — cash leaves the tracked boundary but what happens to it afterwards is invisible; revisit if it becomes material (1/939 observed transactions) |
 | 8 | CC statement `Payment received` | Internal transfer (the credit side of a CC repayment from a current account) — no entry |
 | 9 | CC statement `Purchase` | **Spend** |
-| 10 | CC statement `Other` (e.g. Barclaycard Cashback) | Income — out of scope, review |
+| 10 | CC statement `Other` (e.g. Barclaycard Cashback) | **Income** |
+
+**Known gap (flagged 2026-07-18, not yet resolved):** rules 6/6b/10 currently
+treat *all* inbound BGC/cashback money as Income uniformly. The user has
+raised that some of it — credit card cashback, SimplyHealth claim
+payouts — is arguably money already spent coming back, closer in kind to
+rule 3's "reimbursement" (a sign-reversed spend entry) than to real
+external income, given the Gap's own definition (external money in vs.
+out). Under discussion; not yet a settled classification change.
+
+**Stale-data footgun (found and fixed 2026-07-18):** `trn_type` was NULL
+for 967 real transactions despite every real Barclays export correctly
+carrying `TRNTYPE` — `BarclaysOfxParser::parse` has always extracted it
+correctly. The transactions were imported before that extraction path
+existed/worked, and `Db::insert_transaction`'s FITID dedup is a no-op on
+an already-imported row, so it silently never gets backfilled by a normal
+`ledgr import` re-run. Fixed with a one-off re-parse-and-`UPDATE ... WHERE
+trn_type IS NULL` script (not part of the crate). If a similar column is
+ever added to `transactions`, re-running import will *not* backfill it on
+existing rows — a fresh migration/backfill script is needed each time.
 
 Note on rows 1–3: `NAME` is hard-capped at 32 characters (see the OFX
 KB article), and the sort-code/account-number prefix eats into that
@@ -348,11 +371,14 @@ nothing here should be built in a way that blocks it:
    above), so transfers between household members are not treated as
    spend.
 2. ~~Inbound reimbursements~~ — **decided**: the concept is
-   **Reimbursements and Refunds** (see the ubiquitous language doc) —
+   **Refund**/**Reimbursement** (see the ubiquitous language doc) —
    inbound money paying back earlier spend is a sign-reversed
-   spend-ledger entry linked to the original via
-   `transaction_links (relation='refund')` where findable; never
-   income. (From household members it's an internal transfer anyway.)
+   spend-ledger entry, linked to the original via
+   `refunds_spend_entry_id` where findable (a **Refund**) or left
+   unlinked where the original charge isn't a single identifiable
+   transaction (a **Reimbursement** — cashback, an insurance claim);
+   never income. (From household members it's an internal transfer
+   anyway.)
 3. ~~Sinking funds~~ — **decided**: spend happens only when money
    actually leaves the household, so the *purchase* convention holds;
    transfers into savings pots are internal. Recorded under **Spend**

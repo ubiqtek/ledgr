@@ -380,6 +380,64 @@ pub struct MonthlyTransfer {
     pub transferred_in_minor: i64,
 }
 
+/// One entry in the derived income ledger — real-world money crossing the
+/// household boundary inward (salary, interest, cashback). Deliberately
+/// thin per ADR 0005/0009: no `category_id`, no refund-style linking — see
+/// `schema.sql`'s doc comment on `income_entries`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct IncomeEntry {
+    pub id: Id,
+    pub occurred_on: String,
+    pub amount_minor: i64,
+    pub currency: String,
+    pub counterparty: Option<String>,
+    pub description: String,
+    pub note: Option<String>,
+    pub classified_by: ClassifiedBy,
+    pub confidence: Option<f64>,
+    pub rule_name: Option<String>,
+    pub classified_at: String,
+}
+
+/// Fields needed to create a new income entry; `id` is assigned by the database.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NewIncomeEntry {
+    pub occurred_on: String,
+    pub amount_minor: i64,
+    pub currency: String,
+    pub counterparty: Option<String>,
+    pub description: String,
+    pub note: Option<String>,
+    pub classified_by: ClassifiedBy,
+    pub confidence: Option<f64>,
+    pub rule_name: Option<String>,
+}
+
+/// An income entry alongside the id of the account its source transaction
+/// was posted to — same purpose as `SpendEntryWithAccount`, backing the
+/// TUI's per-month drill-down.
+#[derive(Debug, Clone)]
+pub struct IncomeEntryWithAccount {
+    pub entry: IncomeEntry,
+    pub account_id: Id,
+    /// The source transaction's own id — lets the TUI's `i` popup
+    /// (`Screen::IncomeMonth`) show the raw imported transaction behind an
+    /// income entry for verification, mirroring the transfer drill-down's
+    /// "both legs" popup.
+    pub transaction_id: Id,
+}
+
+/// One row of the Monthly Income view: total income for a calendar month —
+/// the income-side counterpart to `MonthlySpend`.
+#[derive(Debug, Clone)]
+pub struct MonthlyIncome {
+    /// `YYYY-MM`.
+    pub month: String,
+    /// Net of that month's `income_entries` (signed, positive = money in —
+    /// same convention as `amount_minor` elsewhere).
+    pub income_minor: i64,
+}
+
 /// Which raw transaction(s) a spend entry derives from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

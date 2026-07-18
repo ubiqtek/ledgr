@@ -2,6 +2,7 @@ mod accounts;
 mod balances;
 mod cards;
 mod imports;
+mod income;
 mod spend;
 mod status;
 mod transactions;

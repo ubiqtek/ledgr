@@ -270,3 +270,38 @@ CREATE INDEX IF NOT EXISTS idx_transfer_entries_out_account
     ON transfer_entries(out_account_id);
 CREATE INDEX IF NOT EXISTS idx_transfer_entries_in_account
     ON transfer_entries(in_account_id);
+
+-- Derived income ledger — see doc/planning/plan.md, Delta: The Gap, Task 1.
+-- Deliberately thin per ADR 0005/0009: no categorisation, no taxonomy, just
+-- enough to sum income for a period. Same provenance shape as
+-- `spend_entries`, minus the columns that ledger needed but this one
+-- doesn't yet (`category_id`, `refunds_spend_entry_id`) — add them if/when
+-- income categorisation is designed, rather than pre-guessing the shape.
+CREATE TABLE IF NOT EXISTS income_entries (
+    id             INTEGER PRIMARY KEY,
+    occurred_on    TEXT NOT NULL,
+    -- Signed, same convention as transactions (positive = in).
+    amount_minor   INTEGER NOT NULL,
+    currency       TEXT NOT NULL,
+    counterparty   TEXT,
+    description    TEXT NOT NULL,
+    note           TEXT,
+    classified_by  TEXT NOT NULL CHECK (classified_by IN
+                       ('rule', 'matcher', 'manual')),
+    confidence     REAL,
+    rule_name      TEXT,
+    classified_at  TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_income_entries_occurred_on ON income_entries(occurred_on);
+
+-- Which raw transaction an income entry derives from. No `role` column
+-- (unlike `spend_entry_sources`) — income has no annotation concept yet,
+-- so every row is implicitly the source; add one if that changes.
+CREATE TABLE IF NOT EXISTS income_entry_sources (
+    income_entry_id INTEGER NOT NULL REFERENCES income_entries(id) ON DELETE CASCADE,
+    transaction_id   INTEGER NOT NULL REFERENCES transactions(id) ON DELETE CASCADE,
+    UNIQUE (income_entry_id, transaction_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_income_entry_sources_transaction ON income_entry_sources(transaction_id);

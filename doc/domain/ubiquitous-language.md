@@ -69,17 +69,51 @@ future purchase is not spend; the eventual purchase is (this settles
 the Rebel Finance "sinking fund" convention). *Origin: the user,
 design session 2026-07-11.*
 
-### Reimbursements and Refunds — established
+### Refund — established (split from "Reimbursements and Refunds")
 
-Inbound money that pays back earlier spend: a merchant refund (e.g. a
-card refund for a returned item) or a reimbursement from a person
-outside the household (e.g. a friend paying you back for their
-concert ticket). Recorded in the **spend ledger** as a sign-reversed
-entry linked to the original spend
-(`transaction_links, relation = 'refund'`) so spending nets down to
-what the household truly paid — never treated as income. (Money back
-from a household member is simply an internal transfer.)
-*Origin: design session 2026-07-11.*
+Inbound money that pays back earlier spend, where the original charge
+is identifiable — a merchant refund for a specific returned item (e.g.
+a card `CRM`/`CRE`/`BCC` credit). Recorded in the **spend ledger** as a
+sign-reversed entry, linked to the original **spend entry** via
+`refunds_spend_entry_id` when a matching original can be found (left
+`NULL` when it can't — e.g. a Barclaycard cashback credit, which
+reverses spend in aggregate rather than one purchase — see
+**Reimbursement** below). Never treated as income. Same underlying
+mechanism as **Reimbursement** (`Classification::Refund`, one
+`spend_entries` row, sign-reversed) — the two are split as domain terms
+because "linked/linkable to one specific purchase" vs "not" matters for
+how confidently and specifically the household can reason about the
+money, even though ledgr stores them the same way. (Money back from a
+household member is simply an internal transfer, not a Refund.)
+*Origin: design session 2026-07-11; split from Reimbursement 2026-07-18
+once cashback/insurance-claim payouts turned out to need a distinct
+identity — see
+`doc/implementation-notes/income-vs-refund-classification-proposal.md`.*
+
+### Reimbursement — established (split from "Reimbursements and Refunds")
+
+Inbound money that pays back earlier spend, where there is no single
+identifiable original transaction to link to — a person settling up a
+shared cost (e.g. a friend paying back their share of a trip), an
+insurance/health-plan claim payout (e.g. SimplyHealth), or a merchant
+cashback reward tied to spend in general rather than one purchase.
+Recorded in the **spend ledger** exactly like a **Refund** (above) —
+sign-reversed, `refunds_spend_entry_id` `NULL` — never treated as
+income, on the same reasoning: it reverses spend the ledgers can see,
+so counting it as income too would inflate the Gap with recycled money.
+Distinguished from **Income** by the classification test in
+`doc/implementation-notes/income-vs-refund-classification-proposal.md`:
+does the inflow exist because of, and stay bounded by, a prior
+household outflow that passed through the spend ledger? Yes → this is
+a Reimbursement (or Refund, if linkable); no (e.g. salary, a tax refund
+of tax that was never recorded as spend, a gift, a windfall) → Income.
+An unexplained inbound payment from a **Registered Person** (below)
+defaults to Reimbursement until shown otherwise, mirroring the
+already-established inbound-`FT`-payment rule. (Money back from a
+household member is simply an internal transfer, not a Reimbursement.)
+*Origin: the user, 2026-07-18, discussing why credit card cashback and
+SimplyHealth claim payouts were incorrectly landing in the income
+ledger.*
 
 ### Spend Ledger — established
 
@@ -128,20 +162,55 @@ history companion for the full correction).
 *Origin: the assistant, proposed 2026-07-13 (Delta: Transfer Ledger);
 confirmed by the user 2026-07-13.*
 
+### Income Entry — established
+
+One row in the **income ledger**: `ledgr`'s judgement that a
+**transaction** represents real income, plus its classification
+provenance (rule/confidence). Distinct from the transaction it derives
+from, exactly as a **spend entry** is distinct from the transaction it
+derives from. Deliberately thinner than **spend entry** — no category,
+no refund-style link — matching the income ledger's own "no
+categorisation yet" scope (ADR 0005).
+*Origin: the assistant, built 2026-07-17 (Delta: The Gap, Task 1),
+naming mirrors the already-established **Spend Entry**/**Transfer
+Entry** pattern.*
+
 ### Income Ledger — established
 
 The independent derived ledger of real inflows crossing the
-**household** boundary inward — salary, interest, cashback, gifts,
-inheritance. Membership is decided by the boundary test, not the
-money's origin; distinguishing wages from a gift is a categorisation
-question inside the ledger (taxonomy deferred). A separate domain from
-spend — it will eventually involve tax and pensions. Deferred at first
-(ADR 0005); re-confirmed 2026-07-17 against gifts/inheritance,
-assets/liabilities (ADR 0007), and a rejected "receivables ledger"
-alternative — see ADR 0005's "Revisited 2026-07-17" section. Being
-built under Delta: The Gap.
+**household** boundary inward — salary, interest, gifts, inheritance,
+a tax refund of tax that was never recorded as spend. Membership is
+decided by the boundary test, not the money's origin; distinguishing
+wages from a gift is a categorisation question inside the ledger
+(taxonomy deferred). Refined 2026-07-18: the boundary test alone isn't
+sufficient — an inflow that reverses spend the ledgers can already see
+(cashback, an insurance claim payout) belongs in the **spend ledger**
+as a **Reimbursement**, not here, even though it crosses the household
+boundary inward, because counting it as income too would double-count
+against the Gap. See
+`doc/implementation-notes/income-vs-refund-classification-proposal.md`
+for the full test. A separate domain from spend — it will eventually
+involve tax and pensions. Deferred at first (ADR 0005); re-confirmed
+2026-07-17 against gifts/inheritance, assets/liabilities (ADR 0007),
+and a rejected "receivables ledger" alternative — see ADR 0005's
+"Revisited 2026-07-17" section. Being built under Delta: The Gap.
 *Origin: the user, design session 2026-07-11 (ADR 0005); scope
-re-confirmed 2026-07-17.*
+re-confirmed 2026-07-17; refined 2026-07-18.*
+
+### Income Source — established
+
+A registered external payer (an employer, a tax authority) driving a
+high-confidence **Income** classification rule — the payer-side
+counterpart to **Registered Person**, for money that genuinely is new
+income rather than a reimbursement. Employer salary (e.g. paid via a
+payroll processor's own bank name) and HMRC PAYE/tax-refund credits
+both register under this one mechanism rather than as separate
+hardcoded rules, so a new employer or a different tax-authority pattern
+is a config change, not a code change. Config-driven, mirroring how
+`household_accounts` already works. *Origin: the user, 2026-07-18,
+generalising the employer-name and HMRC-PAYE rules into one mechanism;
+see
+`doc/implementation-notes/income-vs-refund-classification-proposal.md`.*
 
 ### Internal Transfer — established
 
@@ -230,6 +299,27 @@ sort code/account number check alone missed it, misclassifying it as
 `reimbursement`/`person_payment` (a rule intended for genuine external
 people) instead of an internal transfer.
 *Origin: the user, 2026-07-12; decision trail: ADR 0008.*
+
+### Registered Person — established
+
+An external individual (family or friend, outside the household)
+registered by name — the person-level counterpart to **Reference
+Household Account**, but for someone whose payments should classify
+consistently *without* being treated as household membership (a
+Registered Person's money is real spend/income/reimbursement, not an
+internal transfer). An unexplained inbound BGC/`FT` payment from a
+Registered Person defaults to **Reimbursement**, not **Income**, until
+shown otherwise (e.g. it turns out to be a genuine gift) — mirrors the
+existing default for an inbound `FT` payment. Registration is planned
+to happen from the TUI directly (a popup form while looking at the
+triggering transaction), not just by hand-editing `config.toml`, unlike
+**Reference Household Account** today. The user has flagged a broader
+shape this could grow into — **Registered Entity** covering People,
+Merchants, and other kinds of counterparty, each with their own
+classification rules — noted here as a future direction, not committed
+to yet. *Origin: the user, 2026-07-18, discussing the "Wendy Barritt
+LOAN ETC" and Aria payments; see
+`doc/implementation-notes/income-vs-refund-classification-proposal.md`.*
 
 ### Manual Funds Transfer — candidate
 

@@ -2,10 +2,11 @@
 
 ## What's Next
 
-- **Next:** Task 1 — Minimal income ledger (Delta: The Gap)
+- **Next:** Task 2 — Gap calculation (Delta: The Gap) — decide CLI vs TUI
+  surface for `income - |spend|`, now that both ledgers exist.
 - **Sub-doc:** none
 - **Blockers:** None
-- **Context:** [Checkpoint: Session 2026-07-17b](#checkpoint-session-2026-07-17b)
+- **Context:** [Checkpoint: Session 2026-07-18](#checkpoint-session-2026-07-18)
 
 ## Summary
 
@@ -22,7 +23,7 @@
 | | [2. Amazon order import](#task-2-amazon-order-import) | TODO |
 | [Delta: Review and Re-classification TUI](#delta-review-and-re-classification-tui) | [1. Review queue screen](#task-1-review-queue-screen) | TODO — deprioritised below Delta: The Gap |
 | [Delta: Reconciliation](#delta-reconciliation) | [1. Design account-level and household-level reconciliation checks](#task-1-design-account-level-and-household-level-reconciliation-checks) | TODO |
-| [Delta: The Gap](#delta-the-gap) | [1. Minimal income ledger](#task-1-minimal-income-ledger) | TODO |
+| [Delta: The Gap](#delta-the-gap) | [1. Minimal income ledger](#task-1-minimal-income-ledger) | ✓ DONE |
 | | [2. Gap calculation](#task-2-gap-calculation) | TODO |
 | | [3. Discovery about recording assets and liabilities](#task-3-discovery-about-recording-assets-and-liabilities) | ✓ DONE |
 | | [4. Implement assets and liabilities as accounts](#task-4-implement-assets-and-liabilities-as-accounts) | TODO |
@@ -343,17 +344,59 @@ ledger deliberately; this delta is what un-defers it) at minimal
 scope — just enough to sum income, no categorisation.
 
 ### Task 1: Minimal income ledger
-- TODO — `income_entries` (+ `income_entry_sources`, same provenance
-  shape as `spend_entries`) per ADR 0005 and the spend ledger design
-  doc's "Scope: spend ledger first" section, but deliberately thin: no
-  categorisation, no taxonomy — just enough fields to sum income for a
-  period (occurred_on, amount_minor, currency, counterparty,
-  description, classification provenance). Derivation: at minimum,
-  `DIRECTDEP` (and CC statement `Other`, once the CC parser exists)
-  become income entries; reuse `derive.rs`'s existing account-scanning
-  and household/transfer-detection machinery rather than duplicating
-  it — internal transfers must stay excluded from income exactly as
-  they are from spend.
+- ✓ DONE (2026-07-17 session) — `income_entries` + `income_entry_sources`
+  added to `src/db/schema.sql`, deliberately thinner than `spend_entries`
+  per the design doc's original scope note: no `category_id`, no
+  refund-style link, and `income_entry_sources` has no `role` column
+  (every row is implicitly the source — income has no annotation concept
+  yet). New `IncomeEntry`/`NewIncomeEntry`/`IncomeEntryWithAccount`/
+  `MonthlyIncome` in `src/model.rs`; persistence in new `src/db/income.rs`
+  (`insert_income_entry_with_source`, `monthly_income_totals`,
+  `income_entries_for_month`), mirroring `src/db/spend.rs`'s shape.
+  Domain term **Income Entry** recorded in
+  `doc/domain/ubiquitous-language.md` (obvious derivative of the
+  already-established **Income Ledger**/**Spend Entry** pattern).
+- Derivation (`src/derive.rs`): new `Classification::Income` variant.
+  `classify()` now routes `DIRECTDEP` (positive amount — salary/wages)
+  and the Barclaycard PDF's own `"Other"` type tag (positive amount —
+  cashback, Title-case, distinct from the generic OFX `"OTHER"` fallback
+  used elsewhere so there's no collision) to income instead of
+  `OutOfScope`. `"Payment received"` (credit card bill payments)
+  deliberately left alone — those are transfers, matched by the existing
+  card-payment pairing logic, not income. `run_derivation`'s
+  `pending_derivation_transactions` query (`src/db/spend.rs`) extended to
+  also exclude transactions already linked via `income_entry_sources`,
+  so a `ledgr import` re-run doesn't duplicate income entries — same
+  idempotency shape as spend/transfers. New `DerivationSummary.income_entries_created`
+  field, surfaced in `ledgr import`'s own output line.
+- **Real backfill** (2026-07-17): real `ledgr.db` backed up
+  (`ledgr.db.bak-20260717230737-pre-income-ledger`) and `ledgr import`
+  re-run — 3 real Barclaycard Cashback transactions (previously
+  `OutOfScope`, silently invisible) became income entries (£25.12 Jan,
+  £11.53 Mar, £2.69 Apr); 0 salary/`DIRECTDEP` income found yet in real
+  data. Confirmed idempotent (re-running creates 0 new entries); all
+  existing spend ledger (822 entries) and transfer ledger (202 entries,
+  32 card payments matched) counts unchanged.
+- **TUI screens added** (requested alongside this task, not split out):
+  `Screen::MonthlyIncome`/`Screen::IncomeMonth` in `app.rs`/`ui.rs`,
+  copying the Monthly Spend/Spend Month screens' design exactly — same
+  table layout, same per-month drill-down showing date/amount/
+  counterparty/description/rule/account. Reached via `<space>i`
+  (`main.rs`'s leader-key match arm), help screen updated. Verified live
+  via `tmux`: `<space>i` opens "Monthly Income" showing the 3 real
+  months; `Enter` drills into "Income — 2026-04" showing the real
+  cashback entry with its account resolved correctly.
+- 86 unit tests total (2 new: `classifies_a_direct_deposit_as_income`
+  now replaces the old `..._as_out_of_scope` test,
+  `classifies_a_credit_card_cashback_as_income`,
+  `run_derivation_creates_an_income_entry_for_a_direct_deposit` covering
+  both creation and idempotency); `cargo clippy` clean (same pre-existing
+  dead-code warnings as before, nothing new).
+- **Real bug found and fixed (2026-07-18 session):** the user reported the income ledger was recording almost nothing (£2.69/£11.53/£25.12 across 3 months — only Barclaycard cashback). Root cause: `classify()` in `src/derive.rs` only routed money to Income via OFX `TRNTYPE == "DIRECTDEP"`, but real Barclays OFX exports carry no `<TRNTYPE>` element at all for Bank Giro Credit (BGC) transactions — confirmed by grepping the real archived OFX file (`data(1).ofx`) for the `AZIMO LTD Pleo Technologies BGC` salary lines: no TRNTYPE tag present. `trn_type` is genuinely NULL in the DB for 967 of ~1230 real transactions (not a storage bug — the parser was already correct, the source data just omits it), so every salary/BGC-suffixed credit silently fell through to `OutOfScope`.
+- Fix: added a new suffix-based rule in `classify()` (`src/derive.rs`, same match block as the existing CPM/CRM/FT suffix rules) — NAME ending in `"BGC"` with positive amount → `Classification::Income { rule_name: "bank_giro_credit", confidence: 0.75 }`. Placed after rule 1c (household-name matching) so a household member's own inbound BGC (e.g. "ROMINA SCARAMAGLI pizza BGC") is still correctly caught as `InternalTransfer` first, not misclassified as income — verified with new test `a_household_members_bgc_credit_is_still_an_internal_transfer`. Also added `classifies_a_bank_giro_credit_as_income`. 90 tests total, all passing; `cargo clippy` clean.
+- **Real backfill (2026-07-18):** real `ledgr.db` backed up (`ledgr.db.bak-20260718080143-pre-bgc-income-rule`) and `ledgr import` re-run — 20 new income entries created (rule_name `"bank_giro_credit"`, £37,151.74 total), covering real salary (AZIMO LTD Pleo Technologies BGC, ~£5.8k-6.4k/month), HMRC PAYE credits, and other genuine inbound BGC transfers (SIMPLYHEALTH claim payouts, World of Books, a lottery win, family gifts). Monthly income now realistic (£5,788-£6,574/month) instead of the £2.69-£25.12 cashback-only totals. Verified live via `tmux` against the real TUI.
+- **New TUI feature added alongside the fix:** an `i` key on `Screen::IncomeMonth` (income drill-down) pops up the raw source transaction behind the selected income entry, for verification — mirrors the existing "both legs of transfer" popup pattern on `Screen::TransferMonth` exactly (`app.income_detail: Option<Transaction>`, `show_income_detail`/`close_income_detail` in `app.rs`, `draw_income_detail` in `ui.rs`, dismissed by any key). Required adding `transaction_id: Id` to `IncomeEntryWithAccount` (`src/model.rs`) and extending `income_entries_for_month`'s query (`src/db/income.rs`) to select `t.id`. Verified live via `tmux`. Help screen text updated.
+- Files changed: `src/derive.rs`, `src/model.rs`, `src/db/income.rs`, `src/app.rs`, `src/main.rs`, `src/ui.rs`. Not yet committed to git — sitting in the working tree for the user's review.
 
 ### Task 2: Gap calculation
 - TODO — for a given period: `SUM(income_entries) − |SUM(spend_entries)|`.
@@ -780,311 +823,6 @@ just a categorisation rule with a friendlier UI?).
   once that exists — likely regular payments feed it rather than
   duplicate it.
 
-## Checkpoint: Session 2026-07-12b
-
-**What was completed this session:**
-- Delta: Statement/Import Naming Cleanup, both tasks — done in full.
-  Term agreed with the user: **"Import"** (rejected: *export*,
-  *download*, *import file*), despite already naming the `ledgr import`
-  command — one **import** is one file, `ledgr import` processes a
-  batch of them in one run (`ImportSummary`), confirmed coherent.
-- Renamed throughout: `statements` table → `imports`
-  (`src/db/schema.sql`), `statement_id` columns → `import_id`
-  (`transactions`, `balance_snapshots`), `Transaction`/
-  `NewTransaction.statement_id` → `import_id` (`src/model.rs`),
-  `Db::insert_statement`/`find_statement_by_hash` →
-  `insert_import`/`find_import_by_hash` (`src/db/statements.rs` →
-  `src/db/imports.rs`), delta names (Bank/Credit Card/Other "Statement
-  Import" → "Transaction Import" — "Transaction" chosen over plain
-  "Import" for delta names since ledgr may import non-transaction data,
-  e.g. balance-only pension reports).
-- Mid-session follow-up (prompted by the user after the first pass):
-  the parser trait was renamed `StatementParser` → `ImportParser`,
-  then refined a second time to **`ImportFileParser`** — more explicit
-  that it parses a single file, distinct from the batch-level
-  `ImportSummary`/`import_inbox()` run. Applied consistently across
-  `src/import/mod.rs`, `barclays_ofx.rs`, `generic_csv.rs`,
-  `pipeline.rs`, and doc references.
-- Generic English uses of "statement" (OFX statement response, "bank
-  statement", "PDF statement export") were deliberately left alone —
-  only the retired domain term and its code/schema identifiers were
-  renamed. Confirmed no `Statement`/`NewStatement` struct ever existed
-  (it was only a field/table name), correcting an inaccurate note in
-  the delta's original Task 2 description.
-- Real local `ledgr.db` migrated: new idempotent
-  `Db::migrate_statements_to_imports` step in `Db::init`
-  (`src/db/mod.rs`) renames the table and both FK columns on first open
-  after upgrade (`ALTER TABLE ... RENAME TO` / `RENAME COLUMN`,
-  supported by the bundled SQLite via `rusqlite` 0.31), no-op on a
-  fresh or already-migrated database — same pattern as the earlier
-  `AccountType::Checking` → `Current` migration. Verified against a
-  scratch copy before touching the real file (table renamed correctly,
-  `ledgr status` output unchanged, migration idempotent on a second
-  run), then backed up (`~/.local/share/ledgr/ledgr.db.bak-20260712122251`)
-  and applied for real — confirmed via `ledgr status` (4 real accounts,
-  correct balances) and `sqlite3 .tables` (`imports` present,
-  `statements` gone).
-- Updated `doc/domain/ubiquitous-language.md` (Statement → Import entry
-  with full provenance), ADRs 0002/0003/0007, `CLAUDE.md`'s trait
-  snippet, `doc/kb/enable-banking-registration.md`, and
-  `doc/implementation-notes/spend-ledger-design.md` for the renamed
-  code identifiers.
-- 51 unit tests still pass; `cargo clippy` clean (same pre-existing
-  dead-code warnings as before, nothing new).
-- One cleanup item deliberately left for the user: `src/db/statements.rs`
-  is now dead (superseded by `src/db/imports.rs`, not declared as a
-  module anywhere) but `rm` is blocked in this environment — the delete
-  command is queued on the clipboard rather than run automatically.
-
-**State of the project:**
-The "statement" vs "import" naming inconsistency flagged in the
-previous session is fully resolved across code, schema, the real
-database, and docs — no more mismatch between the domain-language doc
-and what the code actually says. Bank Transaction Import, Credit Card
-Transaction Import, and Other Transaction Import are now the delta
-names throughout the plan. Nothing else changed functionally this
-session; all prior functionality (import, dedup, derivation, TUI)
-is unaffected — this was a pure rename.
-
-**Immediate next priorities:**
-1. Delta: The Gap, Task 1 — minimal income ledger (`income_entries` +
-   `income_entry_sources`).
-2. Delta: The Gap, Task 2 — gap calculation (`ledgr gap` CLI).
-3. Delta: The Gap, Task 4 — implement assets/liabilities as accounts
-   per ADR 0007 (new `AccountType` variants, manual balance-snapshot
-   entry command).
-4. Credit card CSV parser (Credit Card Transaction Import Task 1) — still
-   the oldest open TODO, also unlocks derivation rules 8-10.
-5. Run the queued `rm src/db/statements.rs` (clipboard) to remove the
-   now-dead old module file.
-
-## Checkpoint: Session 2026-07-12d
-
-**What was completed this session:**
-- Settled Delta: The Gap, Task 3 (assets/liabilities recording model):
-  decided against pivoting to double-entry now. Accounts + balance
-  snapshots (the existing bank-balance-reconstruction machinery) are
-  extended to cover the house, mortgage, and pension instead — new
-  `AccountType` variants, a manual balance-snapshot entry path for
-  accounts with no automated feed, and parser-driven snapshots reused
-  as-is when a mortgage/pension statement format exists. Recorded as
-  ADR `doc/adr/0007-assets-and-liabilities-as-accounts-with-balance-snapshots.md`,
-  added to `doc/adr/decisions.md`. Added Task 4 ("Implement assets and
-  liabilities as accounts") to carry the build. Noted on Delta:
-  Double-Entry Accounting as the live interim decision, to be revisited
-  only if postings-level detail (e.g. mortgage interest/principal
-  split) is actually needed later.
-- Scoped a new delta, **Delta: Statement/Import Naming Cleanup**: the
-  domain term "statement" (the `statements` table, `Statement` model,
-  delta names like "Bank Transaction Import") no longer fits once
-  non-bank/manually-recorded sources are in scope. Candidates discussed
-  informally: "import", "export" — not agreed yet. Per the project's
-  ubiquitous-language rule, split into Task 1 (agree the term with the
-  user, consulting `doc/domain/ubiquitous-language.md`) and Task 2 (the
-  refactor itself — schema, code, delta names, docs). Deliberately
-  deferred to its own session rather than done now.
-
-**State of the project:**
-Both open threads from the previous session are now resolved at the
-decision level: the account-type gate removal + real DB migration are
-code-complete (previous checkpoint), and the assets/liabilities
-question now has an accepted ADR. Delta: The Gap is unblocked to
-proceed with Task 1 (income ledger); Task 4 (assets/liabilities build)
-can run alongside or after it. The statement/import naming rename is
-scoped but explicitly parked for a dedicated future session, since it
-touches schema, code, and a wide set of docs.
-
-**Immediate next priorities:**
-1. Delta: The Gap, Task 1 — minimal income ledger (`income_entries` +
-   `income_entry_sources`).
-2. Delta: The Gap, Task 2 — gap calculation (`ledgr gap` CLI).
-3. Delta: The Gap, Task 4 — implement assets/liabilities as accounts
-   per ADR 0007 (new `AccountType` variants, manual balance-snapshot
-   entry command).
-4. Credit card CSV parser (Credit Card Transaction Import Task 1) — still
-   the oldest open TODO, also unlocks derivation rules 8-10.
-
-## Checkpoint: Session 2026-07-12e
-
-**What was completed this session:**
-- Developer documentation written and revised: `doc/developer-docs/ofx-format.md` (new, lightweight sketch of OFX file format — envelope, `BANKTRANLIST`, `STMTTRN` block structure and five fields) and `doc/developer-docs/transfer-detection.md` (new, technical notes on how ledgr detects internal transfers from Barclays OFX `NAME` fields). Transfer-detection doc went through several rounds of revision based on user feedback: real account sort codes and transaction descriptions initially mistakenly used as "anonymised" examples were caught by the user, verified against the real database and config, and replaced with fully fabricated examples matching real data shape/length. All Rust code snippets removed from transfer-detection.md at the user's request (refocused on data/behaviour, not implementation). Barclays' own published abbreviation reference (`FT` = "Funds Transfer") verified and sourced; OFX `NAME` field's 32-character cap confirmed as an OFX standard (`GenericNameType`, `maxLength="32"`) via XSD schema reference. Full `STMTTRN` block examples (all 5 fields) added for leading-shape, trailing-shape, and truncation cases. Refined theory (proposed by user, verified against real data): leading `NAME` shape (`<sort> <account> <reference> FT`) is used for one-off manual Faster Payments, while trailing shape (`<label> <sort> <account>`) is used for recurring standing orders/direct debits — shape doesn't directly determine this, reference/label *length* does (short reference leaves room for an `FT`/`STO` marker; long label consumes the 32-char budget and pushes both account number and marker out). Verified by cross-checking every distinct sort-code/account-number pair in leading-shape transactions against known accounts: zero false positives, all resolved to genuine accounts. Process lesson: when writing "anonymised" examples from real data, cross-check the final doc text against real values before considering done, not just intend to anonymise.
-- User-facing documentation written: `doc/user-guide/spend-analysis.md` and `doc/user-guide/transfer-detection.md` (new, non-technical explanations of spend ledger and transfer detection concepts for a general reader, cross-linked to each other and to the developer-docs technical versions).
-- Two more reference household accounts identified (during the leading-shape verification work above) and registered: sort `208794`, account `33403394` → "Shared Shopping Account" (confirmed real shared account, previously an unresolved recurring £250/month transfer, incorrectly counted as spend); sort `208794`, account `03868915` → "Joint Annual Expense" (confirmed joint savings account, appeared 23 times in transaction history as unidentified, 2 misclassified as spend). Both added to `~/.config/ledgr/config.toml`. Real database re-derived after clearing misclassified rows — `spend_entries` count dropped from 699 to 690 over this session's fixes. `ledgr status`'s "Household Reference Accounts" table now shows 4 accounts total.
-
-**State of the project:**
-Transfer-detection gaps are now fully closed: all four reference household accounts are registered (Romina Primary/Secondary, Shared Shopping, Joint Annual Expense), the real local database is clean and correctly re-derived (690 spend entries, 163 out of scope), and developer/user documentation is complete. The `spend_entries` data is now fully trustworthy for analysis. Delta: The Gap Task 2 (gap calculation / prototyping the monthly total-spend shape) is unblocked and can proceed on real, clean data.
-
-**Immediate next priorities:**
-1. Continue Delta: The Gap, Task 2 — prototype the monthly "total spend" shape via ad-hoc SQL and decide on the "closing the books" monthly record structure before committing to a CLI command/schema.
-2. Delta: The Gap, Task 1 — minimal income ledger (`income_entries` + `income_entry_sources`).
-3. Delta: The Gap, Task 4 — implement assets/liabilities as accounts per ADR 0007 (new `AccountType` variants, manual balance-snapshot entry command).
-4. Credit card CSV parser (Credit Card Transaction Import Task 1) — still the oldest open TODO, also unlocks derivation rules 8-10.
-
-## Checkpoint: Session 2026-07-12f
-
-**What was completed this session:**
-- Investigated a real transaction in June 2026 spend data
-  (`MR JAMES BARRITT 49291328548900`) and identified it as the user's
-  own Barclaycard credit card payment, misclassified as spend since the
-  credit card was never a tracked account.
-- Wrote `doc/kb/barclaycard/pdf-export-structure.md`: full structure of
-  the Barclaycard PDF "Transactions" export, card-number (PAN)
-  structure research (IIN/BIN, Luhn digit, reissue behaviour) prompted
-  by the user sharing a real card number, and the recommended
-  date+amount matching strategy (no real card number recorded in the
-  doc or anywhere else in the repo).
-- Built and validated `BarclaycardPdfParser` end-to-end against a real
-  205-transaction Barclaycard PDF export (scratch-only inbox, in-memory
-  database — real `ledgr.db` never touched, real PDF never committed):
-  all 205 transactions imported correctly, including a real
-  `pdf-extract` ordering quirk (date/type-tag reversed on some rows)
-  found and fixed during validation.
-- New schema/model: `account_card_numbers` table for credit-card
-  number history (globally-unique `last4`, reassignable via
-  `Db::link_card_number` for human-confirmed reissues), `CardIdentity`
-  struct, `ImportFileParser::card_identity()` trait method,
-  `Db::find_or_create_credit_card_account`, generic `notes` column on
-  `transactions` (unpopulated so far). `AccountType::CreditCard` reused
-  as-is — no new account type needed.
-- 61 unit tests total (up from 52), all passing; `cargo clippy` clean
-  (same pre-existing dead-code warnings as before).
-
-**State of the project:**
-Credit card import now has a working, validated parser producing real
-transactions and a correct account/balance — the missing piece before
-this was the biggest gap in "analyse monthly spending across current
-account, credit card, and Amazon orders" (the plan's stated real-world
-goal). What's not yet done: excluding credit card bill payments from
-spend (they still show up as ordinary spend on both the bank and card
-sides until transfer detection is extended to cover this pairing).
-
-**Immediate next priorities:**
-1. Build credit card ↔ bank transfer matching (Delta: Credit Card
-   Transaction Import, Task 5) — likely date+amount matching, possibly
-   combined with the card-number-prefix heuristic.
-2. Resume Delta: The Gap, Task 2 (monthly "total spend" shape /
-   "closing the books" prototyping) once credit card transfers are
-   correctly excluded.
-3. Delta: Credit Card Transaction Import, Task 3 (partner's credit
-   card) and Task 4 (manual spend entries via proxy account) remain
-   TODO, lower priority than Task 5.
-
-## Checkpoint: Session 2026-07-12g
-
-**What was completed this session:**
-- Real Barclaycard PDF import executed end-to-end against the live database: created a new credit card account (renamed to "Barclaycard", card ending 0002) from `~/Downloads/Transactions - 2026-07-12T14_06_35.985Z.pdf`, 205 transactions imported covering 2026-01-02 to 2026-07-10, balance snapshot £613.73 confirmed matching the PDF's stated balance. Spend ledger re-derived: 170 new spend entries, 275 internal transfers detected (110 paired), 98 out of scope.
-- Renamed the account via `ledgr name-account 0002 "Barclaycard"` once the Account column started showing the card's last4 separately, removing the now-redundant `(...0002)` suffix from the account name itself.
-- Fixed two real schema-drift/migration bugs surfaced by this import, both fixed in code rather than by hand-patching the database alone:
-  - `account_card_numbers.last4`'s `UNIQUE` constraint had drifted to per-account uniqueness on the real DB instead of `schema.sql`'s intended global uniqueness; recreated to match (table was empty, safe).
-  - `transactions.notes` (added to `schema.sql` in an earlier session for this delta) had no migration path for existing databases — `CREATE TABLE IF NOT EXISTS` never alters an existing table. Added `Db::migrate_add_transactions_notes()` (`src/db/mod.rs`), idempotent and guarded to no-op both on fresh databases (table doesn't exist yet) and already-migrated ones.
-  - Cleaned up several orphaned foreign-key rows in the real DB left by earlier manual `sqlite3` CLI deletes that ran without `PRAGMA foreign_keys=ON` (in `account_card_numbers`, `balance_snapshots`, and a pre-existing orphaned `imports` row referencing account id 5, deleted in an earlier session).
-- `ledgr status`'s Account column previously showed `-` for the credit card (it has no bank sort code/account number, only a card-number history). Added `AccountStatus.card_last4` (`src/db/status.rs`), resolved once from `account_card_numbers` for any account with no bank account number, consumed by both the CLI (`src/main.rs`) and the TUI accounts screen (`src/ui.rs`/`src/app.rs`) — single source of truth instead of duplicated per-surface logic.
-- Credit card balances are now shown negative (a liability, not an asset). The sign flip is baked into `AccountStatus.balance_minor` itself at the source (`src/db/status.rs`), not just at display time, so future net-worth summing (Delta: The Gap, Task 4) gets assets-positive/liabilities-negative for free per ADR 0007's stated convention, without each consumer needing to remember to apply it.
-- Verified both fixes in the CLI (`ledgr status`) and the live TUI (driven via tmux) — both correctly show `Barclaycard  (0002)  -613.73 GBP`.
-- Real `ledgr.db` backed up before any of today's database changes (`ledgr.db.bak-20260712174914-pre-cc-import`).
-- All 61 unit tests pass; `cargo build` clean.
-- Explored Gmail access for the Amazon Order Import delta's email-scanning route (doc-only, nothing built or configured) — recorded directly under Delta: Amazon Order Import, Task 1 in the plan body already (no action needed from you there): no Gmail/mail integration exists in this Claude Code environment today; two setup paths identified (Gmail MCP server vs. direct IMAP); recommended narrowing scope via a Gmail filter that forwards/labels Amazon order-confirmation emails only, rather than granting broad whole-inbox read access.
-
-**State of the project:**
-The credit card is now a real, live, imported account, completing the last piece of the plan's stated real-world goal (analyse monthly spending across current account, credit card, and Amazon orders — Amazon import itself still TODO). Spend and transfer detection are running against it, but Delta: Credit Card Transaction Import, Task 5 (matching card payments to bank-side transfers) is still open, so bank-to-card payment transactions likely still double-count in spend until that lands. `ledgr status` and the TUI accounts screen are now visually consistent with each other and with correct liability accounting semantics. Amazon Order Import's email-scanning route now has a recommended narrow-scope approach (Gmail filter, not full inbox access) but remains undecided and unbuilt.
-
-**Immediate next priorities:**
-1. Delta: Credit Card Transaction Import, Task 5 — match credit card payments to bank-side transfers (date+amount matching and/or card-number-prefix detection) so bill payments stop leaking into spend.
-2. Delta: The Gap, Task 2 — monthly "total spend" shape/command.
-3. Delta: Amazon Order Import, Task 1 — decide email-scanning vs. manual export, now informed by the Gmail-filter narrow-scope recommendation.
-
-## Checkpoint: Session 2026-07-12h
-
-**What was completed this session:**
-- Confirmed the real Barclaycard PDF import (Delta: Credit Card Transaction Import, Task 1) has been run against the live `ledgr.db`, not just the scratch-inbox validation from earlier in the day — verified via `ledgr status`: Barclaycard account (`0002`), 205 transactions, £613.73 balance, matching the earlier scratch validation exactly.
-
-**State of the project:**
-Credit Card Transaction Import Task 1 (parser) is now fully done end-to-end against real data. Task 2 (PDF vs CSV evaluation) was already done. Tasks 3-5 (partner's card, proxy account for manual spend, matching card payments to bank-side transfers) remain TODO.
-
-**Immediate next priorities:**
-1. Delta: Credit Card Transaction Import, Task 5 — match credit card payments to bank-side transfers (date+amount matching and/or card-number-prefix detection) so bill payments stop leaking into spend.
-2. Delta: The Gap, Task 2 — monthly "total spend" shape/command.
-
-## Checkpoint: Session 2026-07-12i
-
-**Completed:**
-- Delta: Credit Card Transaction Import, Task 5 — built and validated card-payment-to-bank-transfer matching, combining both previously-discussed ideas rather than choosing one: a pattern gate (`looks_like_card_payment_reference` in `src/derive.rs`, new `Classification::CardPayment`) recognising a truncated-PAN `NAME` shape and validating it against a real Visa/Mastercard IIN/BIN table (`known_card_network_prefix`), then a date+exact-amount match (`Db::find_card_payment_counterpart`, `src/db/spend.rs`, ±3 day window, mirrors the existing transfer-pairing query) against any `CreditCard`-type account before actually excluding the transaction from spend. Unmatched candidates still become a low-confidence spend entry (`rule_name = "card_payment_unmatched"`) rather than being silently dropped, matching the existing `"fallback"` rule's philosophy.
-- Iterated the pattern gate through several rounds of scrutiny before trusting it against real data: dropped an early exact-length-14 requirement (too rigid — truncation length varies with how much of Barclays' `NAME` field the preceding name text uses), dropped a follow-up minimum-length floor (arbitrary), and settled on relying on `known_card_network_prefix`'s own 4-digit floor for the short end plus a `MAX_PAN_DIGITS = 16` upper bound (a full untruncated PAN can't be longer than that, whatever its prefix looks like) — no lower bound needed. New unit tests cover the false-positive cases found along the way: a bare short digit, an unrelated long reference number with a non-card-network prefix (a real example — see below), and a digit run longer than a full PAN.
-- **Validated against real data:** found 32 real `"MR JAMES BARRITT <truncated PAN>"` transactions, all previously misclassified as `"fallback"` spend (confidence 0.4) — confirming this was a genuine double-counting bug, not a hypothetical. Also found and correctly excluded two real false-positive shapes while designing the pattern gate: `"CORNWALL WILDLIFE 6060150000007"` (13-digit charity reference number, wrong network prefix) and DVLA vehicle-tax reference numbers (18 digits, exceeds `MAX_PAN_DIGITS`). Real `ledgr.db` backed up first (`ledgr.db.bak-20260712221100-pre-card-payment-matching`); cleared the 32 misclassified `spend_entries`/`spend_entry_sources` rows and re-ran `ledgr import` — all 32 matched their exact-amount `"PAYMENT, THANK YOU"` counterpart on the Barclaycard account and were correctly excluded as internal transfers (`spend_entries` 860 → 828). Confirmed idempotent: re-running `ledgr import` created 0 new spend entries and 0 duplicate `transaction_links`.
-- 68 unit tests total (up from 65), all passing; `cargo clippy` clean (same pre-existing dead-code warnings as before, nothing new).
-
-**State of the project:** Credit Card Transaction Import is now done except Tasks 3 (partner's card) and 4 (proxy account for manual spend) — both deferred, not blocking. Every real transaction that goes into computing total spend is now correctly classified: internal transfers (bank-to-bank and, as of this session, bank-to-credit-card) are excluded, and the previously-flagged blocker on Delta: The Gap, Task 2 is resolved. One known gap, not a problem today: `find_card_payment_counterpart` matches against *any* `CreditCard` account, so once Task 3 adds a second registered card, a same-day same-amount coincidence across two cards could match the wrong counterpart — flagged in the plan body for revisiting then.
-
-**Immediate next priorities:**
-1. Delta: The Gap, Task 2 — monthly "total spend" shape/command, now unblocked.
-2. Delta: The Gap, Task 1 — minimal income ledger, needed before a real Gap (income − spend) figure is possible.
-
-## Checkpoint: Session 2026-07-12j
-
-**Completed:**
-- Built all three parts of the previously-designed leader-key
-  navigation + Monthly Transfers screen work: (1) `nav_stack`-based
-  navigation history + `<space>` leader key (`a`/`g`/`t`), (2) the
-  Monthly Transfers top-level screen with `derive::find_internal_transfers`
-  (read-only preview pass, no new schema), (3) the per-month drill-down
-  with counterpart-name resolution (`resolve_transferred_to`).
-- Built via three sequential subagents (one per part, controller
-  reviewing the diff after each before dispatching the next) to manage
-  context on a task too large for one session.
-- `cargo build`/`cargo test`/`cargo clippy` clean throughout (71 → 73 →
-  76 tests passing across the three parts, no new clippy warnings).
-  Deliberately not run against the real TUI/database — verified by
-  tests and code reading only.
-
-**State of the project:** All three TUI Analysis Views Task 4 items are
-functionally complete and uncommitted in the working tree, awaiting the
-user's review before committing. This closes out the last actively
-in-progress TUI Analysis Views task.
-
-**Immediate next priorities:**
-1. Review and commit the uncommitted `app.rs`/`derive.rs`/`main.rs`/
-   `model.rs`/`ui.rs` changes.
-2. Manually sanity-check the new screens against the real TUI/database
-   (deliberately not done yet — all three subagents were kept off real
-   data).
-3. Delta: The Gap, Task 1 (Minimal income ledger) — the next actionable
-   undesigned TODO, since Task 2 depends on it.
-4. Merchant-name normalisation — still deferred/undesigned.
-
-## Checkpoint: Session 2026-07-13
-
-**Completed:**
-- Fixed a real bug in the new Monthly Transfers drill-down: counterpart
-  name resolution (`resolve_counterparty`, `app.rs`) didn't handle
-  Barclays' truncated account numbers the same way the classification
-  logic already did, so a real transfer ("SHARED BILLS ACCO") showed
-  raw digits instead of "Bills Account". Fixed to match consistently.
-- Investigated the user's follow-up question ("is there a transfer
-  ledger table with real SQL relations?") — confirmed no, by design
-  (the Monthly Transfers screen deliberately re-derives on demand, no
-  new schema). But found a genuine, separate gap while investigating:
-  `transaction_links` (the existing edge table that *does* record
-  transfer pairings during real import) has zero coverage for the real
-  SHARED BILLS ACCO standing-order pairs, because
-  `Db::find_transfer_counterpart`'s matching heuristic only handles
-  manual transfers (both sides cross-reference each other's account
-  number), not automated ones (STO/DD) like this one. Confirmed via
-  direct read-only SQL against the real database.
-
-**State of the project:** Spend ledger correctness is unaffected (these
-transactions are still correctly excluded from spend either way) — this
-is a missing-audit-trail gap, not a wrong-numbers bug. The new "show both
-legs" `i` popup will under-report for automated transfers until this is
-fixed.
-
-**Immediate next priorities:**
-1. Review and commit the still-uncommitted leader-key nav / Monthly
-   Transfers working tree changes.
-2. Decide whether to fix `find_transfer_counterpart`'s automated-transfer
-   matching gap now or defer it.
-3. Delta: The Gap, Task 1 (Minimal income ledger) — the next actionable
-   undesigned TODO.
-
 ## Checkpoint: Session 2026-07-13b
 
 **Completed:**
@@ -1457,6 +1195,43 @@ git operations performed by the assistant this session.
 **Immediate next priorities:** see "What's Next" at the top of this
 file — next delta not yet chosen (candidates: Reconciliation, or
 resuming the Credit Card/Amazon/Gap chain).
+
+## Checkpoint: Session 2026-07-17c
+
+**Completed:** Delta: The Gap, Task 1 — minimal income ledger, done in
+full, plus the Monthly Income/Income Month TUI screens the user asked
+for alongside it. See that task's entry above for the complete
+write-up. Headline: `income_entries`/`income_entry_sources` (deliberately
+thinner than `spend_entries` — no categorisation), `DIRECTDEP` and
+Barclaycard cashback now become income instead of vanishing as
+`OutOfScope`, `<space>i` opens a Monthly Income screen mirroring Monthly
+Spend's design exactly. Real database backfilled and verified (3 real
+cashback entries surfaced, all counts elsewhere unchanged); verified
+live in `tmux`, not just `cargo test`. 86 tests passing; `cargo clippy
+--all-targets` clean at the same pre-existing baseline.
+
+**Not done:** the CLI/TUI **gap calculation itself** (Task 2 —
+`income - |spend|` for a period) — income and spend both now exist as
+real ledgers, so this is unblocked and is the natural next step.
+
+**Immediate next priorities:** Delta: The Gap, Task 2 — decide CLI
+(`ledgr gap`) vs TUI surface for the gap number, now both ledgers exist
+to compute it from.
+
+## Checkpoint: Session 2026-07-18
+
+**What was completed this session:**
+- Found and fixed a real income-classification bug (Delta: The Gap, Task 1): real Barclays OFX salary/BGC credits carry no TRNTYPE at all, so they were silently invisible as income. Added a NAME-suffix-based `"BGC"` rule to `classify()` in `src/derive.rs`.
+- Backfilled the real database: 20 new income entries, £37,151.74 total, monthly income now realistic (£5,788-£6,574/month vs the £2.69-£25.12 the user reported).
+- Added an `i` popup on the Income drill-down TUI screen showing the raw source transaction for verification, mirroring the existing Transfer drill-down popup.
+
+**State of the project:**
+The income ledger (Delta: The Gap, Task 1) is now producing correct real-world totals after this bug fix — previously it silently missed almost all real income due to a source-data quirk (Barclays omits TRNTYPE for Bank Giro Credits) rather than a code defect in the original implementation. Both the Monthly Spend and Monthly Income screens are now trustworthy enough to support Task 2 (Gap calculation). Not yet committed to git.
+
+**Immediate next priorities:**
+1. Review and commit this session's changes (`src/derive.rs`, `src/model.rs`, `src/db/income.rs`, `src/app.rs`, `src/main.rs`, `src/ui.rs`).
+2. Task 2 — Gap calculation (Delta: The Gap): decide CLI vs TUI surface for `income - |spend|`, now that both ledgers have correct real data.
+3. Consider whether other transaction types besides "BGC" might also be missing TRNTYPE in real Barclays exports and silently falling through classify() undetected.
 
 ## Implementation Notes
 

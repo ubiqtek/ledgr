@@ -1,7 +1,8 @@
 use crate::config::{Config, HouseholdAccountRef};
 use crate::db::{AccountStatus, Db};
 use crate::model::{
-    Id, MonthlySpend, MonthlyTransfer, SpendEntryWithAccount, Transaction, TransferEntry,
+    Id, IncomeEntryWithAccount, MonthlyIncome, MonthlySpend, MonthlyTransfer,
+    SpendEntryWithAccount, Transaction, TransferEntry,
 };
 use ratatui::widgets::TableState;
 
@@ -11,6 +12,8 @@ pub enum Screen {
     Transactions,
     MonthlySpend,
     SpendMonth,
+    MonthlyIncome,
+    IncomeMonth,
     MonthlyTransfers,
     TransferMonth,
     Help,
@@ -38,6 +41,12 @@ pub struct App {
     pub spend_month_entries: Vec<SpendEntryWithAccount>,
     pub selected_spend_entry: usize,
     pub spend_month_table_state: TableState,
+    pub monthly_income: Vec<MonthlyIncome>,
+    pub selected_income_month: usize,
+    pub monthly_income_table_state: TableState,
+    pub income_month_entries: Vec<IncomeEntryWithAccount>,
+    pub selected_income_entry: usize,
+    pub income_month_table_state: TableState,
     /// Reference household accounts (e.g. a partner's — see ADR 0008),
     /// loaded once from `config.toml` at startup, same lifecycle as the
     /// account-name overrides applied in `App::new`, so
@@ -62,6 +71,11 @@ pub struct App {
     /// dismissing the popup instead of navigation, same pattern as
     /// `note_edit`.
     pub transfer_detail: Option<TransferDetail>,
+    /// `Some` while the "source transaction" popup is open (`i` on
+    /// `Screen::IncomeMonth`) — shows the raw transaction behind the
+    /// selected income entry for verification. Same routing pattern as
+    /// `transfer_detail`.
+    pub income_detail: Option<Transaction>,
     pub should_quit: bool,
     pub status: String,
 }
@@ -99,6 +113,12 @@ impl App {
             spend_month_entries: Vec::new(),
             selected_spend_entry: 0,
             spend_month_table_state: TableState::default(),
+            monthly_income: Vec::new(),
+            selected_income_month: 0,
+            monthly_income_table_state: TableState::default(),
+            income_month_entries: Vec::new(),
+            selected_income_entry: 0,
+            income_month_table_state: TableState::default(),
             household_accounts: config.household_accounts,
             monthly_transfers: Vec::new(),
             selected_transfer_month: 0,
@@ -108,6 +128,7 @@ impl App {
             transfer_month_table_state: TableState::default(),
             note_edit: None,
             transfer_detail: None,
+            income_detail: None,
             should_quit: false,
             status: "j/k move, enter open, space leader, ctrl-d/u page, ? help, esc back, q quit"
                 .into(),
@@ -139,6 +160,42 @@ impl App {
         self.selected_spend_entry = 0;
         self.navigate_to(Screen::SpendMonth);
         Ok(())
+    }
+
+    pub fn open_monthly_income(&mut self) -> anyhow::Result<()> {
+        self.monthly_income = self.db.monthly_income_totals()?;
+        self.selected_income_month = 0;
+        self.navigate_to(Screen::MonthlyIncome);
+        Ok(())
+    }
+
+    pub fn open_selected_income_month(&mut self) -> anyhow::Result<()> {
+        let Some(month) = self.monthly_income.get(self.selected_income_month) else {
+            return Ok(());
+        };
+        self.income_month_entries = self.db.income_entries_for_month(&month.month)?;
+        self.selected_income_entry = 0;
+        self.navigate_to(Screen::IncomeMonth);
+        Ok(())
+    }
+
+    /// Opens the "source transaction" popup for the selected entry on
+    /// `Screen::IncomeMonth` — lets the user verify an income entry against
+    /// the raw imported transaction it was derived from (e.g. to check the
+    /// real description/amount behind a salary or cashback entry).
+    pub fn show_income_detail(&mut self) -> anyhow::Result<()> {
+        if self.screen != Screen::IncomeMonth {
+            return Ok(());
+        }
+        let Some(entry) = self.income_month_entries.get(self.selected_income_entry) else {
+            return Ok(());
+        };
+        self.income_detail = self.db.get_transaction(entry.transaction_id)?;
+        Ok(())
+    }
+
+    pub fn close_income_detail(&mut self) {
+        self.income_detail = None;
     }
 
     /// Opens the Monthly Transfers audit screen: queries the persisted
@@ -300,6 +357,8 @@ impl App {
             Screen::Transactions => self.transactions.len(),
             Screen::MonthlySpend => self.monthly_spend.len(),
             Screen::SpendMonth => self.spend_month_entries.len(),
+            Screen::MonthlyIncome => self.monthly_income.len(),
+            Screen::IncomeMonth => self.income_month_entries.len(),
             Screen::MonthlyTransfers => self.monthly_transfers.len(),
             Screen::TransferMonth => self.transfer_month_entries.len(),
             Screen::Help => return,
@@ -312,6 +371,8 @@ impl App {
             Screen::Transactions => &mut self.selected_transaction,
             Screen::MonthlySpend => &mut self.selected_month,
             Screen::SpendMonth => &mut self.selected_spend_entry,
+            Screen::MonthlyIncome => &mut self.selected_income_month,
+            Screen::IncomeMonth => &mut self.selected_income_entry,
             Screen::MonthlyTransfers => &mut self.selected_transfer_month,
             Screen::TransferMonth => &mut self.selected_transfer_entry,
             Screen::Help => return,
@@ -327,6 +388,8 @@ impl App {
             Screen::Transactions => &mut self.selected_transaction,
             Screen::MonthlySpend => &mut self.selected_month,
             Screen::SpendMonth => &mut self.selected_spend_entry,
+            Screen::MonthlyIncome => &mut self.selected_income_month,
+            Screen::IncomeMonth => &mut self.selected_income_entry,
             Screen::MonthlyTransfers => &mut self.selected_transfer_month,
             Screen::TransferMonth => &mut self.selected_transfer_entry,
             Screen::Help => return,
@@ -341,6 +404,8 @@ impl App {
             Screen::Transactions => self.transactions.len(),
             Screen::MonthlySpend => self.monthly_spend.len(),
             Screen::SpendMonth => self.spend_month_entries.len(),
+            Screen::MonthlyIncome => self.monthly_income.len(),
+            Screen::IncomeMonth => self.income_month_entries.len(),
             Screen::MonthlyTransfers => self.monthly_transfers.len(),
             Screen::TransferMonth => self.transfer_month_entries.len(),
             Screen::Help => return,
@@ -353,6 +418,8 @@ impl App {
             Screen::Transactions => &mut self.selected_transaction,
             Screen::MonthlySpend => &mut self.selected_month,
             Screen::SpendMonth => &mut self.selected_spend_entry,
+            Screen::MonthlyIncome => &mut self.selected_income_month,
+            Screen::IncomeMonth => &mut self.selected_income_entry,
             Screen::MonthlyTransfers => &mut self.selected_transfer_month,
             Screen::TransferMonth => &mut self.selected_transfer_entry,
             Screen::Help => return,
@@ -400,6 +467,37 @@ impl App {
             }
             Screen::SpendMonth => {
                 let row = self.spend_month_entries.get(self.selected_spend_entry)?;
+                let entry = &row.entry;
+                let account_name = self
+                    .accounts
+                    .iter()
+                    .find(|s| s.account.id == row.account_id)
+                    .map(|s| s.account.name.as_str())
+                    .unwrap_or("?");
+                let rule = entry
+                    .rule_name
+                    .clone()
+                    .unwrap_or_else(|| entry.classified_by.as_str().to_string());
+                Some(format!(
+                    "{}\t{}\t{}\t{}\t{}\t{}",
+                    entry.occurred_on,
+                    crate::format_amount_minor(entry.amount_minor, &entry.currency),
+                    entry.counterparty.clone().unwrap_or_default(),
+                    entry.description,
+                    rule,
+                    account_name
+                ))
+            }
+            Screen::MonthlyIncome => {
+                let month = self.monthly_income.get(self.selected_income_month)?;
+                Some(format!(
+                    "{}\t{}",
+                    month.month,
+                    crate::format_amount_minor(month.income_minor, "GBP")
+                ))
+            }
+            Screen::IncomeMonth => {
+                let row = self.income_month_entries.get(self.selected_income_entry)?;
                 let entry = &row.entry;
                 let account_name = self
                     .accounts

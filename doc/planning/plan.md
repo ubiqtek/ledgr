@@ -2,11 +2,10 @@
 
 ## What's Next
 
-- **Next:** Task 2 — Gap calculation (Delta: The Gap) — decide CLI vs TUI
-  surface for `income - |spend|`, now that both ledgers exist.
+- **Next:** Task 2 — Gap calculation (Delta: The Gap)
 - **Sub-doc:** none
 - **Blockers:** None
-- **Context:** [Checkpoint: Session 2026-07-18](#checkpoint-session-2026-07-18)
+- **Context:** [Checkpoint: Session 2026-07-18d](#checkpoint-session-2026-07-18d)
 
 ## Summary
 
@@ -36,6 +35,7 @@
 | | [2. Net worth / spending trend views](#task-2-net-worth--spending-trend-views) | TODO |
 | | [3. Monthly Gap screen and spend drill-down](#task-3-monthly-gap-screen-and-spend-drill-down) | IN PROGRESS |
 | | [4. Leader-key navigation](#task-4-leader-key-navigation) | ✓ DONE — uncommitted, pending review |
+| | [5. Right-align numeric column headers on the Spend/Income month drill-down screens](#task-5-right-align-numeric-column-headers-on-the-spendinccome-month-drill-down-screens) | ✓ DONE |
 | [Delta: Packaging & Distribution](#delta-packaging--distribution) | [1. Publish `ledgr` to crates.io](#task-1-publish-ledgr-to-cratesio) | ✓ DONE |
 | | [2. Web frontend](#task-2-web-frontend) | TODO |
 | [Delta: Live Open Banking (Enable Banking)](#delta-live-open-banking-enable-banking) | [1. Evaluate feasibility & security model](#task-1-evaluate-feasibility--security-model) | IN PROGRESS |
@@ -43,6 +43,9 @@
 | [Delta: Payslip Import](#delta-payslip-import) | [1. Evaluate payslip format and scope](#task-1-evaluate-payslip-format-and-scope) | TODO |
 | [Delta: Reclaimable Work Expenses](#delta-reclaimable-work-expenses) | [1. Design the reclaimable expenses ledger and marking flow](#task-1-design-the-reclaimable-expenses-ledger-and-marking-flow) | TODO |
 | [Delta: Regular Payments](#delta-regular-payments) | [1. Design regular payment recognition and labelling](#task-1-design-regular-payment-recognition-and-labelling) | TODO |
+| [Delta: Classification Rules Tidying](#delta-classification-rules-tidying) | [1. Bundle classify()'s growing parameter list](#task-1-bundle-classifys-growing-parameter-list) | TODO |
+| | [2. Remove throwaway diagnostic/maintenance scripts](#task-2-remove-throwaway-diagnosticmaintenance-scripts) | TODO |
+| | [3. Revisit Classification::Refund's hardcoded confidence](#task-3-revisit-classificationrefunds-hardcoded-confidence) | TODO |
 
 Archived Deltas: see the [archive index](archive/index.md)
 
@@ -397,6 +400,22 @@ scope — just enough to sum income, no categorisation.
 - **Real backfill (2026-07-18):** real `ledgr.db` backed up (`ledgr.db.bak-20260718080143-pre-bgc-income-rule`) and `ledgr import` re-run — 20 new income entries created (rule_name `"bank_giro_credit"`, £37,151.74 total), covering real salary (AZIMO LTD Pleo Technologies BGC, ~£5.8k-6.4k/month), HMRC PAYE credits, and other genuine inbound BGC transfers (SIMPLYHEALTH claim payouts, World of Books, a lottery win, family gifts). Monthly income now realistic (£5,788-£6,574/month) instead of the £2.69-£25.12 cashback-only totals. Verified live via `tmux` against the real TUI.
 - **New TUI feature added alongside the fix:** an `i` key on `Screen::IncomeMonth` (income drill-down) pops up the raw source transaction behind the selected income entry, for verification — mirrors the existing "both legs of transfer" popup pattern on `Screen::TransferMonth` exactly (`app.income_detail: Option<Transaction>`, `show_income_detail`/`close_income_detail` in `app.rs`, `draw_income_detail` in `ui.rs`, dismissed by any key). Required adding `transaction_id: Id` to `IncomeEntryWithAccount` (`src/model.rs`) and extending `income_entries_for_month`'s query (`src/db/income.rs`) to select `t.id`. Verified live via `tmux`. Help screen text updated.
 - Files changed: `src/derive.rs`, `src/model.rs`, `src/db/income.rs`, `src/app.rs`, `src/main.rs`, `src/ui.rs`. Not yet committed to git — sitting in the working tree for the user's review.
+- **Income vs Refund/Reimbursement redesign (2026-07-18, same-day follow-up session):** the user pushed back on treating all inbound BGC money as income — cashback and SimplyHealth claim payouts are money already spent coming back, not new income. Spawned a `fable`-model agent to think through a first-principles test and write a proposal to `doc/implementation-notes/income-vs-refund-classification-proposal.md`. Core test adopted: an inflow is a **Refund/Reimbursement** (spend ledger, sign-reversed) if it exists because of, and is bounded by, a prior household outflow that actually passed through the spend ledger; otherwise it's **Income**. This resolved an apparent contradiction (cashback reverses spend the ledger can see → Refund; a PAYE tax refund reverses a deduction that never appeared as spend → Income) without treating the two inconsistently.
+- **Domain language split** (`doc/domain/ubiquitous-language.md`): the old single "Reimbursements and Refunds" entry split into **Refund** (linked/linkable to one specific original purchase, e.g. a card refund) and **Reimbursement** (not linked to one transaction — cashback, a claim payout, a person settling up) — same underlying mechanism (`Classification::Refund`, sign-reversed spend entry), different domain identity. Also added **Registered Person** (an external individual registered by name, e.g. family/friends, whose unexplained inbound payments default to Reimbursement not Income) and **Income Source** (a registered external payer — employer, tax authority — driving high-confidence Income). `Income Ledger`'s own entry refined to explain why the household-boundary test alone isn't sufficient. Two stale `transaction_links` references (a retired table) cleaned up in `spend-ledger-design.md`/`derive.rs` while editing nearby text.
+- **New config-driven classification** (`src/config.rs`): three new registries — `income_sources` (typed `Salary`/`TaxAuthority`, each with its own `rule_name`/confidence — `employment_income` 0.95, `tax_refund` 0.8), `registered_people` (external individuals, default to `person_reimbursement` Refund), and `reimbursement_sources` (external institutions/schemes like a health cash plan, free-text `kind` for display, default to `claim_reimbursement` Refund) — the last added specifically for SimplyHealth. Every entry carries `name` (the literal string matched against a transaction's description), an optional `label` (short display nickname), and an optional `full_name` (the entity's true/full proper name, shown in `ledgr status`'s new "Name" column, distinct from `label` and from `name`/"Matches" which may be a truncated or payment-processor form).
+- **Real truncation bug found and handled:** Aria's real transaction (`"ARIA SCARAMAGLI-RE CHASE BGC"`) turned out to be genuinely truncated by the 32-char `NAME` field cap (her real surname is "Scaramagli-Reeves"), confirmed by counting characters — registering her true full name would have broken matching, since the character immediately after the truncation point isn't a word boundary. Handled by keeping `name` as the truncated form that actually matches, with `full_name` carrying the true name for display only.
+- **Person-name matching extended** (`derive::matches_person_name`, renamed from `matches_household_member_name`): a real transaction for "Fraser Crichton" appeared as `"F Crichton NORWAY CAR BGC"` — `"<initial> <Surname>"` order, the *opposite* of Faster Payments' documented `"<Surname> <initial>"` echo order. Added as a third matched variant, grounded in real data (Bank Giro Credit sender names are chosen by the originating bank, not Barclays, so a different order was plausible and turned out to be real).
+- **`classify()`'s residual `bank_giro_credit` rule** confidence dropped 0.75 → 0.5 now that the specific rules above absorb the explicable cases — what's left genuinely needs human review. Barclaycard cashback moved from `Classification::Income` to `Classification::Refund` (`rule_name: "cashback"`).
+- **Real config populated and reconciled:** registered AZIMO LTD (Salary → "Pleo Technologies"), HMRC PAYE (Tax Authority → "HM Revenue & Customs"), Wendy Barritt ("Ma"), Fraser Crichton, Aria Scaramagli-Re (label "Aria", full name "Aria Scaramagli-Reeves"), and SimplyHealth (Health Scheme) in the real `~/.config/ledgr/config.toml`. Real `ledgr.db` backed up twice (`ledgr.db.bak-20260718091241-pre-income-source-rules`, and again before the SimplyHealth rule), income/spend entries for the affected rules cleared and re-derived — confirmed idempotent both times (0 new entries on a second `ledgr import` run). Real result: SimplyHealth's 7 claim payouts (£365.00) and Barclaycard cashback (£39.34) moved out of income into spend-ledger reimbursements; Fraser's reimbursement rule also surfaced two Norway-trip transactions (£284.02, £68.71 accommodation) not found during earlier manual searching. Monthly income now £5,809–£6,428 (salary + occasional HMRC/direct-deposit), down from the earlier all-BGC-as-income total.
+- **`ledgr status`** gained a combined "Named Entities" table (Label / Type / Name / Matches columns) listing every `income_sources`/`registered_people`/`reimbursement_sources` entry — verified live against the real config.
+- **TUI polish:** the Spend/Income per-month drill-down screen titles now show the month's total, e.g. `"Spend — 2026-07 — -1458.90 GBP"` / `"Income — 2026-06 — 6400.27 GBP"` (`src/ui.rs`'s `draw_spend_month`/`draw_income_month`).
+- **Real root-cause correction, mid-session:** the earlier same-day "BGC transactions have no TRNTYPE" diagnosis turned out to be wrong — a wider grep (not a narrow 3-line context window) showed the real Barclays OFX file DOES carry `TRNTYPE=DIRECTDEP` for every BGC credit; the actual bug was that these rows were imported into the database before `trn_type` capture worked, and `Db::insert_transaction`'s FITID-based dedup never revisits an already-imported row, so a normal `ledgr import` re-run could never backfill it. Fixed with a one-off script (`examples/backfill_trn_type.rs`, re-parses every processed OFX file and updates any matching still-NULL row) — real DB backfilled, all 967 previously-NULL rows corrected, confirmed against the original 27-`DIRECTDEP` baseline from `doc/kb/ofx/structure.md`'s 939-transaction analysis. The BGC-suffix fallback rule added earlier this session remains useful as defence-in-depth (a transaction with a genuinely absent TRNTYPE would still be caught) even though it wasn't the actual fix for this specific bug. Full writeup: `doc/implementation-notes/spend-ledger-design.md`'s "Stale-data footgun" note and updated derivation rules table (now also reflects rules 1b/1c/2c/6/6b/8-10 that had drifted out of sync with the code).
+- 91 unit tests total; `cargo clippy --all-targets` clean except a new `#[allow(clippy::too_many_arguments)]` on `classify()` (now 8 parameters) — see the new Delta: Classification Rules Tidying below.
+- Still not committed to git — everything sitting in the working tree for the user's review.
+- **Three more real inbound-payment mis-classifications found and fixed (2026-07-18, same-day follow-up)**, same "register the sender" pattern as SimplyHealth: (1) Pleo Technologies paying back an out-of-pocket work expense directly (£49.83, description `"PLEO TECHNOLOGIES PLEO TECHNOLO"`, distinct from the salary-via-Azimo route already registered under `income_sources`) — added as a `reimbursement_sources` entry; (2) Great Western Railway Delay Repay (£21.38, description `"GREAT WESTERN TRAI GWR-2080-068"`) — added as a `reimbursement_sources` entry; (3) the user's brother "S Barritt" sending a BGC payment (£43.17, description `"S Barritt FARTER BGC"`) — added as a `registered_people` entry via the new TUI form (see below). Real `ledgr.db` backed up before each fix (`ledgr.db.bak-20260718151046-pre-pleo-reimbursement-rule` and further timestamped backups for GWR); all three re-derived idempotently into the spend ledger as reimbursements (`claim_reimbursement`/`person_reimbursement` rule names).
+- **New TUI feature: `a` "add reference" form on `Screen::IncomeMonth`** — pops up a 3-field form (Name, pre-filled with a guess from the transaction description; Label; Full name), Tab/Down and Shift-Tab/Up move between fields, Enter advances to the next field or submits on the last field, Esc cancels. Submitting registers the entry's sender as a new `registered_people` entry in `config.toml`, deletes that one income entry (freeing its source transaction for re-derivation), and live re-runs `derive::run_derivation` so it moves to the spend ledger as a reimbursement — all without leaving the screen. New: `App::start_adding_person`/`person_form_next_field`/`person_form_previous_field`/`person_form_push_char`/`person_form_pop_char`/`person_form_enter`/`commit_person_form` and the `PersonForm`/`PersonFormField` types (`src/app.rs`); `Db::delete_income_entry` (`src/db/income.rs`); `Config::add_registered_person` (`src/config.rs`); `draw_person_form` (`src/ui.rs`). Help screen updated. Verified live via `tmux` end-to-end against the real database.
+- **Known gap, not fixed:** `Config::save` re-serializes the whole `config.toml` via `toml::to_string_pretty`, which strips hand-written explanatory comments (e.g. the Aria-truncation note, the Pleo/GWR reasoning notes). Comments lost during this session's `a`-form use were manually restored by hand; this will recur on the next `a` use. Worth a future task (e.g. a comment-preserving TOML writer, or moving the "why" into a `note` field instead of file comments) if it becomes a real nuisance — not fixed now.
+- **Ad-hoc SimplyHealth net-cost query (not a built feature):** computed via direct SQL against `spend_entries`/`transactions` — £276.00 paid in premiums vs £365.00 claimed back over Jan–Jun 2026 (6 standing-order payments vs 7 claims), net +£89.00 in the user's favour. The user wants a proper annual-cap-aware version (there's a yearly claim cap and the policy year isn't finished), but deferred supplying the cap amount and policy-year start month to a later session — do not invent these values or add a new Delta for it yet.
 
 ### Task 2: Gap calculation
 - TODO — for a given period: `SUM(income_entries) − |SUM(spend_entries)|`.
@@ -668,6 +687,12 @@ Build out the TUI beyond the current scaffold.
     2026-07-13, once it became clear its "no new persisted schema"
     design needed reopening — see that delta for the full history.
 
+### Task 5: Right-align numeric column headers on the Spend/Income month drill-down screens
+- ✓ DONE — `draw_spend_month` (`Screen::SpendMonth`) and `draw_income_month` (`Screen::IncomeMonth`) in `src/ui.rs` both have right-aligned numeric "Amount" data cells but a plain left-aligned text header row, so the "Amount" column header doesn't sit above its numbers. Fix: apply the same `Cell::from(Line::from(text).alignment(Alignment::Right))` pattern used in `draw_monthly_income`'s header (fixed 2026-07-18) to the "Amount" header cell in both functions.
+  - Applied the same `Cell::from(Line::from(text).alignment(Alignment::Right))` header pattern to the "Amount" header cell in both `draw_spend_month` and `draw_income_month` (`src/ui.rs`).
+  - Also added running totals to the top-level `draw_monthly_spend`/`draw_monthly_income` title bars (e.g. `"Monthly Spend — 42473.02 GBP"`), summed live from `app.monthly_spend`/`app.monthly_income` — verified live via `tmux`.
+  - `cargo build`/`cargo clippy --all-targets` clean (same pre-existing dead-code warnings, nothing new).
+
 ## Delta: Packaging & Distribution
 
 ### Task 1: Publish `ledgr` to crates.io
@@ -750,6 +775,7 @@ transaction.
   provider's own download/API, format TBD) and what fields matter
   (gross pay, tax, NI, pension contribution — employee and employer
   portions — net pay). Not yet started.
+  - Real payslips/P60s already exist locally: `/Users/jmdb/Library/CloudStorage/GoogleDrive-jim.barritt@gmail.com/My Drive/Barramali/05 - Work/02 - Pleo/Payslips` (2026-07-18). Design idea from the user: a config-driven **Employer** concept (e.g. registering "Pleo" as an employer) that carries a payslip-storage directory, so once "Employer" exists as a concept it can link back to the income ledger's Income Source entries (see Delta: The Gap, Task 1's Income Source config) rather than being a fully separate mechanism.
 
 ## Delta: Reclaimable Work Expenses
 
@@ -758,6 +784,8 @@ household member (the user or Romina) pays out of pocket but can claim
 back from their employer — currently invisible as a category, no
 different from ordinary discretionary spend once it lands in the spend
 ledger. Sketch, not yet designed:
+
+**Related future delta, not yet created (flagged 2026-07-18):** a genuine loan (money lent to or borrowed from the household, as opposed to a reimbursement of an already-recorded purchase) needs its own liability-side treatment distinct from both Income and Reimbursement — surfaced by a real ambiguous transaction ("Wendy Barritt LOAN ETC BGC", which turned out to actually be a reimbursement, not a loan, but the genuine-loan case is real and still unhandled). Not designed yet.
 - **Marking**: a keypress on the spend drill-down (`Screen::MonthSpend`,
   alongside the existing `n` note-editor binding) flags a spend entry as
   reclaimable — candidate key `w` (work) or `r` (reclaimable), TBD.
@@ -772,13 +800,16 @@ ledger. Sketch, not yet designed:
   not automatic classification.
 - **Paid-back tracking is asymmetric between household members**:
   Romina's reclaims are likely paid back as an identifiable separate
-  bank transaction; the user's own are folded into his net pay with no
+  bank transaction; the user's own are typically folded into his net pay with no
   separately identifiable transaction — this is the direct reason
   **Delta: Payslip Import** matters here, since only a fully parsed
   payslip could surface a reclaimed-expenses line and let this close
-  the loop automatically for his own claims.
+  the loop automatically for his own claims. However, a real counterexample
+  exists (see the Correction note below).
 - **A report**: some summary view (CLI or TUI, format TBD) of
   reclaimable expenses outstanding vs paid, by household member.
+
+**Correction found 2026-07-18:** a real transaction (`2026-04-07  £49.83  "PLEO TECHNOLOGIES PLEO TECHNOLO"`, `rule_name: "direct_deposit"`) shows this delta's own assumption above doesn't always hold — this reclaim *is* a separately identifiable bank transaction from the employer, not folded invisibly into net pay as assumed. Currently misclassified as generic Income (caught by the `TRNTYPE=DIRECTDEP` fallback rule, not the `employment_income` Income Source rule, since the description starts "PLEO TECHNOLOGIES" not "AZIMO LTD" — same payroll-adjacent company, two different transaction types). Should be reclassified as a spend-ledger Reimbursement, not Income — mirrors the SimplyHealth/cashback reimbursement treatment already built (see Delta: The Gap, Task 1). Also update `## Delta: Payslip Import`'s intro paragraph if its wording asserts reclaims are *never* separately identifiable — this real example shows that assumption is at least sometimes wrong.
 
 ### Task 1: Design the reclaimable expenses ledger and marking flow
 - TODO — not yet designed. Needs: (1) agreed domain term(s) — consult
@@ -789,6 +820,7 @@ ledger. Sketch, not yet designed:
   the spend drill-down; (4) the report view; (5) scoping what's
   buildable before Delta: Payslip Import lands vs blocked on it, given
   the asymmetric paid-back tracking above.
+  - TODO — add a `reimbursement_sources`-style config entry for "PLEO TECHNOLOGIES" (distinct from the existing `income_sources` "AZIMO LTD" salary entry) so this specific transaction type routes to the spend ledger as a Reimbursement via `classify()`, not Income. Not yet implemented.
 
 ## Delta: Regular Payments
 
@@ -823,124 +855,18 @@ just a categorisation rule with a friendlier UI?).
   once that exists — likely regular payments feed it rather than
   duplicate it.
 
-## Checkpoint: Session 2026-07-13b
+## Delta: Classification Rules Tidying
 
-**Completed:**
-- The user pushed back on the "no persisted transfer schema" design
-  decision from the checkpoint above — correctly pointed out it was
-  never actually agreed, and no ADR recorded it (checked `doc/adr/`:
-  confirmed nothing does). Rather than patch `find_transfer_counterpart`
-  in place, decided to reopen the design properly.
-- Restructured the plan: moved the Monthly Transfers screen work (and
-  both 2026-07-13 bug/gap notes) out of TUI Analysis Views Task 4 into
-  a new **Delta: Transfer Ledger**, with new Task 2 (design a real
-  persisted ledger table + write the missing ADR) and Task 3 (persist +
-  migrate the screen to query it) as the path forward. TUI Analysis
-  Views Task 4 trimmed to just the leader-key/nav-stack work, which is
-  generic and unaffected.
-- Added a new **Delta: Reconciliation** — the user's idea: with real
-  balance anchors (`balance_snapshots`) and full transaction history now
-  in place, `ledgr` should be able to prove opening balance + net
-  transactions in a period = closing balance, per account and
-  household-wide, as a general integrity check independent of
-  spend/transfer/income classification. Not designed yet — one TODO
-  task recorded (Task 1), distinguishing per-account (balance
-  arithmetic, catches import gaps/duplicates) from household-level
-  (classification coverage, would have caught the transfer-pairing gap
-  faster than manual SQL did).
-- Established a explicit design principle for both new deltas and
-  likely the future income ledger: **persist ledger relationships at
-  import time, let the UI only query — don't re-derive relations live
-  on every screen open.** To be written up formally as an ADR when
-  Delta: Transfer Ledger Task 2 happens, not before.
+Technical debt flagged during the 2026-07-18 income/reimbursement classification work (Delta: The Gap, Task 1) — deliberately deferred rather than gold-plating mid-session.
 
-**State of the project:** No code changed this checkpoint — plan-only
-restructuring. The working tree still has the same uncommitted
-leader-key nav / Monthly Transfers v1 changes as before.
+### Task 1: Bundle classify()'s growing parameter list
+- TODO — `classify()` in `src/derive.rs` is now at 8 parameters (`description`, `trn_type`, `amount_minor`, `household`, `household_names`, `income_sources`, `registered_people`, `reimbursement_sources`), tripping clippy's `too_many_arguments` lint — currently silenced with `#[allow(clippy::too_many_arguments)]` rather than refactored, since the "named entity" shape (Income Source / Registered Person / Reimbursement Source, and a possible future "Merchant" kind) hadn't stabilised yet. Revisit once it has: likely bundle the three config-derived slices into a single struct parameter (e.g. `NamedEntities<'a>`) passed by reference, removing the `#[allow]`. Also touches `run_derivation`'s signature and every test call site (mechanical but wide).
 
-**Immediate next priorities:**
-1. Delta: Transfer Ledger, Task 2 — design the persisted schema (check
-   `doc/domain/ubiquitous-language.md` for naming first) and write the
-   ADR. Do this step by step, not in one large session.
-2. Delta: Reconciliation, Task 1 — design account-level/household-level
-   checks, likely easier once the transfer ledger exists.
-3. Review and commit the still-uncommitted working tree changes.
-4. Delta: The Gap, Task 1 (Minimal income ledger) — next after the two
-   new deltas.
+### Task 2: Remove throwaway diagnostic/maintenance scripts
+- TODO — `examples/debug_trntype.rs` and `examples/backfill_trn_type.rs` were one-off scripts used to diagnose the real Barclays OFX TRNTYPE-not-being-persisted bug and backfill the real database; no longer needed now the backfill's done and the finding is written up in `doc/implementation-notes/spend-ledger-design.md`'s "Stale-data footgun" note. `rm` command for both already copied to clipboard (pending manual run, since `rm` is blocked in this environment) — just needs actually running.
 
-## Checkpoint: Session 2026-07-13c
-
-**Completed:**
-- Delta: Transfer Ledger, Task 2 (design + ADR) and Task 3 (build + real
-  migration) — both done in full, closing out the delta reopened in the
-  previous two checkpoints.
-- Design written to `doc/implementation-notes/transfer-ledger-design.md`:
-  new `transfer_entries` table (one row per internal-transfer-classified
-  transaction, mirroring `spend_entries`' provenance idiom), pairing
-  modelled as extra columns on the same row rather than a second edge
-  table (a transfer has at most one counterpart), and a three-tier
-  pairing algorithm (description match, mutual amount-date match,
-  self-reference match — the third tier added mid-build once a real gap
-  demanded it, see below).
-- ADR written: `doc/adr/0009-persisted-ledgers-built-at-import.md`,
-  formalising the principle the user asked for: every derived relation
-  is built once at import into a persisted table, the UI only ever
-  queries it. Income ledger (Delta: The Gap, Task 1) flagged as the next
-  expected application; Delta: Reconciliation flagged as a direct
-  beneficiary.
-- Built: `transfer_entries` schema + indexes, three-tier pairing in
-  `src/derive.rs`, new `Db` methods in `src/db/spend.rs`/`src/db/mod.rs`,
-  `TransferPairMethod`/`NewTransferEntry` in `src/model.rs`, `src/app.rs`
-  migrated to query the persisted table (`src/ui.rs` needed no changes
-  at all — confirming the design doc's prediction).
-- Two real bugs found and fixed along the way: (1)
-  `parse_trailing_account_suffix` was rejecting a trailing marker word
-  (`"STO"`) after the account number; (2) tier 2's mutual-match
-  requirement structurally could never pair the SHARED BILLS ACCO ↔
-  Bills Account legs, because the Bills Account's own `NAME` field
-  self-references its own account number rather than the sender's. The
-  user's decision on the second bug: add a third, explicitly-tracked
-  `self_reference_match` pairing tier (confidence 0.6) rather than loosen
-  tier 2's safety property, for future auditability. Also fixed a
-  derivation bug where already-persisted-but-unpaired legs from an
-  earlier run could never be reconsidered once a new tier was added
-  later — pairing now iterates all currently-unpaired persisted rows,
-  not just the current run's freshly-classified candidates.
-- Tests: 80 total (up from 76), all passing; `cargo build`/`cargo clippy
-  --all-targets` clean against the pre-existing warning baseline.
-- Real `ledgr.db` migrated (backed up twice first): backfilled
-  `transfer_entries` for all 300 already-imported internal transfers —
-  218 description-match, 21 self-reference-match (including all 7 target
-  SHARED BILLS ACCO pairs), 0 amount-date-match, 40 permanently unpaired
-  (confirmed Reference Household Accounts, not a gap). Confirmed
-  idempotent on a second `ledgr import` run. Cleaned up 110 now-redundant
-  `transaction_links` transfer rows, deliberately kept the 32 rows still
-  actively written by the separate card-payment-matching mechanism.
-
-**State of the project:** Delta: Transfer Ledger is functionally
-complete — the Monthly Transfers screen and its drill-down/popup now
-read from a real persisted, provenance-tracked table instead of
-re-deriving live, and the audit-trail gap that reopened this delta (zero
-`transaction_links` coverage for automated transfers) is fully closed on
-real data. Not yet done: a manual TUI click-through (only verified via
-tests/build/clippy and real-DB SQL so far), and getting the user's
-sign-off to formalise "Transfer Entry"/"Transfer Ledger" in
-`doc/domain/ubiquitous-language.md`. Everything from this session is
-uncommitted, sitting alongside the already-uncommitted leader-key nav /
-Monthly Transfers v1 changes from prior sessions.
-
-**Immediate next priorities:**
-1. Review and commit the uncommitted working tree — now spanning the
-   leader-key nav / Monthly Transfers v1 work plus this session's full
-   Transfer Ledger Task 2/3 build — before starting anything new.
-2. Get the user's sign-off on "Transfer Entry"/"Transfer Ledger" as
-   agreed terms in `doc/domain/ubiquitous-language.md`.
-3. Delta: Reconciliation, Task 1 — design account-level/household-level
-   checks, now genuinely easier with a persisted transfer ledger to
-   reconcile against.
-4. Delta: The Gap, Task 1 (Minimal income ledger) — next delta expected
-   to apply the same "persisted ledger, built at import" principle
-   (ADR 0009).
+### Task 3: Revisit Classification::Refund's hardcoded confidence
+- TODO — `Classification::Refund` has no `confidence` field; every Refund-producing rule (`card_refund`, `cashback`, `claim_reimbursement`, `person_reimbursement`) gets the same hardcoded 0.7 at the insert site in `run_derivation` regardless of how confident the match actually is (e.g. a registered `SIMPLYHEALTH`/known-person match is more certain than a generic unlinked card refund). Add a `confidence: f64` field to the `Refund` variant and thread real per-rule values through, mirroring how `Spend`/`Income` already do this.
 
 ## Checkpoint: Session 2026-07-13d
 
@@ -1232,6 +1158,58 @@ The income ledger (Delta: The Gap, Task 1) is now producing correct real-world t
 1. Review and commit this session's changes (`src/derive.rs`, `src/model.rs`, `src/db/income.rs`, `src/app.rs`, `src/main.rs`, `src/ui.rs`).
 2. Task 2 — Gap calculation (Delta: The Gap): decide CLI vs TUI surface for `income - |spend|`, now that both ledgers have correct real data.
 3. Consider whether other transaction types besides "BGC" might also be missing TRNTYPE in real Barclays exports and silently falling through classify() undetected.
+
+## Checkpoint: Session 2026-07-18b
+
+**What was completed this session:**
+- Corrected an earlier same-day misdiagnosis: real Barclays BGC credits DO carry TRNTYPE=DIRECTDEP; the actual bug was stale pre-existing rows never getting backfilled by a normal re-import. Fixed with a one-off backfill script; real database corrected.
+- Redesigned income vs. reimbursement classification after the user pushed back on treating cashback/SimplyHealth as income — spawned a fable-model agent to propose a first-principles test, adopted it, and split the domain language accordingly (new Refund/Reimbursement/Registered Person/Income Source terms).
+- Built config-driven classification rules for employer salary, HMRC tax refunds, registered friends/family (Wendy, Fraser, Aria), and SimplyHealth — all reconciled against the real database, confirmed idempotent.
+- Added a "Named Entities" table to `ledgr status` and month-total titles to the Spend/Income drill-down TUI screens.
+- Opened a new Delta: Classification Rules Tidying for technical debt deliberately deferred mid-session (a growing `classify()` parameter list, two throwaway scripts pending removal, `Refund`'s hardcoded confidence).
+
+**State of the project:**
+The income ledger (Delta: The Gap, Task 1) now reflects a carefully reasoned income-vs-reimbursement boundary rather than a blanket "all inbound BGC money is income" rule, and the real database has been reconciled against it twice this session. Both the Monthly Spend and Monthly Income screens are trustworthy enough to support Task 2 (Gap calculation). Nothing from this session is committed to git yet.
+
+**Immediate next priorities:**
+1. Review and commit this session's changes.
+2. Task 2 — Gap calculation (Delta: The Gap): decide CLI vs TUI surface, now that both ledgers have reconciled real data.
+3. Delta: Classification Rules Tidying — at least Task 2 (removing the two throwaway scripts) is a five-minute cleanup worth doing soon.
+4. Consider the TUI person-registration popup and review-queue mechanism the user flagged mid-session (ties into the already-planned but deprioritised Delta: Review and Re-classification TUI).
+
+## Checkpoint: Session 2026-07-18c
+
+**What was completed this session:**
+- Added a new `IncomeSourceKind::Prize` (rule_name `prize_win`, confidence 0.9) and registered the National Lottery (Allwyn) as a Prizes-typed Income Source in the real config.
+- Reworked the Monthly Income TUI screen to show Month/Salary/Other/Total columns (`MonthlyIncome` gained a `salary_minor` field, split out via `rule_name = 'employment_income'` in `monthly_income_totals`), with right-aligned column headers.
+- Real database reconciled again (lottery win reclassified from `bank_giro_credit` to `prize_win`), confirmed idempotent.
+- Found a real Pleo out-of-pocket-expense-reimbursement transaction misclassified as income — see the new note under Delta: Reclaimable Work Expenses.
+- Flagged that the Spend/Income month drill-down screens have the same un-aligned-header issue just fixed on Monthly Income — see new Delta: TUI Analysis Views, Task 5.
+
+**State of the project:**
+This session's classification and TUI work is functionally complete and reconciled against the real database, but two follow-ups were deliberately deferred rather than implemented immediately: the Pleo reimbursement reclassification (Delta: Reclaimable Work Expenses) and the remaining header-alignment fix (Delta: TUI Analysis Views, Task 5). Nothing from today is committed to git yet.
+
+**Immediate next priorities:**
+1. Task 5 — right-align the Spend/Income month drill-down "Amount" headers (quick, five-minute fix).
+2. Delta: Reclaimable Work Expenses — add the Pleo reimbursement config rule.
+3. Review and commit this session's accumulated changes.
+
+## Checkpoint: Session 2026-07-18d
+
+**What was completed this session:**
+- Delta: TUI Analysis Views, Task 5 ✓ DONE — right-aligned the "Amount" header on the Spend/Income month drill-down screens, plus added running totals to the Monthly Spend/Monthly Income screen title bars.
+- Delta: The Gap, Task 1 — three more real inbound payments found mis-classified as income and fixed (Pleo expense reimbursement, GWR Delay Repay, brother's BGC payment), each registered via `reimbursement_sources`/`registered_people` config entries and re-derived idempotently against the real database.
+- New TUI feature: `a` "add reference" form on the Income month drill-down screen — registers a mis-classified sender as a Registered Person and live re-derives that entry into the spend ledger as a reimbursement, without leaving the screen or needing manual config/DB edits.
+- Ad-hoc SQL query computed SimplyHealth's net cost-vs-claimed position (£276 paid, £365 claimed back, net +£89 over Jan–Jun 2026); a proper annual-cap-aware version is deferred pending the user supplying the actual cap and policy year.
+- Noted (not fixed): `Config::save` strips hand-written comments from `config.toml` on every write; manually restored this session, will recur.
+
+**State of the project:**
+Both the spend and income ledgers are now populated with real, correctly-classified data across Jan–Jul 2026, with income vs. refund/reimbursement correctly separated for every distinct external payer encountered so far. The TUI now supports self-service correction of misclassified income entries via the new `a` form, closing a loop the user was previously doing by hand each time. Nothing from this session has been committed to git yet — the user will commit and push it themselves.
+
+**Immediate next priorities:**
+1. Delta: The Gap, Task 2 — Gap calculation: build the first real Gap statement (income − spend) now that both ledgers are populated with real data across a meaningful date range.
+2. Decide the SimplyHealth annual-cap tracking approach once the user supplies the cap amount and policy year.
+3. Continue registering any further mis-classified income entries surfaced during ordinary use via the new `a` form.
 
 ## Implementation Notes
 

@@ -33,6 +33,30 @@ pub struct Config {
     /// config file to add one; no CLI command yet.
     #[serde(default)]
     pub household_accounts: Vec<HouseholdAccountRef>,
+
+    /// Registered external payers (an employer, a tax authority) driving a
+    /// high-confidence Income classification — see the **Income Source**
+    /// ubiquitous-language entry. Hand-edit the config file to add one; no
+    /// CLI command yet.
+    #[serde(default)]
+    pub income_sources: Vec<IncomeSourceRef>,
+
+    /// Registered external individuals (family/friends) so their payments
+    /// classify consistently — see the **Registered Person**
+    /// ubiquitous-language entry. An unexplained inbound payment from a
+    /// registered person defaults to a spend-ledger reimbursement, not
+    /// income. Hand-edit the config file to add one; no CLI command yet.
+    #[serde(default)]
+    pub registered_people: Vec<RegisteredPersonRef>,
+
+    /// Registered external institutions/schemes (e.g. a health cash plan
+    /// like SimplyHealth) whose payouts default to a spend-ledger
+    /// reimbursement rather than income — the non-person counterpart to
+    /// `registered_people`. `kind` is free text for display only (e.g.
+    /// `"Health Scheme"`) — behaviour is identical regardless of kind.
+    /// Hand-edit the config file to add one; no CLI command yet.
+    #[serde(default)]
+    pub reimbursement_sources: Vec<ReimbursementSourceRef>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -55,6 +79,104 @@ pub struct HouseholdAccountRef {
     pub name: Option<String>,
 }
 
+/// A registered external payer — see `Config::income_sources`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IncomeSourceRef {
+    /// Matched at the very start of a transaction's description (e.g. the
+    /// payroll processor's own name, `"AZIMO LTD"`, or `"HMRC PAYE"`),
+    /// same word-boundary matching as `RegisteredPersonRef`/
+    /// `HouseholdAccountRef.name`.
+    pub name: String,
+    pub kind: IncomeSourceKind,
+    /// Free-text label for the user's own reference (e.g. the actual
+    /// employer's name, distinct from the payroll processor's name that
+    /// `name` matches on) — shown in `ledgr status`, not used for matching.
+    #[serde(default)]
+    pub label: Option<String>,
+    /// The entity's true/full proper name (e.g. `"Pleo Technologies"`,
+    /// distinct from `name`, which may be a payment processor's name or a
+    /// truncated form chosen for matching) — shown in `ledgr status`, not
+    /// used for matching. `None` when nothing more specific than `name`/
+    /// `label` is known.
+    #[serde(default)]
+    pub full_name: Option<String>,
+}
+
+/// What kind of Income Source this is — drives the classification rule and
+/// confidence applied in `derive::classify`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum IncomeSourceKind {
+    Salary,
+    TaxAuthority,
+    Prize,
+}
+
+impl IncomeSourceKind {
+    pub fn rule_name(&self) -> &'static str {
+        match self {
+            IncomeSourceKind::Salary => "employment_income",
+            IncomeSourceKind::TaxAuthority => "tax_refund",
+            IncomeSourceKind::Prize => "prize_win",
+        }
+    }
+
+    pub fn confidence(&self) -> f64 {
+        match self {
+            IncomeSourceKind::Salary => 0.95,
+            IncomeSourceKind::TaxAuthority => 0.8,
+            IncomeSourceKind::Prize => 0.9,
+        }
+    }
+
+    pub fn display(&self) -> &'static str {
+        match self {
+            IncomeSourceKind::Salary => "Salary",
+            IncomeSourceKind::TaxAuthority => "Tax Authority",
+            IncomeSourceKind::Prize => "Prizes",
+        }
+    }
+}
+
+/// A registered external individual — see `Config::registered_people`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RegisteredPersonRef {
+    /// Matched against the start of a transaction's description, same
+    /// word-boundary matching as `HouseholdAccountRef.name` — see
+    /// `derive::matches_person_name`.
+    pub name: String,
+    /// Free-text label for the user's own reference (e.g. "Ma") — shown in
+    /// `ledgr status`, not used for matching.
+    #[serde(default)]
+    pub label: Option<String>,
+    /// The person's true/full name, when `name` is a truncated form chosen
+    /// for matching (e.g. Barclays' 32-char `NAME` cap cutting a long
+    /// surname short) — shown in `ledgr status`, not used for matching.
+    /// `None` when `name` already is the full name.
+    #[serde(default)]
+    pub full_name: Option<String>,
+}
+
+/// A registered external institution/scheme — see
+/// `Config::reimbursement_sources`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReimbursementSourceRef {
+    /// Matched at the very start of a transaction's description, same
+    /// word-boundary matching as `IncomeSourceRef.name`.
+    pub name: String,
+    /// Free text describing what kind of entity this is (e.g. `"Health
+    /// Scheme"`) — display only, doesn't affect classification.
+    pub kind: String,
+    /// Free-text label for the user's own reference — shown in
+    /// `ledgr status`, not used for matching.
+    #[serde(default)]
+    pub label: Option<String>,
+    /// The entity's true/full proper name — shown in `ledgr status`, not
+    /// used for matching.
+    #[serde(default)]
+    pub full_name: Option<String>,
+}
+
 impl Config {
     /// Whether `sort`/`account` (as decoded from a `NAME` field, possibly
     /// truncated) identifies one of the configured Reference Household
@@ -66,9 +188,17 @@ impl Config {
     /// reference account, permanently unpairable by design" apart from
     /// "no counterpart found at all".
     pub fn household_account_matches(&self, sort: &str, account: &str) -> bool {
-        self.household_accounts
-            .iter()
-            .any(|a| a.sort_code == sort && (a.account_number == account || a.account_number.starts_with(account)))
+        self.household_accounts.iter().any(|a| {
+            a.sort_code == sort
+                && (a.account_number == account || a.account_number.starts_with(account))
+        })
+    }
+
+    /// Registers a new Registered Person — see the TUI's `a` "add reference"
+    /// form on `Screen::IncomeMonth`, which builds one from an
+    /// otherwise-unrecognised inbound payment's description.
+    pub fn add_registered_person(&mut self, person: RegisteredPersonRef) {
+        self.registered_people.push(person);
     }
 
     /// Path to the config file, XDG-style: `~/.config/ledgr/config.toml` on
@@ -89,6 +219,9 @@ impl Config {
                 inbox_dir: base_dirs()?.home_dir().join(".config/ledgr/inbox"),
                 account_names: BTreeMap::new(),
                 household_accounts: Vec::new(),
+                income_sources: Vec::new(),
+                registered_people: Vec::new(),
+                reimbursement_sources: Vec::new(),
             };
             default.save(path)?;
             return Ok(default);
@@ -167,6 +300,9 @@ mod tests {
             inbox_dir: inbox_dir.clone(),
             account_names: BTreeMap::new(),
             household_accounts: Vec::new(),
+            income_sources: Vec::new(),
+            registered_people: Vec::new(),
+            reimbursement_sources: Vec::new(),
         }
         .save(&path)
         .expect("save");
@@ -181,6 +317,9 @@ mod tests {
             inbox_dir: PathBuf::from("/tmp/inbox"),
             account_names: BTreeMap::new(),
             household_accounts: Vec::new(),
+            income_sources: Vec::new(),
+            registered_people: Vec::new(),
+            reimbursement_sources: Vec::new(),
         };
         config.set_account_name("5678", "Jim's Account");
 

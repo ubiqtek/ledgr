@@ -434,8 +434,14 @@ pub struct MonthlyIncome {
     /// `YYYY-MM`.
     pub month: String,
     /// Net of that month's `income_entries` (signed, positive = money in —
-    /// same convention as `amount_minor` elsewhere).
+    /// same convention as `amount_minor` elsewhere). Salary + Other.
     pub income_minor: i64,
+    /// The subset of `income_minor` classified `rule_name = 'employment_income'`
+    /// (an `IncomeSourceKind::Salary` Income Source) — reliable, recurring
+    /// income, as opposed to the sporadic "Other" remainder (tax refunds,
+    /// prizes, gifts, unreviewed BGC credits, ...). Backs the TUI's
+    /// Month/Salary/Other/Total columns.
+    pub salary_minor: i64,
 }
 
 /// Which raw transaction(s) a spend entry derives from.

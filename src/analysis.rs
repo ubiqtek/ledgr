@@ -62,7 +62,7 @@ mod tests {
             })
             .expect("insert transaction");
         }
-        run_derivation(&db, &[]).expect("derive");
+        run_derivation(&db, &[], &[], &[], &[]).expect("derive");
 
         // The +2000 credit has no matching pattern/TRNTYPE, so it's left
         // out of scope (a candidate income transaction) rather than spend;

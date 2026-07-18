@@ -54,7 +54,13 @@ fn run_import(db: Db) -> anyhow::Result<()> {
     );
     println!("inbox: {}", config.inbox_dir.display());
 
-    let derivation = derive::run_derivation(&db, &config.household_accounts)?;
+    let derivation = derive::run_derivation(
+        &db,
+        &config.household_accounts,
+        &config.income_sources,
+        &config.registered_people,
+        &config.reimbursement_sources,
+    )?;
     println!(
         "spend ledger: {} entries created, {} internal transfer(s) detected ({} paired, {} backfilled), {} credit card payment(s) matched ({} still unmatched), {} out of scope",
         derivation.spend_entries_created,
@@ -162,23 +168,73 @@ fn run_status(db: Db) -> anyhow::Result<()> {
         println!();
     }
 
+    if !config.income_sources.is_empty()
+        || !config.registered_people.is_empty()
+        || !config.reimbursement_sources.is_empty()
+    {
+        println!("Named Entities (drive income/reimbursement classification rules):");
+        println!();
+
+        let mut rows: Vec<Vec<String>> = config
+            .income_sources
+            .iter()
+            .map(|source| {
+                vec![
+                    source.label.clone().unwrap_or_else(|| source.name.clone()),
+                    source.kind.display().to_string(),
+                    source
+                        .full_name
+                        .clone()
+                        .unwrap_or_else(|| source.name.clone()),
+                    source.name.clone(),
+                ]
+            })
+            .collect();
+        rows.extend(config.registered_people.iter().map(|person| {
+            vec![
+                person.label.clone().unwrap_or_else(|| person.name.clone()),
+                "Friend/Family".to_string(),
+                person
+                    .full_name
+                    .clone()
+                    .unwrap_or_else(|| person.name.clone()),
+                person.name.clone(),
+            ]
+        }));
+        rows.extend(config.reimbursement_sources.iter().map(|source| {
+            vec![
+                source.label.clone().unwrap_or_else(|| source.name.clone()),
+                source.kind.clone(),
+                source
+                    .full_name
+                    .clone()
+                    .unwrap_or_else(|| source.name.clone()),
+                source.name.clone(),
+            ]
+        }));
+
+        print_table(&["Label", "Type", "Name", "Matches"], &rows, &[]);
+        println!();
+    }
+
     let spend_ledger = db.spend_ledger_summary()?;
     println!("Spend Ledger:");
     println!("  {} entries", spend_ledger.entries);
     println!();
 
     let transfer_ledger = db.transfer_ledger_summary()?;
-    let (unpaired_reference, unpaired_unresolved) = db
-        .unpaired_transfer_counterparties()?
-        .into_iter()
-        .fold((0, 0), |(reference, unresolved), (sort, account)| {
-            match (sort, account) {
-                (Some(sort), Some(account)) if config.household_account_matches(&sort, &account) => {
+    let (unpaired_reference, unpaired_unresolved) =
+        db.unpaired_transfer_counterparties()?.into_iter().fold(
+            (0, 0),
+            |(reference, unresolved), (sort, account)| match (sort, account) {
+                (Some(sort), Some(account))
+                    if config.household_account_matches(&sort, &account) =>
+                {
                     (reference + 1, unresolved)
                 }
                 _ => (reference, unresolved + 1),
-            }
-        });
+            },
+        );
     println!("Transfer Ledger:");
     println!(
         "  {} entries ({} paired, {} unpaired: {} to reference accounts, {} unresolved)",
@@ -439,6 +495,22 @@ fn run(
                     continue;
                 }
 
+                // While the "add reference" form is open, every key is text
+                // input (or field navigation/commit/cancel) rather than
+                // list navigation — same pattern as `note_edit` above.
+                if app.person_form.is_some() {
+                    match key.code {
+                        KeyCode::Enter => app.person_form_enter()?,
+                        KeyCode::Esc => app.cancel_person_form(),
+                        KeyCode::Tab | KeyCode::Down => app.person_form_next_field(),
+                        KeyCode::BackTab | KeyCode::Up => app.person_form_previous_field(),
+                        KeyCode::Backspace => app.person_form_pop_char(),
+                        KeyCode::Char(c) => app.person_form_push_char(c),
+                        _ => {}
+                    }
+                    continue;
+                }
+
                 // While the transfer-detail popup is open, any key dismisses
                 // it rather than being treated as navigation.
                 if app.transfer_detail.is_some() {
@@ -493,6 +565,9 @@ fn run(
                     }
                     KeyCode::Char('i') if app.screen == app::Screen::IncomeMonth => {
                         app.show_income_detail()?;
+                    }
+                    KeyCode::Char('a') if app.screen == app::Screen::IncomeMonth => {
+                        app.start_adding_person();
                     }
                     KeyCode::Char('y') => {
                         if let Some(text) = app.selected_row_text() {

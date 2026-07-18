@@ -421,16 +421,21 @@ impl Db {
         pair_method: TransferPairMethod,
         pair_confidence: f64,
     ) -> rusqlite::Result<Id> {
-        let (out_transaction_id, out_account_id, out_description, out_occurred_on) =
-            match leg.role {
-                TransferLegRole::Out => (leg.transaction_id, leg.account_id, leg.description.as_str(), leg.occurred_on.as_str()),
-                TransferLegRole::In => (
-                    counterpart.id,
-                    counterpart.account_id,
-                    counterpart.description.as_str(),
-                    counterpart.posted_at.as_str(),
-                ),
-            };
+        let (out_transaction_id, out_account_id, out_description, out_occurred_on) = match leg.role
+        {
+            TransferLegRole::Out => (
+                leg.transaction_id,
+                leg.account_id,
+                leg.description.as_str(),
+                leg.occurred_on.as_str(),
+            ),
+            TransferLegRole::In => (
+                counterpart.id,
+                counterpart.account_id,
+                counterpart.description.as_str(),
+                counterpart.posted_at.as_str(),
+            ),
+        };
         let (in_transaction_id, in_account_id, in_description) = match leg.role {
             TransferLegRole::In => (leg.transaction_id, leg.account_id, leg.description.as_str()),
             TransferLegRole::Out => (
@@ -557,9 +562,11 @@ impl Db {
             }
         };
         self.conn()
-            .query_row(sql, params![known_account_id, amount_minor, posted_at], |row| {
-                Ok((row.get(0)?, row.get(1)?, row.get(2)?))
-            })
+            .query_row(
+                sql,
+                params![known_account_id, amount_minor, posted_at],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
             .optional()
     }
 

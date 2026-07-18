@@ -155,7 +155,9 @@ impl Db {
         if !has_old_shape {
             return Ok(false);
         }
-        conn.execute_batch("ALTER TABLE transfer_entries RENAME TO transfer_entries_pre_leg_merge;")?;
+        conn.execute_batch(
+            "ALTER TABLE transfer_entries RENAME TO transfer_entries_pre_leg_merge;",
+        )?;
         Ok(true)
     }
 
@@ -286,7 +288,9 @@ impl Db {
                         )
                     }
                 };
-            let primary = out_leg.or(in_leg).expect("at least one side is always known");
+            let primary = out_leg
+                .or(in_leg)
+                .expect("at least one side is always known");
 
             conn.execute(
                 "INSERT INTO transfer_entries
@@ -337,7 +341,9 @@ impl Db {
     /// TABLE` text directly, since column presence can't distinguish a
     /// `CHECK`-only change. No-op on a fresh database or one already
     /// migrated.
-    fn migrate_rename_narrow_pair_method_transfer_entries(conn: &Connection) -> rusqlite::Result<bool> {
+    fn migrate_rename_narrow_pair_method_transfer_entries(
+        conn: &Connection,
+    ) -> rusqlite::Result<bool> {
         let existing_sql: Option<String> = conn
             .query_row(
                 "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'transfer_entries'",
@@ -573,7 +579,11 @@ mod tests {
                 |row| Ok((row.get(0)?, row.get(1)?)),
             )
             .expect("query the unpaired leg");
-        assert_eq!((out_id, in_id), (Some(3), None), "the unpaired leg's in side stays empty");
+        assert_eq!(
+            (out_id, in_id),
+            (Some(3), None),
+            "the unpaired leg's in side stays empty"
+        );
 
         db.conn()
             .execute(

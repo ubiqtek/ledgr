@@ -357,7 +357,7 @@ mod tests {
         })
         .expect("insert bank-side payment");
 
-        crate::derive::run_derivation(&db, &[]).expect("derive");
+        crate::derive::run_derivation(&db, &[], &[], &[], &[]).expect("derive");
 
         let summary = db.transfer_ledger_summary().expect("summary");
         assert_eq!(summary.entries, 1);
@@ -391,7 +391,7 @@ mod tests {
         })
         .expect("insert card-side payment");
 
-        crate::derive::run_derivation(&db, &[]).expect("derive");
+        crate::derive::run_derivation(&db, &[], &[], &[], &[]).expect("derive");
 
         let summary = db.transfer_ledger_summary().expect("summary");
         assert_eq!(summary.entries, 1);

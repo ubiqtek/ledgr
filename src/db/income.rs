@@ -5,7 +5,9 @@
 //! rules stay unit-testable without a database.
 
 use super::Db;
-use crate::model::{ClassifiedBy, Id, IncomeEntry, IncomeEntryWithAccount, MonthlyIncome, NewIncomeEntry};
+use crate::model::{
+    ClassifiedBy, Id, IncomeEntry, IncomeEntryWithAccount, MonthlyIncome, NewIncomeEntry,
+};
 use rusqlite::params;
 
 impl Db {
@@ -60,7 +62,9 @@ impl Db {
     /// Monthly Income screen. Same shape as `monthly_spend_totals`.
     pub fn monthly_income_totals(&self) -> rusqlite::Result<Vec<MonthlyIncome>> {
         let mut stmt = self.conn().prepare(
-            "SELECT substr(occurred_on, 1, 7) AS month, SUM(amount_minor)
+            "SELECT substr(occurred_on, 1, 7) AS month,
+                    SUM(amount_minor),
+                    SUM(CASE WHEN rule_name = 'employment_income' THEN amount_minor ELSE 0 END)
              FROM income_entries
              GROUP BY month
              ORDER BY month DESC",
@@ -69,9 +73,22 @@ impl Db {
             Ok(MonthlyIncome {
                 month: row.get(0)?,
                 income_minor: row.get(1)?,
+                salary_minor: row.get(2)?,
             })
         })?;
         rows.collect()
+    }
+
+    /// Deletes an income entry (cascading to its `income_entry_sources` row
+    /// per the schema's `ON DELETE CASCADE`), freeing its source transaction
+    /// to be picked up again by `pending_derivation_transactions` — used by
+    /// the TUI's `a` "add reference" form (`Screen::IncomeMonth`) to move a
+    /// mis-classified entry over to the spend ledger as a reimbursement once
+    /// its sender is registered.
+    pub fn delete_income_entry(&self, id: Id) -> rusqlite::Result<()> {
+        self.conn()
+            .execute("DELETE FROM income_entries WHERE id = ?1", params![id])?;
+        Ok(())
     }
 
     /// All income entries for one calendar month (`month` as `YYYY-MM`),

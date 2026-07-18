@@ -46,6 +46,10 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     if let Some(transaction) = &app.income_detail {
         draw_income_detail(frame, transaction, frame.area());
     }
+
+    if let Some(form) = &app.person_form {
+        draw_person_form(frame, form, frame.area());
+    }
 }
 
 /// A small centred popup for editing a spend entry's note, overlaid on top
@@ -127,6 +131,37 @@ fn draw_income_detail(frame: &mut Frame, transaction: &crate::model::Transaction
     let paragraph = Paragraph::new(lines.join("\n")).block(
         Block::default()
             .title("Source transaction (any key to close)")
+            .borders(Borders::ALL),
+    );
+    frame.render_widget(paragraph, popup);
+}
+
+/// The "add reference" form (`a` on `Screen::IncomeMonth`) — three fields
+/// (Name, Label, Full name), the active one shown with a block cursor,
+/// matching `draw_note_editor`'s single-field style extended to several.
+fn draw_person_form(frame: &mut Frame, form: &crate::app::PersonForm, area: Rect) {
+    use crate::app::PersonFormField;
+
+    let popup = centered_rect(60, 5, area);
+    frame.render_widget(Clear, popup);
+
+    let field_line = |label: &str, value: &str, active: bool| {
+        let cursor = if active { "\u{2588}" } else { "" };
+        format!("{label}: {value}{cursor}")
+    };
+    let lines = [
+        field_line("Name", &form.name, form.field == PersonFormField::Name),
+        field_line("Label", &form.label, form.field == PersonFormField::Label),
+        field_line(
+            "Full name",
+            &form.full_name,
+            form.field == PersonFormField::FullName,
+        ),
+    ];
+
+    let paragraph = Paragraph::new(lines.join("\n")).block(
+        Block::default()
+            .title("Add reference (Tab/Enter next field, Enter on last to save, Esc cancel)")
             .borders(Borders::ALL),
     );
     frame.render_widget(paragraph, popup);
@@ -263,7 +298,12 @@ fn draw_transactions(frame: &mut Frame, app: &mut App, area: Rect) {
 }
 
 fn draw_monthly_spend(frame: &mut Frame, app: &mut App, area: Rect) {
-    let block = Block::default().title("Monthly Spend").borders(Borders::ALL);
+    let total: i64 = app.monthly_spend.iter().map(|m| m.spend_minor.abs()).sum();
+    let title = format!(
+        "Monthly Spend \u{2014} {}",
+        crate::format_amount_minor(total, "GBP")
+    );
+    let block = Block::default().title(title).borders(Borders::ALL);
 
     if app.monthly_spend.is_empty() {
         frame.render_widget(
@@ -290,7 +330,8 @@ fn draw_monthly_spend(frame: &mut Frame, app: &mut App, area: Rect) {
         .block(block)
         .highlight_style(SELECTED_STYLE);
 
-    app.monthly_spend_table_state.select(Some(app.selected_month));
+    app.monthly_spend_table_state
+        .select(Some(app.selected_month));
     frame.render_stateful_widget(table, area, &mut app.monthly_spend_table_state);
 }
 
@@ -346,12 +387,12 @@ fn draw_spend_month(frame: &mut Frame, app: &mut App, area: Rect) {
         .collect::<Vec<_>>();
 
     let header = Row::new(vec![
-        "Date",
-        "Amount",
-        "Counterparty",
-        "Description",
-        "Rule",
-        "Account",
+        Cell::from("Date"),
+        Cell::from(Line::from("Amount").alignment(Alignment::Right)),
+        Cell::from("Counterparty"),
+        Cell::from("Description"),
+        Cell::from("Rule"),
+        Cell::from("Account"),
     ])
     .style(Style::default().add_modifier(Modifier::BOLD));
 
@@ -377,7 +418,12 @@ fn draw_spend_month(frame: &mut Frame, app: &mut App, area: Rect) {
 }
 
 fn draw_monthly_income(frame: &mut Frame, app: &mut App, area: Rect) {
-    let block = Block::default().title("Monthly Income").borders(Borders::ALL);
+    let total: i64 = app.monthly_income.iter().map(|m| m.income_minor).sum();
+    let title = format!(
+        "Monthly Income \u{2014} {}",
+        crate::format_amount_minor(total, "GBP")
+    );
+    let block = Block::default().title(title).borders(Borders::ALL);
 
     if app.monthly_income.is_empty() {
         frame.render_widget(
@@ -391,18 +437,39 @@ fn draw_monthly_income(frame: &mut Frame, app: &mut App, area: Rect) {
         .monthly_income
         .iter()
         .map(|month| {
-            let income = crate::format_amount_minor(month.income_minor, "GBP");
+            let salary = crate::format_amount_minor(month.salary_minor, "GBP");
+            let other = crate::format_amount_minor(month.income_minor - month.salary_minor, "GBP");
+            let total = crate::format_amount_minor(month.income_minor, "GBP");
             Row::new(vec![
                 Cell::from(month.month.clone()),
-                Cell::from(Line::from(income).alignment(Alignment::Right)),
+                Cell::from(Line::from(salary).alignment(Alignment::Right)),
+                Cell::from(Line::from(other).alignment(Alignment::Right)),
+                Cell::from(Line::from(total).alignment(Alignment::Right)),
             ])
         })
         .collect::<Vec<_>>();
 
-    let table = Table::new(rows, [Constraint::Length(7), Constraint::Length(15)])
-        .column_spacing(1)
-        .block(block)
-        .highlight_style(SELECTED_STYLE);
+    let header = Row::new(vec![
+        Cell::from("Month"),
+        Cell::from(Line::from("Salary").alignment(Alignment::Right)),
+        Cell::from(Line::from("Other").alignment(Alignment::Right)),
+        Cell::from(Line::from("Total").alignment(Alignment::Right)),
+    ])
+    .style(Style::default().add_modifier(Modifier::BOLD));
+
+    let table = Table::new(
+        rows,
+        [
+            Constraint::Length(7),
+            Constraint::Length(15),
+            Constraint::Length(15),
+            Constraint::Length(15),
+        ],
+    )
+    .header(header)
+    .column_spacing(1)
+    .block(block)
+    .highlight_style(SELECTED_STYLE);
 
     app.monthly_income_table_state
         .select(Some(app.selected_income_month));
@@ -457,12 +524,12 @@ fn draw_income_month(frame: &mut Frame, app: &mut App, area: Rect) {
         .collect::<Vec<_>>();
 
     let header = Row::new(vec![
-        "Date",
-        "Amount",
-        "Counterparty",
-        "Description",
-        "Rule",
-        "Account",
+        Cell::from("Date"),
+        Cell::from(Line::from("Amount").alignment(Alignment::Right)),
+        Cell::from("Counterparty"),
+        Cell::from("Description"),
+        Cell::from("Rule"),
+        Cell::from("Account"),
     ])
     .style(Style::default().add_modifier(Modifier::BOLD));
 
@@ -631,6 +698,11 @@ fn draw_help(frame: &mut Frame, area: Rect) {
             "i",
             "Show both legs of selected transfer (transfers drill-down), or \
              source transaction of selected income entry (income drill-down)",
+        ),
+        (
+            "a",
+            "Add selected entry's sender as a Registered Person (income \
+             drill-down) — re-classifies it as a reimbursement",
         ),
         ("y", "Copy selected row to the clipboard"),
         ("Esc / q", "Back (or quit from the accounts screen)"),

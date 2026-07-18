@@ -1,10 +1,12 @@
-use crate::config::{Config, HouseholdAccountRef};
+use crate::config::{Config, HouseholdAccountRef, RegisteredPersonRef};
 use crate::db::{AccountStatus, Db};
+use crate::derive;
 use crate::model::{
     Id, IncomeEntryWithAccount, MonthlyIncome, MonthlySpend, MonthlyTransfer,
     SpendEntryWithAccount, Transaction, TransferEntry,
 };
 use ratatui::widgets::TableState;
+use std::path::PathBuf;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Screen {
@@ -76,8 +78,54 @@ pub struct App {
     /// selected income entry for verification. Same routing pattern as
     /// `transfer_detail`.
     pub income_detail: Option<Transaction>,
+    /// `Some` while the "add reference" form is open (`a` on
+    /// `Screen::IncomeMonth`) — registers the selected entry's sender as a
+    /// Registered Person so future (and this) payment(s) from them classify
+    /// as a spend-ledger reimbursement instead of income. Same routing
+    /// pattern as `note_edit`.
+    pub person_form: Option<PersonForm>,
     pub should_quit: bool,
     pub status: String,
+    config: Config,
+    config_path: PathBuf,
+}
+
+/// Which field of `PersonForm` is currently being edited.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PersonFormField {
+    Name,
+    Label,
+    FullName,
+}
+
+impl PersonFormField {
+    fn next(self) -> Self {
+        match self {
+            PersonFormField::Name => PersonFormField::Label,
+            PersonFormField::Label => PersonFormField::FullName,
+            PersonFormField::FullName => PersonFormField::FullName,
+        }
+    }
+
+    fn previous(self) -> Self {
+        match self {
+            PersonFormField::Name => PersonFormField::Name,
+            PersonFormField::Label => PersonFormField::Name,
+            PersonFormField::FullName => PersonFormField::Label,
+        }
+    }
+}
+
+/// The "add reference" form's in-progress state, opened by `a` on
+/// `Screen::IncomeMonth`. `income_entry_id` identifies the entry to remove
+/// from the income ledger (so it can be re-derived as a reimbursement) once
+/// the form is submitted.
+pub struct PersonForm {
+    pub name: String,
+    pub label: String,
+    pub full_name: String,
+    pub field: PersonFormField,
+    income_entry_id: Id,
 }
 
 /// Both sides of a transfer, shown in the popup opened by `i` on
@@ -95,7 +143,8 @@ pub struct TransferDetail {
 impl App {
     pub fn new(db: Db) -> anyhow::Result<Self> {
         let mut accounts = db.account_statuses()?;
-        let config = Config::load_or_init(&Config::default_path()?)?;
+        let config_path = Config::default_path()?;
+        let config = Config::load_or_init(&config_path)?;
         config.apply_account_name_overrides(accounts.iter_mut().map(|s| &mut s.account));
         Ok(Self {
             db,
@@ -119,7 +168,7 @@ impl App {
             income_month_entries: Vec::new(),
             selected_income_entry: 0,
             income_month_table_state: TableState::default(),
-            household_accounts: config.household_accounts,
+            household_accounts: config.household_accounts.clone(),
             monthly_transfers: Vec::new(),
             selected_transfer_month: 0,
             monthly_transfers_table_state: TableState::default(),
@@ -129,9 +178,12 @@ impl App {
             note_edit: None,
             transfer_detail: None,
             income_detail: None,
+            person_form: None,
             should_quit: false,
             status: "j/k move, enter open, space leader, ctrl-d/u page, ? help, esc back, q quit"
                 .into(),
+            config,
+            config_path,
         })
     }
 
@@ -196,6 +248,136 @@ impl App {
 
     pub fn close_income_detail(&mut self) {
         self.income_detail = None;
+    }
+
+    /// Opens the "add reference" form for the selected entry on
+    /// `Screen::IncomeMonth` (`a`) — registers its sender as a Registered
+    /// Person so this (and every future) payment from them is recognised as
+    /// a spend-ledger reimbursement instead of falling through to the
+    /// generic Income fallback rules. Pre-fills the Name field with a guess
+    /// derived from the entry's own description, editable before submitting.
+    pub fn start_adding_person(&mut self) {
+        if self.screen != Screen::IncomeMonth {
+            return;
+        }
+        let Some(entry) = self.income_month_entries.get(self.selected_income_entry) else {
+            return;
+        };
+        self.person_form = Some(PersonForm {
+            name: guess_person_name(&entry.entry.description),
+            label: String::new(),
+            full_name: String::new(),
+            field: PersonFormField::Name,
+            income_entry_id: entry.entry.id,
+        });
+    }
+
+    /// Discards the in-progress "add reference" form without saving.
+    pub fn cancel_person_form(&mut self) {
+        self.person_form = None;
+    }
+
+    pub fn person_form_next_field(&mut self) {
+        if let Some(form) = &mut self.person_form {
+            form.field = form.field.next();
+        }
+    }
+
+    pub fn person_form_previous_field(&mut self) {
+        if let Some(form) = &mut self.person_form {
+            form.field = form.field.previous();
+        }
+    }
+
+    pub fn person_form_push_char(&mut self, c: char) {
+        let Some(form) = &mut self.person_form else {
+            return;
+        };
+        match form.field {
+            PersonFormField::Name => form.name.push(c),
+            PersonFormField::Label => form.label.push(c),
+            PersonFormField::FullName => form.full_name.push(c),
+        }
+    }
+
+    pub fn person_form_pop_char(&mut self) {
+        let Some(form) = &mut self.person_form else {
+            return;
+        };
+        match form.field {
+            PersonFormField::Name => form.name.pop(),
+            PersonFormField::Label => form.label.pop(),
+            PersonFormField::FullName => form.full_name.pop(),
+        };
+    }
+
+    /// `Enter` on the "add reference" form: advances to the next field, or
+    /// submits (`commit_person_form`) when already on the last field
+    /// (`FullName`) — standard multi-field form behaviour.
+    pub fn person_form_enter(&mut self) -> anyhow::Result<()> {
+        let Some(form) = &self.person_form else {
+            return Ok(());
+        };
+        if form.field == PersonFormField::FullName {
+            self.commit_person_form()
+        } else {
+            self.person_form_next_field();
+            Ok(())
+        }
+    }
+
+    /// Submits the "add reference" form: registers the new Registered Person
+    /// in `config.toml`, removes the entry the form was opened from out of
+    /// the income ledger (freeing its source transaction for
+    /// re-derivation), then re-runs the derivation pass so it — now matching
+    /// rule 1e (Registered Person) — lands in the spend ledger as a
+    /// reimbursement instead. Refreshes the Monthly Income totals and the
+    /// current month's drill-down in place so the change is visible without
+    /// leaving the screen. A blank Name field cancels rather than saving.
+    pub fn commit_person_form(&mut self) -> anyhow::Result<()> {
+        let Some(form) = self.person_form.take() else {
+            return Ok(());
+        };
+        let name = form.name.trim();
+        if name.is_empty() {
+            return Ok(());
+        }
+        let label = form.label.trim();
+        let full_name = form.full_name.trim();
+        self.config.add_registered_person(RegisteredPersonRef {
+            name: name.to_string(),
+            label: (!label.is_empty()).then(|| label.to_string()),
+            full_name: (!full_name.is_empty()).then(|| full_name.to_string()),
+        });
+        self.config.save(&self.config_path)?;
+
+        self.db.delete_income_entry(form.income_entry_id)?;
+        derive::run_derivation(
+            &self.db,
+            &self.config.household_accounts,
+            &self.config.income_sources,
+            &self.config.registered_people,
+            &self.config.reimbursement_sources,
+        )?;
+
+        let month = self
+            .monthly_income
+            .get(self.selected_income_month)
+            .map(|m| m.month.clone());
+        self.monthly_income = self.db.monthly_income_totals()?;
+        if let Some(month) = month {
+            if let Some(idx) = self.monthly_income.iter().position(|m| m.month == month) {
+                self.selected_income_month = idx;
+            }
+            self.income_month_entries = self.db.income_entries_for_month(&month)?;
+        } else {
+            self.income_month_entries = Vec::new();
+        }
+        let len = self.income_month_entries.len();
+        if self.selected_income_entry >= len {
+            self.selected_income_entry = len.saturating_sub(1);
+        }
+        Ok(())
     }
 
     /// Opens the Monthly Transfers audit screen: queries the persisted
@@ -288,8 +470,8 @@ impl App {
             &self.household_accounts,
         );
 
-        let counterpart = counterpart_transaction_id
-            .and_then(|id| self.db.get_transaction(id).ok().flatten());
+        let counterpart =
+            counterpart_transaction_id.and_then(|id| self.db.get_transaction(id).ok().flatten());
         let counterpart_label = resolve_transfer_leg_name(
             counterpart_account_id,
             counterpart_sort,
@@ -592,6 +774,21 @@ impl App {
     }
 }
 
+/// Guesses a Registered Person `name` value from a transaction description,
+/// for pre-filling the "add reference" form's Name field: the first two
+/// whitespace-separated words (e.g. `"S Barritt"` out of `"S Barritt FARTER
+/// BGC"`) — matches `derive::matches_person_name`'s own `"<initial>
+/// <Surname>"`/`"<Surname> <initial>"` variants directly, since a
+/// two-word truncated form is itself a valid match target. Just a starting
+/// point — the user can edit it before submitting.
+fn guess_person_name(description: &str) -> String {
+    description
+        .split_whitespace()
+        .take(2)
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 /// Resolves one side (out or in) of a transfer entry to a display name: a
 /// tracked account first (e.g. "Adventure Fund", when `account_id` is
 /// resolved — always true once that side's transaction is known), then a
@@ -682,7 +879,13 @@ mod tests {
         let household = vec![household_ref("609934", "99998888", "Joint Annual Expense")];
 
         assert_eq!(
-            resolve_transfer_leg_name(None, Some("609934"), Some("99998888"), &accounts, &household),
+            resolve_transfer_leg_name(
+                None,
+                Some("609934"),
+                Some("99998888"),
+                &accounts,
+                &household
+            ),
             "Joint Annual Expense"
         );
     }
@@ -706,7 +909,13 @@ mod tests {
         let household = vec![household_ref("111111", "22222222", "Unrelated")];
 
         assert_eq!(
-            resolve_transfer_leg_name(None, Some("609934"), Some("99998888"), &accounts, &household),
+            resolve_transfer_leg_name(
+                None,
+                Some("609934"),
+                Some("99998888"),
+                &accounts,
+                &household
+            ),
             "609934 99998888"
         );
     }

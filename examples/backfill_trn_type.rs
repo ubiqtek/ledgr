@@ -13,8 +13,12 @@ use rusqlite::{params, Connection};
 use std::path::Path;
 
 fn main() {
-    let db_path = std::env::args().nth(1).expect("usage: backfill_trn_type <db-path> <processed-dir>");
-    let processed_dir = std::env::args().nth(2).expect("usage: backfill_trn_type <db-path> <processed-dir>");
+    let db_path = std::env::args()
+        .nth(1)
+        .expect("usage: backfill_trn_type <db-path> <processed-dir>");
+    let processed_dir = std::env::args()
+        .nth(2)
+        .expect("usage: backfill_trn_type <db-path> <processed-dir>");
 
     let conn = Connection::open(&db_path).expect("open db");
 
@@ -46,7 +50,9 @@ fn backfill_one_file(conn: &Connection, path: &Path) -> usize {
 
     let mut updated = 0;
     for wrapper in banking.statement_responses() {
-        let Some(stmt) = wrapper.response() else { continue };
+        let Some(stmt) = wrapper.response() else {
+            continue;
+        };
         let bank_account = stmt.bank_account();
         let acct_id = bank_account.account_id().as_str();
         let (sort_code, account_number) = if acct_id.len() == 14 {
@@ -67,7 +73,9 @@ fn backfill_one_file(conn: &Connection, path: &Path) -> usize {
             continue;
         };
 
-        let Some(txn_list) = stmt.transaction_list() else { continue };
+        let Some(txn_list) = stmt.transaction_list() else {
+            continue;
+        };
         for txn in txn_list.transactions() {
             let external_id = txn.fit_id().as_str().to_string();
             let trn_type = txn.transaction_type().to_string();

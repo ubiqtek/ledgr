@@ -64,13 +64,27 @@ const SELF_REFERENCE_MATCH_CONFIDENCE: f64 = 0.6;
 /// members automatically (see the design doc's "Account registry" section).
 /// An entry with a `name` set is also matched against person-to-person
 /// `NAME` fields that carry no account digits at all (see
-/// `matches_household_member_name`).
+/// `matches_person_name`). `income_sources` and `registered_people` are
+/// `config.toml`'s Income Source / Registered Person lists (see the
+/// ubiquitous language doc).
 pub fn run_derivation(
     db: &Db,
     extra_household_accounts: &[HouseholdAccountRef],
+    income_sources: &[crate::config::IncomeSourceRef],
+    registered_people: &[crate::config::RegisteredPersonRef],
+    reimbursement_sources: &[crate::config::ReimbursementSourceRef],
 ) -> anyhow::Result<DerivationSummary> {
     let accounts = db.list_accounts()?;
     let (household, household_names) = build_household(&accounts, extra_household_accounts);
+    let income_sources: Vec<(&str, crate::config::IncomeSourceKind)> = income_sources
+        .iter()
+        .map(|s| (s.name.as_str(), s.kind))
+        .collect();
+    let registered_people: Vec<&str> = registered_people.iter().map(|p| p.name.as_str()).collect();
+    let reimbursement_sources: Vec<&str> = reimbursement_sources
+        .iter()
+        .map(|s| s.name.as_str())
+        .collect();
 
     let mut summary = DerivationSummary::default();
     // Transaction ids given a `transfer_entries` row *this run*, via any
@@ -98,6 +112,9 @@ pub fn run_derivation(
             txn.amount_minor,
             &household,
             &household_names,
+            &income_sources,
+            &registered_people,
+            &reimbursement_sources,
         ) {
             Classification::InternalTransfer {
                 counterpart_sort,
@@ -206,8 +223,8 @@ pub fn run_derivation(
                     // decoded as *its* counterpart) decides which tier
                     // actually fired.
                     if let Some(counterpart_account_id) = counterpart_account_id {
-                        if let Some((row_id, known_transaction_id, predicted)) =
-                            db.find_open_transfer_candidate(
+                        if let Some((row_id, known_transaction_id, predicted)) = db
+                            .find_open_transfer_candidate(
                                 role,
                                 counterpart_account_id,
                                 leg.amount_minor,
@@ -225,7 +242,12 @@ pub fn run_derivation(
                                 None
                             };
                             if let Some((pair_method, pair_confidence)) = pair_method {
-                                db.complete_transfer_leg(row_id, &leg, pair_method, pair_confidence)?;
+                                db.complete_transfer_leg(
+                                    row_id,
+                                    &leg,
+                                    pair_method,
+                                    pair_confidence,
+                                )?;
                                 summary.transfers_paired += 1;
                                 if !this_run_ids.contains(&known_transaction_id) {
                                     summary.transfers_backfilled += 1;
@@ -351,18 +373,28 @@ pub fn run_derivation(
         // `predicted_account_id`: `open`'s own decoded guess for its
         // missing side — used as the search key, exactly like a fresh
         // leg's own decode is in the inline tiers above.
-        let (known_role, known_account_id, predicted_account_id) = if open.out_transaction_id.is_some() {
-            (TransferLegRole::Out, open.out_account_id, open.in_account_id)
-        } else {
-            (TransferLegRole::In, open.in_account_id, open.out_account_id)
-        };
+        let (known_role, known_account_id, predicted_account_id) =
+            if open.out_transaction_id.is_some() {
+                (
+                    TransferLegRole::Out,
+                    open.out_account_id,
+                    open.in_account_id,
+                )
+            } else {
+                (TransferLegRole::In, open.in_account_id, open.out_account_id)
+            };
         let (Some(known_account_id), Some(predicted_account_id)) =
             (known_account_id, predicted_account_id)
         else {
             continue;
         };
         let Some((other_id, other_known_transaction_id, other_predicted)) = db
-            .find_open_transfer_candidate(known_role, predicted_account_id, open.amount_minor, &open.occurred_on)?
+            .find_open_transfer_candidate(
+                known_role,
+                predicted_account_id,
+                open.amount_minor,
+                &open.occurred_on,
+            )?
         else {
             continue;
         };
@@ -594,12 +626,16 @@ enum Classification {
 /// of type — transfer pairing/reconciliation (rules 1-2) is what keeps
 /// internal movement out of the ledger, not a pre-filter by account type
 /// (see ADR 0006).
+#[allow(clippy::too_many_arguments)]
 fn classify(
     description: &str,
     trn_type: Option<&str>,
     amount_minor: i64,
     household: &HashSet<(String, String)>,
     household_names: &[(&str, &str, &str)],
+    income_sources: &[(&str, crate::config::IncomeSourceKind)],
+    registered_people: &[&str],
+    reimbursement_sources: &[&str],
 ) -> Classification {
     // Rules 1-2: NAME starts "<sort code> <account no>".
     if let Some((sort, account, _rest)) = parse_account_prefix(description) {
@@ -642,11 +678,68 @@ fn classify(
     // "reimbursement"/"person_payment" — those rules exist for genuine
     // external people, not family.
     for (name, sort, account) in household_names {
-        if matches_household_member_name(description, name) {
+        if matches_person_name(description, name) {
             return Classification::InternalTransfer {
                 counterpart_sort: sort.to_string(),
                 counterpart_account: account.to_string(),
             };
+        }
+    }
+
+    // Rule 1d: Income Source — a registered external payer (employer, tax
+    // authority) named at the very start of the description
+    // (`config.toml`'s `income_sources`). Checked before Registered Person/
+    // the generic suffix rules so a known payer always wins over a lower-
+    // confidence guess. Inbound only — see the Income Source ubiquitous
+    // language entry.
+    if amount_minor > 0 {
+        let upper = description.to_ascii_uppercase();
+        for (name, kind) in income_sources {
+            if starts_with_word(&upper, &name.to_ascii_uppercase()) {
+                return Classification::Income {
+                    counterparty: Some((*name).to_string()),
+                    rule_name: kind.rule_name(),
+                    confidence: kind.confidence(),
+                };
+            }
+        }
+    }
+
+    // Rule 1e: Registered Person — an external individual (family/friend,
+    // `config.toml`'s `registered_people`) recognised by name (see
+    // `matches_person_name`). Unlike a household member (rule 1c), this is
+    // NOT an internal transfer — the person is outside the household — but
+    // an unexplained inbound payment from them defaults to a spend-ledger
+    // **Reimbursement** rather than Income, since settling up a shared cost
+    // is more common than a windfall gift; see the Registered Person
+    // ubiquitous language entry.
+    if amount_minor > 0 {
+        for name in registered_people {
+            if matches_person_name(description, name) {
+                return Classification::Refund {
+                    counterparty: Some((*name).to_string()),
+                    rule_name: "person_reimbursement",
+                };
+            }
+        }
+    }
+
+    // Rule 1f: a registered external institution/scheme (e.g. a health cash
+    // plan like SimplyHealth, `config.toml`'s `reimbursement_sources`)
+    // named at the very start of the description. Not a person, so plain
+    // prefix matching (like Income Source) rather than `matches_person_name`.
+    // A claim payout reverses spend already in the spend ledger (the
+    // original medical/dental bill), so this is a Reimbursement, never
+    // income — same reasoning as cashback.
+    if amount_minor > 0 {
+        let upper = description.to_ascii_uppercase();
+        for name in reimbursement_sources {
+            if starts_with_word(&upper, &name.to_ascii_uppercase()) {
+                return Classification::Refund {
+                    counterparty: Some((*name).to_string()),
+                    rule_name: "claim_reimbursement",
+                };
+            }
         }
     }
 
@@ -699,11 +792,15 @@ fn classify(
         // OutOfScope. Only reached once rules 1-2c above have ruled out an
         // internal (household) transfer, so this is real money entering the
         // household — matches the Income Ledger's definition exactly.
+        // Confidence deliberately lower than the specific rules above
+        // (Income Source, Registered Person): once those absorb the
+        // explicable cases, whatever lands here genuinely needs a human
+        // look — see the income-vs-refund classification proposal.
         Some("BGC") if amount_minor > 0 => {
             return Classification::Income {
                 counterparty: None,
                 rule_name: "bank_giro_credit",
-                confidence: 0.75,
+                confidence: 0.5,
             };
         }
         _ => {}
@@ -735,13 +832,16 @@ fn classify(
         },
         // "Other" is the Barclaycard PDF export's own type tag (Title
         // case — distinct from the generic OFX "OTHER" fallback used
-        // elsewhere), seen so far only as Barclaycard Cashback: real money
-        // in, not a transfer counterpart like "Payment received" is. See
-        // doc/kb/barclaycard/pdf-export-structure.md.
-        Some("Other") if amount_minor > 0 => Classification::Income {
+        // elsewhere), seen so far only as Barclaycard Cashback: a rebate on
+        // card spend that's already in the spend ledger, so it reverses
+        // spend rather than being new money — a **Reimbursement**, not
+        // income (see the income-vs-refund classification proposal, and
+        // the Reimbursement ubiquitous language entry). Not a transfer
+        // counterpart like "Payment received" is.
+        // See doc/kb/barclaycard/pdf-export-structure.md.
+        Some("Other") if amount_minor > 0 => Classification::Refund {
             counterparty: None,
-            rule_name: "credit_card_cashback",
-            confidence: 0.9,
+            rule_name: "cashback",
         },
         // Any other DIRECTDEP (unexpected sign) and CASH (withdrawal) stay
         // out of scope — see the design doc's rule 7.
@@ -874,19 +974,29 @@ fn known_card_network_prefix(pan_prefix: &str) -> bool {
     }
 }
 
-/// Whether `description` names a registered household member, for a
-/// person-to-person `NAME` with no account digits at all. Barclays shows
-/// these in one of two forms depending on payment direction, both derived
-/// from the same registered `full_name` (e.g. `"ROMINA SCARAMAGLI"`):
+/// Whether `description` names a registered person — a household member or
+/// a **Registered Person** (e.g. `"ROMINA SCARAMAGLI"`) — for a
+/// person-to-person `NAME`/description with no account digits at all.
+/// Barclays' Faster Payments (`FT`) shows these in one of two forms
+/// depending on payment direction, both derived from the same registered
+/// `full_name`:
 /// - the full name, when you're paying them (your saved payee nickname),
 ///   e.g. `"ROMINA SCARAMAGLI SHORTS FT"`;
 /// - `"<Surname> <first initial>"`, when they're paying you (the sender name
 ///   Faster Payments echoes back), e.g. `"SCARAMAGLI R AMAZON FT"`.
 ///
+/// A Bank Giro Credit (`BGC`) sender name is chosen by the *originating*
+/// bank, not Barclays, and real data shows a third, different order for the
+/// same "they're paying you" case: `"<first initial> <Surname>"`, e.g.
+/// `"F CRICHTON NORWAY CAR BGC"` — the opposite order from Faster Payments'
+/// echoed name. All three forms are checked.
+///
 /// Matches only at the very start of `description`, on a whole-word
 /// boundary, so a coincidentally similar name (e.g. `"ARIA SCARAMAGLI-RE
-/// CHASE BGC"`, a different, unrelated person) isn't mistaken for a match.
-pub fn matches_household_member_name(description: &str, full_name: &str) -> bool {
+/// CHASE BGC"` against the full name `"ARIA SCARAMAGLI"` alone, missing the
+/// `-RE`) isn't mistaken for a match — register the name exactly as it
+/// appears in the real description when the two differ.
+pub fn matches_person_name(description: &str, full_name: &str) -> bool {
     let description = description.to_ascii_uppercase();
     let full_name = full_name.to_ascii_uppercase();
     let words: Vec<&str> = full_name.split_whitespace().collect();
@@ -897,7 +1007,10 @@ pub fn matches_household_member_name(description: &str, full_name: &str) -> bool
         return false;
     };
     let surname_initial = format!("{last} {initial}");
-    starts_with_word(&description, &full_name) || starts_with_word(&description, &surname_initial)
+    let initial_surname = format!("{initial} {last}");
+    starts_with_word(&description, &full_name)
+        || starts_with_word(&description, &surname_initial)
+        || starts_with_word(&description, &initial_surname)
 }
 
 /// Whether `haystack` starts with `prefix` followed by a word boundary
@@ -956,6 +1069,9 @@ mod tests {
             -8900,
             &household,
             &[],
+            &[],
+            &[],
+            &[],
         );
         assert_eq!(
             result,
@@ -977,6 +1093,9 @@ mod tests {
             700,
             &household,
             &[("ROMINA SCARAMAGLI", "206325", "40531189")],
+            &[],
+            &[],
+            &[],
         );
         assert_eq!(
             result,
@@ -997,6 +1116,9 @@ mod tests {
             -11000,
             &household,
             &[("ROMINA SCARAMAGLI", "206325", "40531189")],
+            &[],
+            &[],
+            &[],
         );
         assert_eq!(
             result,
@@ -1018,6 +1140,9 @@ mod tests {
             2600,
             &household,
             &[("ROMINA SCARAMAGLI", "206325", "40531189")],
+            &[],
+            &[],
+            &[],
         );
         assert_ne!(
             result,
@@ -1039,6 +1164,9 @@ mod tests {
             Some("REPEATPMT"),
             -20000,
             &household,
+            &[],
+            &[],
+            &[],
             &[],
         );
         assert_eq!(
@@ -1065,6 +1193,9 @@ mod tests {
             341500,
             &household,
             &[],
+            &[],
+            &[],
+            &[],
         );
         assert_eq!(
             result,
@@ -1083,6 +1214,9 @@ mod tests {
             Some("OTHER"),
             -75000,
             &household,
+            &[],
+            &[],
+            &[],
             &[],
         );
         assert_eq!(
@@ -1104,6 +1238,9 @@ mod tests {
             -4550,
             &household,
             &[],
+            &[],
+            &[],
+            &[],
         );
         assert_eq!(
             result,
@@ -1124,6 +1261,9 @@ mod tests {
             4000,
             &household,
             &[],
+            &[],
+            &[],
+            &[],
         );
         assert_eq!(
             result,
@@ -1142,6 +1282,9 @@ mod tests {
             Some("OTHER"),
             -2500,
             &household,
+            &[],
+            &[],
+            &[],
             &[],
         );
         assert_eq!(
@@ -1163,6 +1306,9 @@ mod tests {
             3000,
             &household,
             &[],
+            &[],
+            &[],
+            &[],
         );
         assert_eq!(
             result,
@@ -1177,7 +1323,16 @@ mod tests {
     #[test]
     fn classifies_a_direct_debit_as_spend() {
         let household = HashSet::new();
-        let result = classify("SPOTIFY", Some("DIRECTDEBIT"), -999, &household, &[]);
+        let result = classify(
+            "SPOTIFY",
+            Some("DIRECTDEBIT"),
+            -999,
+            &household,
+            &[],
+            &[],
+            &[],
+            &[],
+        );
         assert_eq!(
             result,
             Classification::Spend {
@@ -1191,7 +1346,16 @@ mod tests {
     #[test]
     fn classifies_a_direct_deposit_as_income() {
         let household = HashSet::new();
-        let result = classify("SALARY", Some("DIRECTDEP"), 150000, &household, &[]);
+        let result = classify(
+            "SALARY",
+            Some("DIRECTDEP"),
+            150000,
+            &household,
+            &[],
+            &[],
+            &[],
+            &[],
+        );
         assert_eq!(
             result,
             Classification::Income {
@@ -1203,23 +1367,37 @@ mod tests {
     }
 
     #[test]
-    fn classifies_a_credit_card_cashback_as_income() {
+    fn classifies_a_credit_card_cashback_as_a_reimbursement() {
+        // Cashback reverses spend that's already in the spend ledger, so it
+        // is a Reimbursement, never Income — see the income-vs-refund
+        // classification proposal.
         let household = HashSet::new();
-        let result = classify("CASHBACK", Some("Other"), 500, &household, &[]);
+        let result = classify(
+            "CASHBACK",
+            Some("Other"),
+            500,
+            &household,
+            &[],
+            &[],
+            &[],
+            &[],
+        );
         assert_eq!(
             result,
-            Classification::Income {
+            Classification::Refund {
                 counterparty: None,
-                rule_name: "credit_card_cashback",
-                confidence: 0.9,
+                rule_name: "cashback",
             }
         );
     }
 
     #[test]
-    fn classifies_a_bank_giro_credit_as_income() {
+    fn classifies_an_unregistered_bank_giro_credit_as_low_confidence_income() {
         // Real Barclays OFX exports carry no TRNTYPE at all for salary BGC
-        // credits, so this can't rely on the DIRECTDEP rule.
+        // credits, so this can't rely on the DIRECTDEP rule. With no
+        // matching Income Source configured, this is the generic residual
+        // rule — deliberately low confidence since it's not actually
+        // understood which of salary/gift/refund this is.
         let household = HashSet::new();
         let result = classify(
             "AZIMO LTD Pleo Technologies BGC",
@@ -1227,13 +1405,89 @@ mod tests {
             597912,
             &household,
             &[],
+            &[],
+            &[],
+            &[],
         );
         assert_eq!(
             result,
             Classification::Income {
                 counterparty: None,
                 rule_name: "bank_giro_credit",
-                confidence: 0.75,
+                confidence: 0.5,
+            }
+        );
+    }
+
+    #[test]
+    fn classifies_a_registered_income_sources_bgc_credit_as_high_confidence_income() {
+        let household = HashSet::new();
+        let income_sources = [("AZIMO LTD", crate::config::IncomeSourceKind::Salary)];
+        let result = classify(
+            "AZIMO LTD Pleo Technologies BGC",
+            None,
+            597912,
+            &household,
+            &[],
+            &income_sources,
+            &[],
+            &[],
+        );
+        assert_eq!(
+            result,
+            Classification::Income {
+                counterparty: Some("AZIMO LTD".into()),
+                rule_name: "employment_income",
+                confidence: 0.95,
+            }
+        );
+    }
+
+    #[test]
+    fn classifies_a_tax_authority_income_source_as_income() {
+        let household = HashSet::new();
+        let income_sources = [("HMRC PAYE", crate::config::IncomeSourceKind::TaxAuthority)];
+        let result = classify(
+            "HMRC PAYE TNY10922037710501 BGC",
+            None,
+            39515,
+            &household,
+            &[],
+            &income_sources,
+            &[],
+            &[],
+        );
+        assert_eq!(
+            result,
+            Classification::Income {
+                counterparty: Some("HMRC PAYE".into()),
+                rule_name: "tax_refund",
+                confidence: 0.8,
+            }
+        );
+    }
+
+    #[test]
+    fn classifies_an_unexplained_payment_from_a_registered_person_as_a_reimbursement() {
+        let household = HashSet::new();
+        let registered_people = ["Fraser Crichton"];
+        // Bank Giro Credit sender names use "<initial> <Surname>" order,
+        // the opposite of Faster Payments' echoed "<Surname> <initial>".
+        let result = classify(
+            "F Crichton NORWAY CAR BGC",
+            None,
+            12521,
+            &household,
+            &[],
+            &[],
+            &registered_people,
+            &[],
+        );
+        assert_eq!(
+            result,
+            Classification::Refund {
+                counterparty: Some("Fraser Crichton".into()),
+                rule_name: "person_reimbursement",
             }
         );
     }
@@ -1251,6 +1505,9 @@ mod tests {
             1000,
             &household,
             &household_names,
+            &[],
+            &[],
+            &[],
         );
         assert_eq!(
             result,
@@ -1264,7 +1521,16 @@ mod tests {
     #[test]
     fn classifies_a_cash_withdrawal_as_out_of_scope() {
         let household = HashSet::new();
-        let result = classify("CASH WITHDRAWAL", Some("CASH"), -5000, &household, &[]);
+        let result = classify(
+            "CASH WITHDRAWAL",
+            Some("CASH"),
+            -5000,
+            &household,
+            &[],
+            &[],
+            &[],
+            &[],
+        );
         assert_eq!(result, Classification::OutOfScope);
     }
 
@@ -1295,7 +1561,7 @@ mod tests {
         })
         .expect("insert transaction");
 
-        let summary = run_derivation(&db, &[]).expect("derive");
+        let summary = run_derivation(&db, &[], &[], &[], &[]).expect("derive");
         assert_eq!(
             summary,
             DerivationSummary {
@@ -1338,8 +1604,8 @@ mod tests {
         })
         .expect("insert transaction");
 
-        run_derivation(&db, &[]).expect("first derive");
-        let second = run_derivation(&db, &[]).expect("second derive");
+        run_derivation(&db, &[], &[], &[], &[]).expect("first derive");
+        let second = run_derivation(&db, &[], &[], &[], &[]).expect("second derive");
         assert_eq!(
             second.spend_entries_created, 0,
             "must not double-derive an already-linked transaction"
@@ -1373,14 +1639,12 @@ mod tests {
         })
         .expect("insert transaction");
 
-        let summary = run_derivation(&db, &[]).expect("derive");
+        let summary = run_derivation(&db, &[], &[], &[], &[]).expect("derive");
         assert_eq!(summary.income_entries_created, 1);
         assert_eq!(summary.spend_entries_created, 0);
         assert_eq!(summary.out_of_scope, 0);
 
-        let month_rows = db
-            .income_entries_for_month("2026-07")
-            .expect("query month");
+        let month_rows = db.income_entries_for_month("2026-07").expect("query month");
         assert_eq!(month_rows.len(), 1);
         assert_eq!(month_rows[0].entry.amount_minor, 150000);
         assert_eq!(month_rows[0].account_id, account_id);
@@ -1390,7 +1654,7 @@ mod tests {
         assert_eq!(monthly[0].month, "2026-07");
         assert_eq!(monthly[0].income_minor, 150000);
 
-        let second = run_derivation(&db, &[]).expect("second derive");
+        let second = run_derivation(&db, &[], &[], &[], &[]).expect("second derive");
         assert_eq!(
             second.income_entries_created, 0,
             "must not double-derive an already-linked transaction"
@@ -1444,7 +1708,7 @@ mod tests {
         })
         .expect("insert refund");
 
-        run_derivation(&db, &[]).expect("derive");
+        run_derivation(&db, &[], &[], &[], &[]).expect("derive");
 
         let entries = db.list_spend_entries().expect("list spend entries");
         let charge = entries
@@ -1510,7 +1774,7 @@ mod tests {
         })
         .expect("insert spending-side transaction");
 
-        let summary = run_derivation(&db, &[]).expect("derive");
+        let summary = run_derivation(&db, &[], &[], &[], &[]).expect("derive");
         assert_eq!(
             summary.spend_entries_created, 0,
             "internal transfers must not become spend"
@@ -1573,7 +1837,7 @@ mod tests {
             label: Some("Partner".into()),
             name: None,
         };
-        let summary = run_derivation(&db, &[partner]).expect("derive");
+        let summary = run_derivation(&db, &[partner], &[], &[], &[]).expect("derive");
         assert_eq!(summary.spend_entries_created, 0);
         assert_eq!(summary.transfers_detected, 1);
     }
@@ -1586,6 +1850,9 @@ mod tests {
             Some("OTHER"),
             -29581,
             &household,
+            &[],
+            &[],
+            &[],
             &[],
         );
         assert_eq!(result, Classification::CardPayment);
@@ -1600,6 +1867,9 @@ mod tests {
             29581,
             &household,
             &[],
+            &[],
+            &[],
+            &[],
         );
         assert_ne!(result, Classification::CardPayment);
     }
@@ -1607,7 +1877,16 @@ mod tests {
     #[test]
     fn does_not_treat_a_short_trailing_digit_as_a_card_payment() {
         let household = HashSet::new();
-        let result = classify("COUNCIL TAX REF 4", Some("OTHER"), -15000, &household, &[]);
+        let result = classify(
+            "COUNCIL TAX REF 4",
+            Some("OTHER"),
+            -15000,
+            &household,
+            &[],
+            &[],
+            &[],
+            &[],
+        );
         assert_ne!(
             result,
             Classification::CardPayment,
@@ -1626,6 +1905,9 @@ mod tests {
             -15000,
             &household,
             &[],
+            &[],
+            &[],
+            &[],
         );
         assert_ne!(
             result,
@@ -1642,6 +1924,9 @@ mod tests {
             Some("OTHER"),
             -400,
             &household,
+            &[],
+            &[],
+            &[],
             &[],
         );
         assert_ne!(
@@ -1702,7 +1987,7 @@ mod tests {
         })
         .expect("insert card-side payment");
 
-        let summary = run_derivation(&db, &[]).expect("derive");
+        let summary = run_derivation(&db, &[], &[], &[], &[]).expect("derive");
         assert_eq!(
             summary.card_payments_matched, 1,
             "the two legs should be matched by date+amount"
@@ -1727,7 +2012,8 @@ mod tests {
             Some(TransferPairMethod::CreditCardPaymentMatch)
         );
 
-        let second = run_derivation(&db, &[]).expect("second derive must be idempotent");
+        let second =
+            run_derivation(&db, &[], &[], &[], &[]).expect("second derive must be idempotent");
         assert_eq!(
             second.card_payments_matched, 0,
             "an already-paired card payment must not be rematched on a later run"
@@ -1769,7 +2055,7 @@ mod tests {
         })
         .expect("insert bank-side payment");
 
-        let summary = run_derivation(&db, &[]).expect("derive");
+        let summary = run_derivation(&db, &[], &[], &[], &[]).expect("derive");
         assert_eq!(summary.card_payments_matched, 0);
         assert_eq!(summary.card_payments_unmatched, 1);
         assert_eq!(
@@ -1812,7 +2098,7 @@ mod tests {
         })
         .expect("insert card-side payment");
 
-        let second = run_derivation(&db, &[]).expect("second derive");
+        let second = run_derivation(&db, &[], &[], &[], &[]).expect("second derive");
         assert_eq!(
             second.card_payments_matched, 1,
             "the previously-unmatched leg should be retried and paired now"
@@ -1898,7 +2184,7 @@ mod tests {
             .expect("insert receiving leg")
             .expect("receiving leg inserted");
 
-        let summary = run_derivation(&db, &[]).expect("derive");
+        let summary = run_derivation(&db, &[], &[], &[], &[]).expect("derive");
         assert_eq!(summary.spend_entries_created, 0);
         assert_eq!(summary.transfers_detected, 2);
         assert_eq!(summary.transfers_paired, 1);
@@ -1985,7 +2271,7 @@ mod tests {
             .expect("insert receiving leg")
             .expect("receiving leg inserted");
 
-        let summary = run_derivation(&db, &[]).expect("derive");
+        let summary = run_derivation(&db, &[], &[], &[], &[]).expect("derive");
         assert_eq!(summary.spend_entries_created, 0);
         assert_eq!(summary.transfers_detected, 2);
         assert_eq!(summary.transfers_paired, 1);
@@ -2106,7 +2392,7 @@ mod tests {
         // Neither transaction is "pending" any more (both already have a
         // transfer_entries row), so this run detects nothing new — the
         // pairing must still happen by re-scanning persisted unpaired rows.
-        let summary = run_derivation(&db, &[]).expect("derive");
+        let summary = run_derivation(&db, &[], &[], &[], &[]).expect("derive");
         assert_eq!(summary.transfers_detected, 0);
         assert_eq!(summary.transfers_paired, 1);
         assert_eq!(
@@ -2166,7 +2452,7 @@ mod tests {
             .expect("origin leg inserted");
 
         // First run: only the origin leg exists — recorded unpaired.
-        let first = run_derivation(&db, &[]).expect("first derive");
+        let first = run_derivation(&db, &[], &[], &[], &[]).expect("first derive");
         assert_eq!(first.transfers_detected, 1);
         assert_eq!(first.transfers_paired, 0);
         assert!(db
@@ -2191,7 +2477,7 @@ mod tests {
             .expect("insert receiving leg")
             .expect("receiving leg inserted");
 
-        let second = run_derivation(&db, &[]).expect("second derive");
+        let second = run_derivation(&db, &[], &[], &[], &[]).expect("second derive");
         assert_eq!(second.transfers_detected, 1, "only the new leg is pending");
         assert_eq!(second.transfers_paired, 1);
         assert_eq!(

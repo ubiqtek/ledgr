@@ -1,0 +1,111 @@
+warning: function `last4` is never used
+   --> src/main.rs:261:4
+    |
+261 | fn last4(value: &Option<String>) -> String {
+    |    ^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: function `category_totals` is never used
+  --> src/analysis.rs:16:8
+   |
+16 | pub fn category_totals(db: &Db, account_id: Id) -> rusqlite::Result<Vec<(Option<Id>, i64)>> {
+   |        ^^^^^^^^^^^^^^^
+
+warning: associated items `open_in_memory` and `conn_mut` are never used
+   --> src/db/mod.rs:31:12
+    |
+ 23 | impl Db {
+    | ------- associated items in this implementation
+...
+ 31 |     pub fn open_in_memory() -> rusqlite::Result<Self> {
+    |            ^^^^^^^^^^^^^^
+...
+443 |     pub fn conn_mut(&mut self) -> &mut Connection {
+    |            ^^^^^^^^
+
+warning: method `get_account` is never used
+  --> src/db/accounts.rs:50:12
+   |
+ 5 | impl Db {
+   | ------- method in this implementation
+...
+50 |     pub fn get_account(&self, id: Id) -> rusqlite::Result<Option<Account>> {
+   |            ^^^^^^^^^^^
+
+warning: method `link_card_number` is never used
+  --> src/db/cards.rs:82:12
+   |
+14 | impl Db {
+   | ------- method in this implementation
+...
+82 |     pub fn link_card_number(&self, account_id: Id, last4: &str) -> rusqlite::Result<()> {
+   |            ^^^^^^^^^^^^^^^^
+
+warning: methods `list_spend_entries` and `get_transfer_counterpart_transaction_id` are never used
+   --> src/db/spend.rs:104:12
+    |
+ 16 | impl Db {
+    | ------- methods in this implementation
+...
+104 |     pub fn list_spend_entries(&self) -> rusqlite::Result<Vec<SpendEntry>> {
+    |            ^^^^^^^^^^^^^^^^^^
+...
+576 |     pub fn get_transfer_counterpart_transaction_id(
+    |            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: field `balance_as_of` is never read
+  --> src/db/status.rs:19:9
+   |
+15 | pub struct AccountStatus {
+   |            ------------- field in this struct
+...
+19 |     pub balance_as_of: Option<String>,
+   |         ^^^^^^^^^^^^^
+   |
+   = note: `AccountStatus` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+
+warning: method `name` is never used
+  --> src/import/mod.rs:33:8
+   |
+31 | pub trait ImportFileParser {
+   |           ---------------- method in this trait
+32 |     /// Human-readable name, e.g. `"Generic CSV"`.
+33 |     fn name(&self) -> &'static str;
+   |        ^^^^
+
+warning: struct `Category` is never constructed
+  --> src/model.rs:84:12
+   |
+84 | pub struct Category {
+   |            ^^^^^^^^
+
+warning: fields `id`, `pair_method`, and `pair_confidence` are never read
+   --> src/model.rs:323:9
+    |
+322 | pub struct TransferEntry {
+    |            ------------- fields in this struct
+323 |     pub id: Id,
+    |         ^^
+...
+345 |     pub pair_method: Option<TransferPairMethod>,
+    |         ^^^^^^^^^^^
+346 |     pub pair_confidence: Option<f64>,
+    |         ^^^^^^^^^^^^^^^
+    |
+    = note: `TransferEntry` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+
+warning: field `in_transaction_id` is never read
+   --> src/model.rs:363:9
+    |
+355 | pub struct OpenTransferEntry {
+    |            ----------------- field in this struct
+...
+363 |     pub in_transaction_id: Option<Id>,
+    |         ^^^^^^^^^^^^^^^^^
+    |
+    = note: `OpenTransferEntry` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+
+warning: `ledgr` (bin "ledgr") generated 11 warnings
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.42s
+     Running `target/debug/ledgr`

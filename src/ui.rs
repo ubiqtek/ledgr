@@ -32,6 +32,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         Screen::MonthlyTransfers => draw_monthly_transfers(frame, app, chunks[0]),
         Screen::TransferMonth => draw_transfer_month(frame, app, chunks[0]),
         Screen::Gap => draw_gap(frame, app, chunks[0]),
+        Screen::GapMonth => draw_gap_month(frame, app, chunks[0]),
         Screen::Help => draw_help(frame, chunks[0]),
     }
     draw_status(frame, app, chunks[1]);
@@ -48,8 +49,16 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         draw_income_detail(frame, transaction, frame.area());
     }
 
+    if let Some(month) = &app.gap_detail {
+        draw_gap_detail(frame, month, frame.area());
+    }
+
     if let Some(form) = &app.person_form {
         draw_person_form(frame, form, frame.area());
+    }
+
+    if let Some(form) = &app.spend_form {
+        draw_spend_form(frame, form, frame.area());
     }
 }
 
@@ -137,6 +146,31 @@ fn draw_income_detail(frame: &mut Frame, transaction: &crate::model::Transaction
     frame.render_widget(paragraph, popup);
 }
 
+/// Salary vs Other income breakdown for the selected month (`i` on
+/// `Screen::Gap`) — the two columns dropped from the month table itself to
+/// keep it narrow, still available on demand. Room to add further breakdown
+/// lines here later (e.g. spend by category) without touching the table.
+fn draw_gap_detail(frame: &mut Frame, month: &crate::model::MonthlyGap, area: Rect) {
+    let popup = centered_rect(50, 5, area);
+    frame.render_widget(Clear, popup);
+
+    let salary = crate::format_amount_minor(month.salary_minor, "GBP");
+    let other = crate::format_amount_minor(month.income_minor - month.salary_minor, "GBP");
+    let total = crate::format_amount_minor(month.income_minor, "GBP");
+    let lines = [
+        format!("Salary: {salary}"),
+        format!("Other:  {other}"),
+        format!("Total:  {total}"),
+    ];
+
+    let paragraph = Paragraph::new(lines.join("\n")).block(
+        Block::default()
+            .title(format!("{} income breakdown (any key to close)", month.month))
+            .borders(Borders::ALL),
+    );
+    frame.render_widget(paragraph, popup);
+}
+
 /// The "add reference" form (`a` on `Screen::IncomeMonth`) — three fields
 /// (Name, Label, Full name), the active one shown with a block cursor,
 /// matching `draw_note_editor`'s single-field style extended to several.
@@ -163,6 +197,41 @@ fn draw_person_form(frame: &mut Frame, form: &crate::app::PersonForm, area: Rect
     let paragraph = Paragraph::new(lines.join("\n")).block(
         Block::default()
             .title("Add reference (Tab/Enter next field, Enter on last to save, Esc cancel)")
+            .borders(Borders::ALL),
+    );
+    frame.render_widget(paragraph, popup);
+}
+
+/// The "record a spend from this transfer" form (`s` on
+/// `Screen::TransferMonth`) — Date and Amount pre-filled from the transfer,
+/// Description left for the user (e.g. "Holiday"). Same three-field
+/// Tab/Enter/Esc shape as `draw_person_form`.
+fn draw_spend_form(frame: &mut Frame, form: &crate::app::SpendFromTransferForm, area: Rect) {
+    use crate::app::SpendFormField;
+
+    let popup = centered_rect(60, 6, area);
+    frame.render_widget(Clear, popup);
+
+    let field_line = |label: &str, value: &str, active: bool| {
+        let cursor = if active { "\u{2588}" } else { "" };
+        format!("{label}: {value}{cursor}")
+    };
+    let lines = [
+        field_line("Date", &form.date, form.field == SpendFormField::Date),
+        field_line("Amount", &form.amount, form.field == SpendFormField::Amount),
+        field_line(
+            "Description",
+            &form.description,
+            form.field == SpendFormField::Description,
+        ),
+    ];
+
+    let paragraph = Paragraph::new(lines.join("\n")).block(
+        Block::default()
+            .title(format!(
+                "Record spend from {} (Tab/Enter next field, Enter on last to save, Esc cancel)",
+                form.household_label
+            ))
             .borders(Borders::ALL),
     );
     frame.render_widget(paragraph, popup);
@@ -626,11 +695,10 @@ fn draw_monthly_transfers(frame: &mut Frame, app: &mut App, area: Rect) {
     frame.render_stateful_widget(table, chunks[1], &mut app.monthly_transfers_table_state);
 }
 
-/// The Gap screen: a single-pane report, not a navigable list — no
-/// `TableState`/highlighting, since there's nothing to drill into. One
-/// bordered outer block containing two sections with no border between
-/// them: a YTD (calendar year to date) summary at the top, and the full
-/// month-by-month history below.
+/// The Gap screen: one bordered outer block containing two sections with no
+/// border between them — a YTD (calendar year to date) summary at the top,
+/// and the navigable month-by-month table below (`i` on a row pops up its
+/// Salary/Other income breakdown).
 fn draw_gap(frame: &mut Frame, app: &mut App, area: Rect) {
     let block = Block::default().title("Gap").borders(Borders::ALL);
     let inner = block.inner(area);
@@ -743,7 +811,10 @@ fn draw_gap_cash_summary(
     );
 }
 
-fn draw_gap_months(frame: &mut Frame, app: &App, area: Rect) {
+/// Month-by-month rows, navigable (`j`/`k`) and selectable — `i` on the
+/// selected row pops up its Salary/Other income breakdown
+/// (`draw_gap_detail`), which is why those two columns aren't shown here.
+fn draw_gap_months(frame: &mut Frame, app: &mut App, area: Rect) {
     if app.monthly_gap.is_empty() {
         frame.render_widget(
             Paragraph::new("No spend or income entries yet. Run `ledgr import` first."),
@@ -759,15 +830,20 @@ fn draw_gap_months(frame: &mut Frame, app: &App, area: Rect) {
             let income = crate::format_amount_minor(month.income_minor, "GBP");
             let spend = crate::format_amount_minor(month.spend_minor, "GBP");
             let gap = crate::format_amount_minor(month.gap_minor, "GBP");
-            let salary = crate::format_amount_minor(month.salary_minor, "GBP");
-            let other = crate::format_amount_minor(month.income_minor - month.salary_minor, "GBP");
+            let cash_start = crate::format_amount_minor(month.cash_start_minor, "GBP");
+            let cash_end = crate::format_amount_minor(month.cash_end_minor, "GBP");
+            let cash_movement =
+                crate::format_amount_minor(month.cash_end_minor - month.cash_start_minor, "GBP");
+            let untracked = crate::format_amount_minor(month.untracked_minor, "GBP");
             Row::new(vec![
                 Cell::from(month.month.clone()),
                 Cell::from(Line::from(income).alignment(Alignment::Right)),
                 Cell::from(Line::from(spend).alignment(Alignment::Right)),
                 Cell::from(Line::from(gap).alignment(Alignment::Right)),
-                Cell::from(Line::from(salary).alignment(Alignment::Right)),
-                Cell::from(Line::from(other).alignment(Alignment::Right)),
+                Cell::from(Line::from(cash_start).alignment(Alignment::Right)),
+                Cell::from(Line::from(cash_end).alignment(Alignment::Right)),
+                Cell::from(Line::from(cash_movement).alignment(Alignment::Right)),
+                Cell::from(Line::from(untracked).alignment(Alignment::Right)),
             ])
         })
         .collect::<Vec<_>>();
@@ -777,8 +853,10 @@ fn draw_gap_months(frame: &mut Frame, app: &App, area: Rect) {
         Cell::from(Line::from("Income").alignment(Alignment::Right)),
         Cell::from(Line::from("Spend").alignment(Alignment::Right)),
         Cell::from(Line::from("Gap").alignment(Alignment::Right)),
-        Cell::from(Line::from("Salary").alignment(Alignment::Right)),
-        Cell::from(Line::from("Other").alignment(Alignment::Right)),
+        Cell::from(Line::from("Cash Start").alignment(Alignment::Right)),
+        Cell::from(Line::from("Cash End").alignment(Alignment::Right)),
+        Cell::from(Line::from("Cash Movement").alignment(Alignment::Right)),
+        Cell::from(Line::from("Untracked").alignment(Alignment::Right)),
     ])
     .style(Style::default().add_modifier(Modifier::BOLD));
 
@@ -786,17 +864,119 @@ fn draw_gap_months(frame: &mut Frame, app: &App, area: Rect) {
         rows,
         [
             Constraint::Length(7),
+            Constraint::Length(12),
+            Constraint::Length(12),
+            Constraint::Length(12),
+            Constraint::Length(12),
+            Constraint::Length(12),
             Constraint::Length(13),
-            Constraint::Length(13),
-            Constraint::Length(13),
-            Constraint::Length(13),
-            Constraint::Length(13),
+            Constraint::Length(12),
         ],
     )
     .header(header)
-    .column_spacing(1);
+    .column_spacing(1)
+    .highlight_style(SELECTED_STYLE);
+
+    app.gap_table_state.select(Some(app.selected_gap_month));
+    frame.render_stateful_widget(table, area, &mut app.gap_table_state);
+}
+
+/// The selected month's cash position broken down per account (`Enter` on
+/// a `Screen::Gap` row) — one row per account with its start balance, end
+/// balance, and the movement between them, plus a Total row that should
+/// match the Gap screen's own Cash Start/Cash End/Cash Movement figures
+/// exactly (what makes this screen useful for verification, not just a
+/// curiosity). A report, not a navigable list — nothing to drill further
+/// into.
+fn draw_gap_month(frame: &mut Frame, app: &App, area: Rect) {
+    let month = app
+        .monthly_gap
+        .get(app.selected_gap_month)
+        .map(|m| m.month.as_str())
+        .unwrap_or("?");
+    let title = format!("Gap \u{2014} {month} \u{2014} cash by account");
+    let block = Block::default().title(title).borders(Borders::ALL);
+
+    if app.gap_month_balances.is_empty() {
+        frame.render_widget(
+            Paragraph::new("No cash accounts with a balance yet.").block(block),
+            area,
+        );
+        return;
+    }
+
+    let total_start: i64 = app
+        .gap_month_balances
+        .iter()
+        .filter_map(|(_, start, _)| *start)
+        .sum();
+    let total_end: i64 = app
+        .gap_month_balances
+        .iter()
+        .filter_map(|(_, _, end)| *end)
+        .sum();
+
+    let amount_or_dash = |balance: Option<i64>| match balance {
+        Some(minor) => crate::format_amount_minor(minor, "GBP"),
+        None => "\u{2014}".to_string(),
+    };
+
+    let mut rows: Vec<Row> = app
+        .gap_month_balances
+        .iter()
+        .map(|(name, start, end)| {
+            let movement = match (start, end) {
+                (Some(s), Some(e)) => amount_or_dash(Some(e - s)),
+                _ => "\u{2014}".to_string(),
+            };
+            Row::new(vec![
+                Cell::from(name.clone()),
+                Cell::from(Line::from(amount_or_dash(*start)).alignment(Alignment::Right)),
+                Cell::from(Line::from(amount_or_dash(*end)).alignment(Alignment::Right)),
+                Cell::from(Line::from(movement).alignment(Alignment::Right)),
+            ])
+        })
+        .collect();
+    let total_row = Row::new(vec![
+        Cell::from("Total"),
+        Cell::from(Line::from(crate::format_amount_minor(total_start, "GBP")).alignment(Alignment::Right)),
+        Cell::from(Line::from(crate::format_amount_minor(total_end, "GBP")).alignment(Alignment::Right)),
+        Cell::from(
+            Line::from(crate::format_amount_minor(total_end - total_start, "GBP"))
+                .alignment(Alignment::Right),
+        ),
+    ])
+    .style(Style::default().add_modifier(Modifier::BOLD));
+    rows.push(total_row);
+
+    let header = Row::new(vec![
+        Cell::from("Account"),
+        Cell::from(Line::from(format!("Start ({})", app.gap_month_start_date)).alignment(Alignment::Right)),
+        Cell::from(Line::from(format!("End ({})", app.gap_month_end_date)).alignment(Alignment::Right)),
+        Cell::from(Line::from("Movement").alignment(Alignment::Right)),
+    ])
+    .style(Style::default().add_modifier(Modifier::BOLD));
+
+    let table = Table::new(
+        rows,
+        [
+            Constraint::Min(24),
+            Constraint::Length(20),
+            Constraint::Length(20),
+            Constraint::Length(15),
+        ],
+    )
+    .header(header)
+    .column_spacing(1)
+    .block(block);
 
     frame.render_widget(table, area);
+}
+
+/// A filter is showing/being edited when either it has text or the box is
+/// open (an empty, freshly-opened box still needs its bottom line drawn).
+fn transfer_filter_active(app: &App) -> bool {
+    app.transfer_filter_editing || !app.transfer_filter.is_empty()
 }
 
 fn draw_transfer_month(frame: &mut Frame, app: &mut App, area: Rect) {
@@ -805,20 +985,81 @@ fn draw_transfer_month(frame: &mut Frame, app: &mut App, area: Rect) {
         .get(app.selected_transfer_month)
         .map(|m| m.month.as_str())
         .unwrap_or("Transfers");
-    let block = Block::default()
-        .title(format!("Transfers \u{2014} {month}"))
-        .borders(Borders::ALL);
+
+    let visible = app.visible_transfer_entries();
+    let title = if app.transfer_filter.is_empty() {
+        format!("Transfers \u{2014} {month}")
+    } else {
+        format!(
+            "Transfers \u{2014} {month} ({} of {} shown)",
+            visible.len(),
+            app.transfer_month_entries.len()
+        )
+    };
+    let block = Block::default().title(title).borders(Borders::ALL);
+
+    let (table_area, filter_area) = if transfer_filter_active(app) {
+        let chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Min(3), Constraint::Length(1)])
+            .split(area);
+        (chunks[0], Some(chunks[1]))
+    } else {
+        (area, None)
+    };
 
     if app.transfer_month_entries.is_empty() {
         frame.render_widget(
             Paragraph::new("No transfers for this month.").block(block),
-            area,
+            table_area,
         );
         return;
     }
 
-    let rows = app
-        .transfer_month_entries
+    if visible.is_empty() {
+        frame.render_widget(
+            Paragraph::new("No transfers match the filter.").block(block),
+            table_area,
+        );
+    } else {
+        let rows = build_transfer_rows(&visible, &app.accounts, &app.household_accounts);
+        // `visible` (and the `app.accounts`/`app.household_accounts`
+        // borrows it carries) must be dropped before `app` is borrowed
+        // mutably below — `rows` is already fully owned, so nothing past
+        // this point still needs it.
+        drop(visible);
+        draw_transfer_month_table(frame, rows, block, table_area, app);
+    }
+
+    if let Some(filter_area) = filter_area {
+        draw_transfer_filter_bar(frame, app, filter_area);
+    }
+}
+
+fn draw_transfer_filter_bar(frame: &mut Frame, app: &App, area: Rect) {
+    let cursor = if app.transfer_filter_editing {
+        "\u{2588}"
+    } else {
+        ""
+    };
+    let text = format!("Filter: {}{cursor}", app.transfer_filter);
+    frame.render_widget(
+        Paragraph::new(text).style(Style::default().fg(Color::DarkGray)),
+        area,
+    );
+}
+
+/// Builds each visible transfer's display `Row` up front, as owned data —
+/// keeps the borrow of `accounts`/`household_accounts` (and of `visible`
+/// itself, borrowed from `app.transfer_month_entries`) scoped to this call,
+/// so the caller is free to borrow `app` mutably afterward for the table's
+/// `TableState`.
+fn build_transfer_rows<'a>(
+    visible: &[&crate::model::TransferEntry],
+    accounts: &[crate::db::AccountStatus],
+    household_accounts: &[crate::config::HouseholdAccountRef],
+) -> Vec<Row<'a>> {
+    visible
         .iter()
         .map(|entry| {
             let amount = crate::format_amount_minor(entry.amount_minor, &entry.currency);
@@ -826,15 +1067,15 @@ fn draw_transfer_month(frame: &mut Frame, app: &mut App, area: Rect) {
                 entry.out_account_id,
                 entry.out_sort.as_deref(),
                 entry.out_account.as_deref(),
-                &app.accounts,
-                &app.household_accounts,
+                accounts,
+                household_accounts,
             );
             let to = crate::app::resolve_transfer_leg_name(
                 entry.in_account_id,
                 entry.in_sort.as_deref(),
                 entry.in_account.as_deref(),
-                &app.accounts,
-                &app.household_accounts,
+                accounts,
+                household_accounts,
             );
             let description = entry
                 .out_description
@@ -849,8 +1090,16 @@ fn draw_transfer_month(frame: &mut Frame, app: &mut App, area: Rect) {
                 Cell::from(to),
             ])
         })
-        .collect::<Vec<_>>();
+        .collect::<Vec<_>>()
+}
 
+fn draw_transfer_month_table(
+    frame: &mut Frame,
+    rows: Vec<Row>,
+    block: Block,
+    area: Rect,
+    app: &mut App,
+) {
     let header = Row::new(vec![
         Cell::from("Date"),
         Cell::from(Line::from("Amount").alignment(Alignment::Right)),
@@ -885,7 +1134,11 @@ fn draw_help(frame: &mut Frame, area: Rect) {
         ("j / k, \u{2193} / \u{2191}", "Move selection"),
         ("Ctrl-d / Ctrl-u", "Page down / up"),
         ("gg / G", "Jump to top / bottom"),
-        ("Enter", "Open selected account, or drill into a month"),
+        (
+            "Enter",
+            "Open selected account, drill into a month, or (Gap screen) \
+             show cash by account for the selected month",
+        ),
         ("<space>a", "Jump to Accounts screen"),
         ("<space>s", "Jump to Monthly Spend screen"),
         ("<space>i", "Jump to Monthly Income screen"),
@@ -894,13 +1147,25 @@ fn draw_help(frame: &mut Frame, area: Rect) {
         ("n", "Edit note on selected spend entry (spend drill-down)"),
         (
             "i",
-            "Show both legs of selected transfer (transfers drill-down), or \
-             source transaction of selected income entry (income drill-down)",
+            "Show both legs of selected transfer (transfers drill-down), \
+             source transaction of selected income entry (income \
+             drill-down), or Salary/Other breakdown of selected month (Gap \
+             screen)",
         ),
         (
             "a",
             "Add selected entry's sender as a Registered Person (income \
              drill-down) — re-classifies it as a reimbursement",
+        ),
+        (
+            "f",
+            "Filter transfers by description/from/to (transfers drill-down)",
+        ),
+        ("Ctrl-g", "Clear the transfer filter"),
+        (
+            "s",
+            "Record a spend from the selected transfer to a Reference \
+             Household Account (transfers drill-down)",
         ),
         ("y", "Copy selected row to the clipboard"),
         ("Esc / q", "Back (or quit, if there's nowhere to go back to)"),

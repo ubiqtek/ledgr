@@ -2,8 +2,9 @@ use crate::config::{Config, HouseholdAccountRef, RegisteredPersonRef};
 use crate::db::{AccountStatus, Db};
 use crate::derive;
 use crate::model::{
-    Id, IncomeEntryWithAccount, MonthlyGap, MonthlyIncome, MonthlySpend, MonthlyTransfer,
-    SpendEntryWithAccount, Transaction, TransferEntry,
+    AccountType, ClassifiedBy, Id, IncomeEntryWithAccount, MonthlyGap, MonthlyIncome,
+    MonthlySpend, MonthlyTransfer, NewAccount, NewSpendEntry, NewTransaction, SpendEntryWithAccount,
+    Transaction, TransferEntry,
 };
 use ratatui::widgets::TableState;
 use std::path::PathBuf;
@@ -19,6 +20,7 @@ pub enum Screen {
     MonthlyTransfers,
     TransferMonth,
     Gap,
+    GapMonth,
     Help,
 }
 
@@ -50,10 +52,23 @@ pub struct App {
     pub income_month_entries: Vec<IncomeEntryWithAccount>,
     pub selected_income_entry: usize,
     pub income_month_table_state: TableState,
-    /// `Screen::Gap`'s month-by-month rows. No selection index or
-    /// `TableState` — unlike the other monthly screens, the Gap screen has
-    /// no drill-down to select into, just a summary report.
+    /// `Screen::Gap`'s month-by-month rows.
     pub monthly_gap: Vec<MonthlyGap>,
+    pub selected_gap_month: usize,
+    pub gap_table_state: TableState,
+    /// Per-account cash breakdown for `Screen::GapMonth` (`Enter` on a
+    /// `Screen::Gap` row) — `(account name, start balance, end balance)`,
+    /// either side `None` if that account had no balance anchor yet at
+    /// that date. Resolved by name up front (rather than storing raw
+    /// account IDs) since display is the only thing this screen does with
+    /// them. No selection/`TableState` — a report, like the original
+    /// whole-screen Gap concept, not a list to drill further into.
+    pub gap_month_balances: Vec<(String, Option<i64>, Option<i64>)>,
+    /// The exact `balance_as_of` dates (`YYYY-MM-DD`) the two lists above
+    /// were computed at — shown in the panel titles so "Cash Start"/"Cash
+    /// End" aren't ambiguous about which day they land on.
+    pub gap_month_start_date: String,
+    pub gap_month_end_date: String,
     /// Total cash (`Current`/`Savings` accounts) balance at the start of
     /// the calendar year and at the end of the last complete month (same
     /// cutoff as `monthly_gap`, not literally "now" — see `open_gap`) —
@@ -77,6 +92,19 @@ pub struct App {
     pub transfer_month_entries: Vec<TransferEntry>,
     pub selected_transfer_entry: usize,
     pub transfer_month_table_state: TableState,
+    /// Live filter text for `Screen::TransferMonth` (`f`) — empty means no
+    /// filter. `selected_transfer_entry` indexes into the *filtered* view
+    /// (`visible_transfer_entries`), not `transfer_month_entries` directly,
+    /// so it's reset to `0` on every keystroke to avoid pointing past the
+    /// end once the filtered set shrinks.
+    pub transfer_filter: String,
+    /// Whether keys are currently routed to editing `transfer_filter`
+    /// rather than navigation — same presence-gates-routing idiom as
+    /// `note_edit`, except this is a `bool` rather than `Option<String>`
+    /// since the filter text itself needs to persist (and keep filtering)
+    /// even after editing stops (`Enter`), unlike a note which is either
+    /// being edited or isn't touched at all.
+    pub transfer_filter_editing: bool,
     /// `Some(buffer)` while editing the selected spend entry's note (`n` on
     /// `Screen::SpendMonth`) — its presence is what routes key events to
     /// text editing instead of navigation, see `main.rs`'s event loop.
@@ -91,12 +119,21 @@ pub struct App {
     /// selected income entry for verification. Same routing pattern as
     /// `transfer_detail`.
     pub income_detail: Option<Transaction>,
+    /// `Some` while the Salary/Other income breakdown popup is open (`i` on
+    /// `Screen::Gap`) — a clone of the selected month's row, since the
+    /// breakdown is just fields already on `MonthlyGap` rather than a
+    /// separate lookup. Same routing pattern as `income_detail`.
+    pub gap_detail: Option<MonthlyGap>,
     /// `Some` while the "add reference" form is open (`a` on
     /// `Screen::IncomeMonth`) — registers the selected entry's sender as a
     /// Registered Person so future (and this) payment(s) from them classify
     /// as a spend-ledger reimbursement instead of income. Same routing
     /// pattern as `note_edit`.
     pub person_form: Option<PersonForm>,
+    /// `Some` while the "record a spend from this transfer" form is open
+    /// (`s` on `Screen::TransferMonth`). Same routing pattern as
+    /// `person_form`.
+    pub spend_form: Option<SpendFromTransferForm>,
     pub should_quit: bool,
     pub status: String,
     config: Config,
@@ -153,6 +190,49 @@ pub struct TransferDetail {
     pub counterpart_label: String,
 }
 
+/// Which field of `SpendFromTransferForm` is currently being edited.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SpendFormField {
+    Date,
+    Amount,
+    Description,
+}
+
+impl SpendFormField {
+    fn next(self) -> Self {
+        match self {
+            SpendFormField::Date => SpendFormField::Amount,
+            SpendFormField::Amount => SpendFormField::Description,
+            SpendFormField::Description => SpendFormField::Description,
+        }
+    }
+
+    fn previous(self) -> Self {
+        match self {
+            SpendFormField::Date => SpendFormField::Date,
+            SpendFormField::Amount => SpendFormField::Date,
+            SpendFormField::Description => SpendFormField::Amount,
+        }
+    }
+}
+
+/// The "record a spend from this transfer" form's in-progress state, opened
+/// by `s` on `Screen::TransferMonth` — pre-filled from the selected
+/// transfer's date and amount, since the whole point is "this money that
+/// left for `household_label` was actually spent on X". `proxy_account_name`
+/// identifies which proxy account (one per Reference Household Account, see
+/// `App::find_or_create_proxy_account`) the resulting spend entry's backing
+/// transaction is posted to.
+pub struct SpendFromTransferForm {
+    pub date: String,
+    pub amount: String,
+    pub description: String,
+    pub field: SpendFormField,
+    pub household_label: String,
+    proxy_account_name: String,
+    currency: String,
+}
+
 impl App {
     pub fn new(db: Db) -> anyhow::Result<Self> {
         let mut accounts = db.account_statuses()?;
@@ -160,6 +240,10 @@ impl App {
         let config = Config::load_or_init(&config_path)?;
         config.apply_account_name_overrides(accounts.iter_mut().map(|s| &mut s.account));
         let (monthly_gap, cash_at_year_start, cash_now) = load_gap_data(&db)?;
+        // Rows are earliest-first; start the selection on the most recent
+        // month (the last row) rather than January, matching the other
+        // monthly screens.
+        let selected_gap_month = monthly_gap.len().saturating_sub(1);
         Ok(Self {
             db,
             // The Gap screen is the first thing the user wants to see on
@@ -185,6 +269,11 @@ impl App {
             selected_income_entry: 0,
             income_month_table_state: TableState::default(),
             monthly_gap,
+            selected_gap_month,
+            gap_table_state: TableState::default(),
+            gap_month_balances: Vec::new(),
+            gap_month_start_date: String::new(),
+            gap_month_end_date: String::new(),
             cash_at_year_start,
             cash_now,
             household_accounts: config.household_accounts.clone(),
@@ -194,10 +283,14 @@ impl App {
             transfer_month_entries: Vec::new(),
             selected_transfer_entry: 0,
             transfer_month_table_state: TableState::default(),
+            transfer_filter: String::new(),
+            transfer_filter_editing: false,
             note_edit: None,
             transfer_detail: None,
             income_detail: None,
+            gap_detail: None,
             person_form: None,
+            spend_form: None,
             should_quit: false,
             status: "j/k move, enter open, space leader, ctrl-d/u page, ? help, esc back, q quit"
                 .into(),
@@ -255,19 +348,77 @@ impl App {
     }
 
     /// Opens `Screen::Gap` — the YTD summary + month-by-month report
-    /// combining the spend and income ledgers. No selection state to reset,
-    /// unlike the other monthly screens: this screen has no drill-down.
-    /// The whole report (summary and month-by-month alike) only covers
-    /// complete calendar months — the current, still-in-progress month is
-    /// dropped entirely, since its partial spend with no matching income
-    /// yet (e.g. salary not yet paid) would misrepresent both.
+    /// combining the spend and income ledgers. The whole report (summary
+    /// and month-by-month alike) only covers complete calendar months — the
+    /// current, still-in-progress month is dropped entirely, since its
+    /// partial spend with no matching income yet (e.g. salary not yet paid)
+    /// would misrepresent both.
     pub fn open_gap(&mut self) -> anyhow::Result<()> {
         let (monthly_gap, cash_at_year_start, cash_now) = load_gap_data(&self.db)?;
+        self.selected_gap_month = monthly_gap.len().saturating_sub(1);
         self.monthly_gap = monthly_gap;
         self.cash_at_year_start = cash_at_year_start;
         self.cash_now = cash_now;
         self.navigate_to(Screen::Gap);
         Ok(())
+    }
+
+    /// Opens `Screen::GapMonth` (`Enter` on a `Screen::Gap` row) — the
+    /// selected month's cash position broken down per account, both at the
+    /// start and end of the month, so a cash figure like "£15,050.94" can
+    /// be traced to which real account(s) it's actually sitting in.
+    pub fn open_selected_gap_month(&mut self) -> anyhow::Result<()> {
+        let Some(month) = self.monthly_gap.get(self.selected_gap_month).cloned() else {
+            return Ok(());
+        };
+        let (month_start, month_end) = crate::db::gap::month_bounds(&month.month);
+        let start_balances = self.resolve_account_balances(&month_start)?;
+        let end_balances = self.resolve_account_balances(&month_end)?;
+        self.gap_month_balances = combine_account_balances(&start_balances, &end_balances);
+        // `month_start` (the query date, end of the *previous* month) and
+        // the first day of this month are the same instant — no
+        // transaction can post "at midnight" between them — so the label
+        // shown is the more intuitive first-of-month date, without
+        // changing which balance was actually fetched.
+        self.gap_month_start_date = format!("{}-01", month.month);
+        self.gap_month_end_date = month_end;
+        self.navigate_to(Screen::GapMonth);
+        Ok(())
+    }
+
+    /// `cash_balances_by_account_as_of` returns raw account IDs; resolves
+    /// each to the display name already loaded into `self.accounts`
+    /// (friendly-name overrides from `config.toml` applied), rather than
+    /// the DB's own `accounts.name` column.
+    fn resolve_account_balances(&self, date: &str) -> anyhow::Result<Vec<(String, i64)>> {
+        Ok(self
+            .db
+            .cash_balances_by_account_as_of(date)?
+            .into_iter()
+            .map(|(account_id, balance_minor)| {
+                let name = self
+                    .accounts
+                    .iter()
+                    .find(|s| s.account.id == account_id)
+                    .map(|s| s.account.name.clone())
+                    .unwrap_or_else(|| format!("Account {account_id}"));
+                (name, balance_minor)
+            })
+            .collect())
+    }
+
+    /// Opens the Salary/Other income breakdown popup for the selected month
+    /// on `Screen::Gap` (`i`) — `MonthlyGap` already carries both figures,
+    /// so this is just a clone rather than a fresh query.
+    pub fn show_gap_detail(&mut self) {
+        if self.screen != Screen::Gap {
+            return;
+        }
+        self.gap_detail = self.monthly_gap.get(self.selected_gap_month).cloned();
+    }
+
+    pub fn close_gap_detail(&mut self) {
+        self.gap_detail = None;
     }
 
     /// Opens the "source transaction" popup for the selected entry on
@@ -441,8 +592,96 @@ impl App {
         };
         self.transfer_month_entries = self.db.transfer_entries_for_month(&month.month)?;
         self.selected_transfer_entry = 0;
+        self.transfer_filter.clear();
+        self.transfer_filter_editing = false;
         self.navigate_to(Screen::TransferMonth);
         Ok(())
+    }
+
+    /// `transfer_month_entries` narrowed by `transfer_filter` — a
+    /// case-insensitive substring match against the transfer's description
+    /// or either leg's resolved name (so typing "romina" matches whether
+    /// she's the sender or the recipient). Recomputed on demand rather than
+    /// cached: cheap at today's list sizes (tens of entries per month), and
+    /// must reflect every keystroke while `transfer_filter_editing`.
+    pub fn visible_transfer_entries(&self) -> Vec<&TransferEntry> {
+        if self.transfer_filter.is_empty() {
+            return self.transfer_month_entries.iter().collect();
+        }
+        let needle = self.transfer_filter.to_lowercase();
+        self.transfer_month_entries
+            .iter()
+            .filter(|entry| {
+                let from = resolve_transfer_leg_name(
+                    entry.out_account_id,
+                    entry.out_sort.as_deref(),
+                    entry.out_account.as_deref(),
+                    &self.accounts,
+                    &self.household_accounts,
+                );
+                let to = resolve_transfer_leg_name(
+                    entry.in_account_id,
+                    entry.in_sort.as_deref(),
+                    entry.in_account.as_deref(),
+                    &self.accounts,
+                    &self.household_accounts,
+                );
+                let description = entry
+                    .out_description
+                    .as_deref()
+                    .or(entry.in_description.as_deref())
+                    .unwrap_or("");
+                from.to_lowercase().contains(&needle)
+                    || to.to_lowercase().contains(&needle)
+                    || description.to_lowercase().contains(&needle)
+            })
+            .collect()
+    }
+
+    /// Opens the filter box on `Screen::TransferMonth` (`f`) — edits
+    /// whatever filter is already active, if any, rather than always
+    /// starting blank.
+    pub fn start_transfer_filter(&mut self) {
+        if self.screen != Screen::TransferMonth {
+            return;
+        }
+        self.transfer_filter_editing = true;
+    }
+
+    /// `Enter` while editing the filter — stops routing keys to the filter
+    /// box but leaves the filter itself applied, so `j`/`k` resume
+    /// navigating the (still-filtered) list.
+    pub fn confirm_transfer_filter(&mut self) {
+        self.transfer_filter_editing = false;
+    }
+
+    /// `Esc` while editing the filter — discards it entirely, distinct from
+    /// `confirm_transfer_filter` which keeps it applied.
+    pub fn cancel_transfer_filter(&mut self) {
+        self.transfer_filter.clear();
+        self.transfer_filter_editing = false;
+        self.selected_transfer_entry = 0;
+    }
+
+    /// `Ctrl-G` — clears the filter outright, whether or not the box is
+    /// currently open. A no-op off `Screen::TransferMonth`.
+    pub fn clear_transfer_filter(&mut self) {
+        if self.screen != Screen::TransferMonth {
+            return;
+        }
+        self.transfer_filter.clear();
+        self.transfer_filter_editing = false;
+        self.selected_transfer_entry = 0;
+    }
+
+    pub fn transfer_filter_push_char(&mut self, c: char) {
+        self.transfer_filter.push(c);
+        self.selected_transfer_entry = 0;
+    }
+
+    pub fn transfer_filter_pop_char(&mut self) {
+        self.transfer_filter.pop();
+        self.selected_transfer_entry = 0;
     }
 
     /// Opens the "both legs of this transfer" popup for the selected entry
@@ -457,10 +696,8 @@ impl App {
         if self.screen != Screen::TransferMonth {
             return Ok(());
         }
-        let Some(entry) = self
-            .transfer_month_entries
-            .get(self.selected_transfer_entry)
-        else {
+        let visible = self.visible_transfer_entries();
+        let Some(entry) = visible.get(self.selected_transfer_entry) else {
             return Ok(());
         };
 
@@ -534,6 +771,175 @@ impl App {
         self.transfer_detail = None;
     }
 
+    /// Opens the "record a spend from this transfer" form (`s` on
+    /// `Screen::TransferMonth`) — only makes sense when one leg of the
+    /// selected transfer is a Reference Household Account (e.g. a
+    /// partner's account): money that left the tracked books for someone
+    /// whose own spending of it `ledgr` can't see. A no-op (nothing opens)
+    /// for a transfer between two of the user's own tracked accounts, since
+    /// there's no "someone else's spending" to record there. Pre-fills the
+    /// date and amount from the transfer itself — the common case is
+    /// recording the whole transfer as one spend (e.g. "holiday"); splitting
+    /// one transfer into several spends is a later delta.
+    pub fn start_spend_from_transfer(&mut self) {
+        if self.screen != Screen::TransferMonth {
+            return;
+        }
+        let visible = self.visible_transfer_entries();
+        let Some(entry) = visible.get(self.selected_transfer_entry) else {
+            return;
+        };
+        let Some(household) = household_account_for_transfer_leg(entry, &self.household_accounts)
+        else {
+            return;
+        };
+        let household_label = household
+            .label
+            .clone()
+            .unwrap_or_else(|| format!("{} {}", household.sort_code, household.account_number));
+        let proxy_account_name = format!("{household_label} (Manual Spend)");
+        let amount = format!(
+            "{}.{:02}",
+            entry.amount_minor.unsigned_abs() / 100,
+            entry.amount_minor.unsigned_abs() % 100
+        );
+        self.spend_form = Some(SpendFromTransferForm {
+            date: entry.occurred_on.clone(),
+            amount,
+            description: String::new(),
+            field: SpendFormField::Description,
+            household_label,
+            proxy_account_name,
+            currency: entry.currency.clone(),
+        });
+    }
+
+    pub fn cancel_spend_form(&mut self) {
+        self.spend_form = None;
+    }
+
+    pub fn spend_form_next_field(&mut self) {
+        if let Some(form) = &mut self.spend_form {
+            form.field = form.field.next();
+        }
+    }
+
+    pub fn spend_form_previous_field(&mut self) {
+        if let Some(form) = &mut self.spend_form {
+            form.field = form.field.previous();
+        }
+    }
+
+    pub fn spend_form_push_char(&mut self, c: char) {
+        let Some(form) = &mut self.spend_form else {
+            return;
+        };
+        match form.field {
+            SpendFormField::Date => form.date.push(c),
+            SpendFormField::Amount => form.amount.push(c),
+            SpendFormField::Description => form.description.push(c),
+        }
+    }
+
+    pub fn spend_form_pop_char(&mut self) {
+        let Some(form) = &mut self.spend_form else {
+            return;
+        };
+        match form.field {
+            SpendFormField::Date => form.date.pop(),
+            SpendFormField::Amount => form.amount.pop(),
+            SpendFormField::Description => form.description.pop(),
+        };
+    }
+
+    /// `Enter` on the spend form: advances to the next field, or submits
+    /// (`commit_spend_form`) when already on the last field
+    /// (`Description`).
+    pub fn spend_form_enter(&mut self) -> anyhow::Result<()> {
+        let Some(form) = &self.spend_form else {
+            return Ok(());
+        };
+        if form.field == SpendFormField::Description {
+            self.commit_spend_form()
+        } else {
+            self.spend_form_next_field();
+            Ok(())
+        }
+    }
+
+    /// Submits the spend form: creates (or reuses) a proxy `Account` — one
+    /// per Reference Household Account, `AccountType::Other` since it holds
+    /// no real balance and needs no dedicated type (nothing filters
+    /// accounts by name) — posts one `Transaction` to it for the entered
+    /// amount/date, and records a `spend_entries` row against that
+    /// transaction (`classified_by = 'manual'`). Deliberately does *not*
+    /// touch the originating `transfer_entries` row: the transfer itself
+    /// was real and correctly classified as an internal transfer; this is a
+    /// separate record of what the money was then spent on. An unparseable
+    /// amount or date leaves the form open rather than submitting bad data.
+    pub fn commit_spend_form(&mut self) -> anyhow::Result<()> {
+        let Some(form) = &self.spend_form else {
+            return Ok(());
+        };
+        let Some(amount_minor) = parse_pounds_to_minor(&form.amount) else {
+            return Ok(());
+        };
+        if chrono::NaiveDate::parse_from_str(&form.date, "%Y-%m-%d").is_err() {
+            return Ok(());
+        }
+        let description = {
+            let trimmed = form.description.trim();
+            if trimmed.is_empty() {
+                format!("{} spend", form.household_label)
+            } else {
+                trimmed.to_string()
+            }
+        };
+
+        let account_id = self.db.find_or_create_account(&NewAccount {
+            name: form.proxy_account_name.clone(),
+            institution: None,
+            account_type: AccountType::Other,
+            currency: form.currency.clone(),
+            sort_code: None,
+            account_number: None,
+        })?;
+        let Some(transaction_id) = self.db.insert_transaction(&NewTransaction {
+            account_id,
+            import_id: None,
+            posted_at: form.date.clone(),
+            amount_minor: -amount_minor,
+            currency: form.currency.clone(),
+            description: description.clone(),
+            raw_description: None,
+            trn_type: None,
+            external_id: None,
+            notes: None,
+        })?
+        else {
+            return Ok(());
+        };
+        self.db.insert_spend_entry_with_source(
+            &NewSpendEntry {
+                occurred_on: form.date.clone(),
+                amount_minor: -amount_minor,
+                currency: form.currency.clone(),
+                counterparty: Some(form.household_label.clone()),
+                description,
+                note: None,
+                category_id: None,
+                refunds_spend_entry_id: None,
+                classified_by: ClassifiedBy::Manual,
+                confidence: Some(1.0),
+                rule_name: Some("manual_entry".to_string()),
+            },
+            transaction_id,
+        )?;
+
+        self.spend_form = None;
+        Ok(())
+    }
+
     /// Opens the note editor for the selected spend entry on
     /// `Screen::SpendMonth`, pre-filled with its existing note (if any).
     pub fn start_editing_note(&mut self) {
@@ -583,8 +989,9 @@ impl App {
             Screen::MonthlyIncome => self.monthly_income.len(),
             Screen::IncomeMonth => self.income_month_entries.len(),
             Screen::MonthlyTransfers => self.monthly_transfers.len(),
-            Screen::TransferMonth => self.transfer_month_entries.len(),
-            Screen::Gap => return,
+            Screen::TransferMonth => self.visible_transfer_entries().len(),
+            Screen::Gap => self.monthly_gap.len(),
+            Screen::GapMonth => return,
             Screen::Help => return,
         };
         if len == 0 {
@@ -599,7 +1006,8 @@ impl App {
             Screen::IncomeMonth => &mut self.selected_income_entry,
             Screen::MonthlyTransfers => &mut self.selected_transfer_month,
             Screen::TransferMonth => &mut self.selected_transfer_entry,
-            Screen::Gap => return,
+            Screen::Gap => &mut self.selected_gap_month,
+            Screen::GapMonth => return,
             Screen::Help => return,
         };
         let next = *selected as i32 + delta;
@@ -617,7 +1025,8 @@ impl App {
             Screen::IncomeMonth => &mut self.selected_income_entry,
             Screen::MonthlyTransfers => &mut self.selected_transfer_month,
             Screen::TransferMonth => &mut self.selected_transfer_entry,
-            Screen::Gap => return,
+            Screen::Gap => &mut self.selected_gap_month,
+            Screen::GapMonth => return,
             Screen::Help => return,
         };
         *selected = 0;
@@ -633,8 +1042,9 @@ impl App {
             Screen::MonthlyIncome => self.monthly_income.len(),
             Screen::IncomeMonth => self.income_month_entries.len(),
             Screen::MonthlyTransfers => self.monthly_transfers.len(),
-            Screen::TransferMonth => self.transfer_month_entries.len(),
-            Screen::Gap => return,
+            Screen::TransferMonth => self.visible_transfer_entries().len(),
+            Screen::Gap => self.monthly_gap.len(),
+            Screen::GapMonth => return,
             Screen::Help => return,
         };
         if len == 0 {
@@ -649,7 +1059,8 @@ impl App {
             Screen::IncomeMonth => &mut self.selected_income_entry,
             Screen::MonthlyTransfers => &mut self.selected_transfer_month,
             Screen::TransferMonth => &mut self.selected_transfer_entry,
-            Screen::Gap => return,
+            Screen::Gap => &mut self.selected_gap_month,
+            Screen::GapMonth => return,
             Screen::Help => return,
         };
         *selected = len - 1;
@@ -759,9 +1170,8 @@ impl App {
                 ))
             }
             Screen::TransferMonth => {
-                let entry = self
-                    .transfer_month_entries
-                    .get(self.selected_transfer_entry)?;
+                let visible = self.visible_transfer_entries();
+                let entry = visible.get(self.selected_transfer_entry)?;
                 let from = resolve_transfer_leg_name(
                     entry.out_account_id,
                     entry.out_sort.as_deref(),
@@ -790,7 +1200,19 @@ impl App {
                     to
                 ))
             }
-            Screen::Gap => None,
+            Screen::Gap => {
+                let month = self.monthly_gap.get(self.selected_gap_month)?;
+                Some(format!(
+                    "{}\t{}\t{}\t{}\t{}\t{}",
+                    month.month,
+                    crate::format_amount_minor(month.income_minor, "GBP"),
+                    crate::format_amount_minor(month.spend_minor, "GBP"),
+                    crate::format_amount_minor(month.gap_minor, "GBP"),
+                    crate::format_amount_minor(month.cash_start_minor, "GBP"),
+                    crate::format_amount_minor(month.cash_end_minor, "GBP"),
+                ))
+            }
+            Screen::GapMonth => None,
             Screen::Help => None,
         }
     }
@@ -828,6 +1250,31 @@ impl App {
             self.navigate_to(Screen::Help);
         }
     }
+}
+
+/// Merges the start-of-month and end-of-month per-account balance lists
+/// into one row per account (by name), preserving `start`'s order and
+/// appending any account that only appears in `end` — either side is
+/// `None` if that account had no balance anchor yet at that boundary date
+/// (rather than treating a missing account as a real zero balance).
+fn combine_account_balances(
+    start: &[(String, i64)],
+    end: &[(String, i64)],
+) -> Vec<(String, Option<i64>, Option<i64>)> {
+    let mut names: Vec<&str> = start.iter().map(|(name, _)| name.as_str()).collect();
+    for (name, _) in end {
+        if !names.contains(&name.as_str()) {
+            names.push(name.as_str());
+        }
+    }
+    names
+        .into_iter()
+        .map(|name| {
+            let start_balance = start.iter().find(|(n, _)| n == name).map(|(_, b)| *b);
+            let end_balance = end.iter().find(|(n, _)| n == name).map(|(_, b)| *b);
+            (name.to_string(), start_balance, end_balance)
+        })
+        .collect()
 }
 
 /// Loads `Screen::Gap`'s data: month-by-month rows (excluding the current,
@@ -910,6 +1357,37 @@ pub(crate) fn resolve_transfer_leg_name(
     }
 
     format!("{sort} {account_number}")
+}
+
+/// Which `HouseholdAccountRef`, if any, is one leg of `entry` — checks both
+/// the out and in side, same truncation-tolerant matching as
+/// `resolve_transfer_leg_name`. `None` for a transfer between two of the
+/// user's own tracked accounts (no Reference Household Account involved).
+fn household_account_for_transfer_leg<'a>(
+    entry: &TransferEntry,
+    household_accounts: &'a [HouseholdAccountRef],
+) -> Option<&'a HouseholdAccountRef> {
+    let matches = |sort: Option<&str>, account_number: Option<&str>| {
+        let (sort, account_number) = (sort?, account_number?);
+        household_accounts
+            .iter()
+            .find(|h| h.sort_code == sort && h.account_number.starts_with(account_number))
+    };
+    matches(entry.out_sort.as_deref(), entry.out_account.as_deref())
+        .or_else(|| matches(entry.in_sort.as_deref(), entry.in_account.as_deref()))
+}
+
+/// Parses a manually-typed pounds amount (e.g. `"1415"`, `"1415.00"`,
+/// `"1415.5"`) into minor units. Deliberately simpler than
+/// `import::generic_csv`'s decimal-string parser — this is free-text human
+/// TUI input, not a bank export's fixed decimal format, so an `f64` round
+/// trip is precise enough at realistic amounts and far less code.
+fn parse_pounds_to_minor(input: &str) -> Option<i64> {
+    let value: f64 = input.trim().parse().ok()?;
+    if !value.is_finite() {
+        return None;
+    }
+    Some((value * 100.0).round() as i64)
 }
 
 #[cfg(test)]

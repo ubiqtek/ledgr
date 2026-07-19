@@ -874,6 +874,7 @@ Build out the TUI beyond the current scaffold.
 - Verified live via `tmux` against the real database: headers align correctly over right-justified figures; e.g. 2026-01 shows Own £13,271.93 / Reference £208.99 / Total £13,480.92, matching an independent ad-hoc SQL check exactly across all 7 months of real data.
 - 91 unit tests still passing (no new tests — pure aggregation query, same reasoning as the Gap screen's totals); `cargo build`/`cargo clippy --all-targets` clean (same pre-existing dead-code warnings only, nothing new).
 - Files changed: `src/model.rs`, `src/db/spend.rs`, `src/app.rs`, `src/ui.rs`, `src/config.rs` (factored a small `household_accounts_contain` free function out of `Config::household_account_matches` during an earlier iteration of this work, still in use there). Not yet committed to git — sitting in the working tree alongside the rest of this session's uncommitted work (income ledger, Gap screen, this transfers redesign).
+- **Same-session follow-up:** renamed the "Own" column header to **"Tracked"** and added a "Household accounts" grouping label above the Tracked/Reference columns (`draw_monthly_transfers` in `src/ui.rs`, using the same inner-`Layout`-split-plus-`Paragraph`-label pattern as `draw_summary_table`) — makes clear Tracked and Reference are the two components of household-internal movement, with Total as their sum sitting apart. Verified live via `tmux`; `cargo build`/`test`/`clippy --all-targets` clean (91 tests, same pre-existing warnings only).
 
 ## Delta: Packaging & Distribution
 

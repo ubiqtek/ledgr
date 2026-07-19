@@ -1,7 +1,7 @@
 mod accounts;
 mod balances;
 mod cards;
-mod gap;
+pub(crate) mod gap;
 mod imports;
 mod income;
 mod spend;

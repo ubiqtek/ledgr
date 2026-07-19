@@ -511,6 +511,40 @@ fn run(
                     continue;
                 }
 
+                // While the "record a spend from this transfer" form is
+                // open, every key is text input (or field
+                // navigation/commit/cancel) rather than list navigation —
+                // same pattern as `person_form` above.
+                if app.spend_form.is_some() {
+                    match key.code {
+                        KeyCode::Enter => app.spend_form_enter()?,
+                        KeyCode::Esc => app.cancel_spend_form(),
+                        KeyCode::Tab | KeyCode::Down => app.spend_form_next_field(),
+                        KeyCode::BackTab | KeyCode::Up => app.spend_form_previous_field(),
+                        KeyCode::Backspace => app.spend_form_pop_char(),
+                        KeyCode::Char(c) => app.spend_form_push_char(c),
+                        _ => {}
+                    }
+                    continue;
+                }
+
+                // While the transfer filter box is open, every key is text
+                // input (or confirm/cancel/clear) rather than navigation —
+                // same pattern as `note_edit` above, except `Enter` keeps
+                // the filter applied (only stops editing it) rather than
+                // clearing it.
+                if app.transfer_filter_editing {
+                    match key.code {
+                        KeyCode::Enter => app.confirm_transfer_filter(),
+                        KeyCode::Esc => app.cancel_transfer_filter(),
+                        KeyCode::Char('g') if ctrl => app.clear_transfer_filter(),
+                        KeyCode::Backspace => app.transfer_filter_pop_char(),
+                        KeyCode::Char(c) => app.transfer_filter_push_char(c),
+                        _ => {}
+                    }
+                    continue;
+                }
+
                 // While the transfer-detail popup is open, any key dismisses
                 // it rather than being treated as navigation.
                 if app.transfer_detail.is_some() {
@@ -522,6 +556,14 @@ fn run(
                 // it rather than being treated as navigation.
                 if app.income_detail.is_some() {
                     app.close_income_detail();
+                    continue;
+                }
+
+                // While the Gap screen's Salary/Other breakdown popup is
+                // open, any key dismisses it rather than being treated as
+                // navigation.
+                if app.gap_detail.is_some() {
+                    app.close_gap_detail();
                     continue;
                 }
 
@@ -544,12 +586,16 @@ fn run(
 
                 match key.code {
                     KeyCode::Char(' ') => pending_leader = true,
-                    KeyCode::Char('g') if was_pending_g => app.select_first(),
-                    KeyCode::Char('g') => pending_g = true,
-                    KeyCode::Char('G') => app.select_last(),
                     KeyCode::Char('c') if ctrl => app.should_quit = true,
                     KeyCode::Char('d') if ctrl => app.move_selection(page),
                     KeyCode::Char('u') if ctrl => app.move_selection(-page),
+                    KeyCode::Char('g') if ctrl => app.clear_transfer_filter(),
+                    KeyCode::Char('g') if was_pending_g => app.select_first(),
+                    KeyCode::Char('g') => pending_g = true,
+                    KeyCode::Char('G') => app.select_last(),
+                    KeyCode::Char('f') if app.screen == app::Screen::TransferMonth => {
+                        app.start_transfer_filter();
+                    }
                     KeyCode::Char('q') | KeyCode::Esc => {
                         if app.can_go_back() {
                             app.back();
@@ -564,8 +610,14 @@ fn run(
                     KeyCode::Char('i') if app.screen == app::Screen::TransferMonth => {
                         app.show_transfer_detail()?;
                     }
+                    KeyCode::Char('s') if app.screen == app::Screen::TransferMonth => {
+                        app.start_spend_from_transfer();
+                    }
                     KeyCode::Char('i') if app.screen == app::Screen::IncomeMonth => {
                         app.show_income_detail()?;
+                    }
+                    KeyCode::Char('i') if app.screen == app::Screen::Gap => {
+                        app.show_gap_detail();
                     }
                     KeyCode::Char('a') if app.screen == app::Screen::IncomeMonth => {
                         app.start_adding_person();
@@ -582,6 +634,7 @@ fn run(
                         app::Screen::MonthlySpend => app.open_selected_month()?,
                         app::Screen::MonthlyIncome => app.open_selected_income_month()?,
                         app::Screen::MonthlyTransfers => app.open_selected_transfer_month()?,
+                        app::Screen::Gap => app.open_selected_gap_month()?,
                         _ => {}
                     },
                     _ => {}

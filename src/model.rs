@@ -469,6 +469,16 @@ pub struct MonthlyGap {
     pub spend_minor: i64,
     /// `income_minor + spend_minor` — positive when income exceeded spend.
     pub gap_minor: i64,
+    /// Combined `Current`/`Savings` balance at the end of the previous
+    /// month (this month's opening balance).
+    pub cash_start_minor: i64,
+    /// Combined `Current`/`Savings` balance at the end of this month.
+    pub cash_end_minor: i64,
+    /// `(cash_end_minor - cash_start_minor) - gap_minor` — real cash
+    /// movement the Gap doesn't explain (internal transfers to an
+    /// unimported account, card paydown beyond new spend, etc). Zero means
+    /// this month is fully reconciled.
+    pub untracked_minor: i64,
 }
 
 /// Which raw transaction(s) a spend entry derives from.

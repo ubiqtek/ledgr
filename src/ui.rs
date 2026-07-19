@@ -31,6 +31,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         Screen::IncomeMonth => draw_income_month(frame, app, chunks[0]),
         Screen::MonthlyTransfers => draw_monthly_transfers(frame, app, chunks[0]),
         Screen::TransferMonth => draw_transfer_month(frame, app, chunks[0]),
+        Screen::Gap => draw_gap(frame, app, chunks[0]),
         Screen::Help => draw_help(frame, chunks[0]),
     }
     draw_status(frame, app, chunks[1]);
@@ -556,33 +557,56 @@ fn draw_income_month(frame: &mut Frame, app: &mut App, area: Rect) {
 
 fn draw_monthly_transfers(frame: &mut Frame, app: &mut App, area: Rect) {
     let block = Block::default()
-        .title("Monthly Transfers")
+        .title("Monthly Inter-Household Transfers")
         .borders(Borders::ALL);
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
 
     if app.monthly_transfers.is_empty() {
         frame.render_widget(
-            Paragraph::new("No internal transfers found. Run `ledgr import` first.").block(block),
-            area,
+            Paragraph::new("No internal transfers found. Run `ledgr import` first."),
+            inner,
         );
         return;
     }
+
+    // A grouping label above Tracked/Reference — both are components of
+    // household-internal movement, distinct from the Total column.
+    // Month is `Constraint::Length(7)` + 1 column-spacing = an 8-column
+    // offset before Tracked's column starts; Tracked+Reference together
+    // span 16 + 1 + 16 = 33 columns.
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(1), Constraint::Min(0)])
+        .split(inner);
+    frame.render_widget(
+        Paragraph::new(format!("{:8}{:^33}", "", "Household accounts")),
+        chunks[0],
+    );
 
     let rows = app
         .monthly_transfers
         .iter()
         .map(|month| {
-            let out = crate::format_amount_minor(month.transferred_out_minor.abs(), "GBP");
-            let inn = crate::format_amount_minor(month.transferred_in_minor, "GBP");
+            let tracked = crate::format_amount_minor(month.own_minor, "GBP");
+            let reference = crate::format_amount_minor(month.reference_minor, "GBP");
+            let total = crate::format_amount_minor(month.own_minor + month.reference_minor, "GBP");
             Row::new(vec![
                 Cell::from(month.month.clone()),
-                Cell::from(Line::from(out).alignment(Alignment::Right)),
-                Cell::from(Line::from(inn).alignment(Alignment::Right)),
+                Cell::from(Line::from(tracked).alignment(Alignment::Right)),
+                Cell::from(Line::from(reference).alignment(Alignment::Right)),
+                Cell::from(Line::from(total).alignment(Alignment::Right)),
             ])
         })
         .collect::<Vec<_>>();
 
-    let header = Row::new(vec!["Month", "Transferred Out", "Transferred In"])
-        .style(Style::default().add_modifier(Modifier::BOLD));
+    let header = Row::new(vec![
+        Cell::from("Month"),
+        Cell::from(Line::from("Tracked").alignment(Alignment::Right)),
+        Cell::from(Line::from("Reference").alignment(Alignment::Right)),
+        Cell::from(Line::from("Total").alignment(Alignment::Right)),
+    ])
+    .style(Style::default().add_modifier(Modifier::BOLD));
 
     let table = Table::new(
         rows,
@@ -590,16 +614,189 @@ fn draw_monthly_transfers(frame: &mut Frame, app: &mut App, area: Rect) {
             Constraint::Length(7),
             Constraint::Length(16),
             Constraint::Length(16),
+            Constraint::Length(16),
         ],
     )
     .header(header)
     .column_spacing(1)
-    .block(block)
     .highlight_style(SELECTED_STYLE);
 
     app.monthly_transfers_table_state
         .select(Some(app.selected_transfer_month));
-    frame.render_stateful_widget(table, area, &mut app.monthly_transfers_table_state);
+    frame.render_stateful_widget(table, chunks[1], &mut app.monthly_transfers_table_state);
+}
+
+/// The Gap screen: a single-pane report, not a navigable list — no
+/// `TableState`/highlighting, since there's nothing to drill into. One
+/// bordered outer block containing two sections with no border between
+/// them: a YTD (calendar year to date) summary at the top, and the full
+/// month-by-month history below.
+fn draw_gap(frame: &mut Frame, app: &mut App, area: Rect) {
+    let block = Block::default().title("Gap").borders(Borders::ALL);
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(6),
+            Constraint::Length(1),
+            Constraint::Min(3),
+        ])
+        .split(inner);
+
+    let summary_columns = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Length(30), Constraint::Length(30)])
+        .split(chunks[0]);
+
+    // The report's cutoff — both `monthly_gap` and `cash_now` stop at the
+    // end of this month (see `App::open_gap`), so the two summary columns
+    // and the month table all agree on what "up to date" means.
+    let today = chrono::Local::now().format("%Y-%m-%d").to_string();
+    let (y, m): (i32, u32) = (today[..4].parse().unwrap(), today[5..7].parse().unwrap());
+    let last_complete_month = if m == 1 {
+        format!("{:04}-12", y - 1)
+    } else {
+        format!("{y:04}-{:02}", m - 1)
+    };
+    let year = &last_complete_month[..4];
+    let ytd = app.monthly_gap.iter().filter(|m| m.month.starts_with(year));
+    let income: i64 = ytd.clone().map(|m| m.income_minor).sum();
+    let spend: i64 = ytd.clone().map(|m| m.spend_minor).sum();
+    let gap: i64 = ytd.map(|m| m.gap_minor).sum();
+
+    draw_gap_income_summary(frame, summary_columns[0], &last_complete_month, income, spend, gap);
+    draw_gap_cash_summary(frame, app, summary_columns[1], &last_complete_month, gap);
+    draw_gap_months(frame, app, chunks[2]);
+}
+
+/// Renders a title line, a blank spacer, then a borderless two-column
+/// table of label/amount rows — used by both summary panels so their
+/// amount columns land at a fixed position regardless of label length,
+/// rather than each row's start column drifting with how much of its
+/// hand-padded label string the amount's own width happens to eat into.
+fn draw_summary_table(frame: &mut Frame, area: Rect, title: &str, rows: &[(&str, i64)]) {
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(2), Constraint::Min(1)])
+        .split(area);
+    frame.render_widget(Paragraph::new(title), chunks[0]);
+
+    let table_rows = rows
+        .iter()
+        .map(|(label, amount_minor)| {
+            let amount = crate::format_amount_minor(*amount_minor, "GBP");
+            Row::new(vec![
+                Cell::from(*label),
+                Cell::from(Line::from(amount).alignment(Alignment::Right)),
+            ])
+        })
+        .collect::<Vec<_>>();
+    let table = Table::new(
+        table_rows,
+        [Constraint::Length(12), Constraint::Length(15)],
+    )
+    .column_spacing(1);
+    frame.render_widget(table, chunks[1]);
+}
+
+fn draw_gap_income_summary(
+    frame: &mut Frame,
+    area: Rect,
+    last_complete_month: &str,
+    income: i64,
+    spend: i64,
+    gap: i64,
+) {
+    draw_summary_table(
+        frame,
+        area,
+        &format!("Year to date (up to {last_complete_month})"),
+        &[("Income", income), ("Spend", spend), ("Gap", gap)],
+    );
+}
+
+fn draw_gap_cash_summary(
+    frame: &mut Frame,
+    app: &App,
+    area: Rect,
+    last_complete_month: &str,
+    gap: i64,
+) {
+    let cash_change = app.cash_now - app.cash_at_year_start;
+    // What the Gap doesn't explain about the real cash movement — e.g.
+    // transfers out (to a partner's own untracked account, an overpayment)
+    // that are correctly excluded from spend but still drain cash.
+    let untracked = cash_change - gap;
+
+    draw_summary_table(
+        frame,
+        area,
+        "Cash (Current/Savings)",
+        &[
+            ("1 Jan", app.cash_at_year_start),
+            (&format!("End {last_complete_month}"), app.cash_now),
+            ("Change", cash_change),
+            ("Untracked", untracked),
+        ],
+    );
+}
+
+fn draw_gap_months(frame: &mut Frame, app: &App, area: Rect) {
+    if app.monthly_gap.is_empty() {
+        frame.render_widget(
+            Paragraph::new("No spend or income entries yet. Run `ledgr import` first."),
+            area,
+        );
+        return;
+    }
+
+    let rows = app
+        .monthly_gap
+        .iter()
+        .map(|month| {
+            let income = crate::format_amount_minor(month.income_minor, "GBP");
+            let spend = crate::format_amount_minor(month.spend_minor, "GBP");
+            let gap = crate::format_amount_minor(month.gap_minor, "GBP");
+            let salary = crate::format_amount_minor(month.salary_minor, "GBP");
+            let other = crate::format_amount_minor(month.income_minor - month.salary_minor, "GBP");
+            Row::new(vec![
+                Cell::from(month.month.clone()),
+                Cell::from(Line::from(income).alignment(Alignment::Right)),
+                Cell::from(Line::from(spend).alignment(Alignment::Right)),
+                Cell::from(Line::from(gap).alignment(Alignment::Right)),
+                Cell::from(Line::from(salary).alignment(Alignment::Right)),
+                Cell::from(Line::from(other).alignment(Alignment::Right)),
+            ])
+        })
+        .collect::<Vec<_>>();
+
+    let header = Row::new(vec![
+        Cell::from("Month"),
+        Cell::from(Line::from("Income").alignment(Alignment::Right)),
+        Cell::from(Line::from("Spend").alignment(Alignment::Right)),
+        Cell::from(Line::from("Gap").alignment(Alignment::Right)),
+        Cell::from(Line::from("Salary").alignment(Alignment::Right)),
+        Cell::from(Line::from("Other").alignment(Alignment::Right)),
+    ])
+    .style(Style::default().add_modifier(Modifier::BOLD));
+
+    let table = Table::new(
+        rows,
+        [
+            Constraint::Length(7),
+            Constraint::Length(13),
+            Constraint::Length(13),
+            Constraint::Length(13),
+            Constraint::Length(13),
+            Constraint::Length(13),
+        ],
+    )
+    .header(header)
+    .column_spacing(1);
+
+    frame.render_widget(table, area);
 }
 
 fn draw_transfer_month(frame: &mut Frame, app: &mut App, area: Rect) {
@@ -692,7 +889,8 @@ fn draw_help(frame: &mut Frame, area: Rect) {
         ("<space>a", "Jump to Accounts screen"),
         ("<space>s", "Jump to Monthly Spend screen"),
         ("<space>i", "Jump to Monthly Income screen"),
-        ("<space>t", "Jump to Monthly Transfers screen"),
+        ("<space>t", "Jump to Monthly Inter-Household Transfers screen"),
+        ("<space>g", "Jump to Gap screen"),
         ("n", "Edit note on selected spend entry (spend drill-down)"),
         (
             "i",
@@ -705,7 +903,7 @@ fn draw_help(frame: &mut Frame, area: Rect) {
              drill-down) — re-classifies it as a reimbursement",
         ),
         ("y", "Copy selected row to the clipboard"),
-        ("Esc / q", "Back (or quit from the accounts screen)"),
+        ("Esc / q", "Back (or quit, if there's nowhere to go back to)"),
         ("?", "Toggle this help screen"),
         ("Ctrl-c", "Quit"),
     ];

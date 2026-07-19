@@ -365,19 +365,27 @@ pub struct OpenTransferEntry {
     pub in_description: Option<String>,
 }
 
-/// One row of the Monthly Transfers view: money moved to/from household
-/// accounts in a calendar month. Both directions are kept separate — not
-/// netted — so the user can see "£X went out, £Y came in" per month, the
-/// whole point of the screen (see `doc/planning/plan.md`).
+/// One row of the Monthly Inter-Household Transfers view: money moved
+/// between household accounts in a calendar month, split by where the
+/// *other* side of the transfer sits. Every row in `transfer_entries` is, by
+/// construction, already confirmed internal to the household (see
+/// `Db::monthly_transfer_totals`'s doc comment) — there's no "left the
+/// household" case to show here, that's the spend/income ledgers' job. The
+/// only meaningful split left is whether both sides are accounts `ledgr`
+/// actually tracks, or whether the money has moved to a Reference Household
+/// Account (e.g. a partner's own account) that `ledgr` can't see inside.
 #[derive(Debug, Clone)]
 pub struct MonthlyTransfer {
     /// `YYYY-MM`.
     pub month: String,
-    /// Sum of outbound transfer amounts that month (negative — same signed
-    /// convention as `amount_minor` elsewhere).
-    pub transferred_out_minor: i64,
-    /// Sum of inbound transfer amounts that month (positive).
-    pub transferred_in_minor: i64,
+    /// Sum of transfers between two of the user's own tracked accounts
+    /// (unsigned — nets to zero across total tracked cash, it's just money
+    /// relocating from one tracked account to another).
+    pub own_minor: i64,
+    /// Sum of transfers to/from a registered Reference Household Account
+    /// (unsigned) — money that has left the accounts `ledgr` tracks, even
+    /// though it's still within the household.
+    pub reference_minor: i64,
 }
 
 /// One entry in the derived income ledger — real-world money crossing the
@@ -442,6 +450,25 @@ pub struct MonthlyIncome {
     /// prizes, gifts, unreviewed BGC credits, ...). Backs the TUI's
     /// Month/Salary/Other/Total columns.
     pub salary_minor: i64,
+}
+
+/// One row of the Gap screen's month-by-month section: income, spend and
+/// the Gap (income + spend, since spend is already signed negative) for a
+/// calendar month. Combines `MonthlySpend` and `MonthlyIncome` into a
+/// single row per month rather than two separately-scrolled lists, since
+/// the Gap only makes sense read income-vs-spend side by side.
+#[derive(Debug, Clone)]
+pub struct MonthlyGap {
+    /// `YYYY-MM`.
+    pub month: String,
+    /// Same convention as `MonthlyIncome::income_minor`.
+    pub income_minor: i64,
+    /// Same convention as `MonthlyIncome::salary_minor`.
+    pub salary_minor: i64,
+    /// Same convention as `MonthlySpend::spend_minor` (signed, negative).
+    pub spend_minor: i64,
+    /// `income_minor + spend_minor` — positive when income exceeded spend.
+    pub gap_minor: i64,
 }
 
 /// Which raw transaction(s) a spend entry derives from.

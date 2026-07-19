@@ -2,10 +2,10 @@
 
 ## What's Next
 
-- **Next:** Task 2 — Gap calculation (Delta: The Gap)
+- **Next:** Task 5 — Drive the Gap screen's "Untracked" figure to zero (Delta: The Gap)
 - **Sub-doc:** none
 - **Blockers:** None
-- **Context:** [Checkpoint: Session 2026-07-18d](#checkpoint-session-2026-07-18d)
+- **Context:** Monthly Inter-Household Transfers screen redesigned and verified live 2026-07-19 (`<space>t`); see Delta: TUI Analysis Views, Task 7
 
 ## Summary
 
@@ -23,9 +23,10 @@
 | [Delta: Review and Re-classification TUI](#delta-review-and-re-classification-tui) | [1. Review queue screen](#task-1-review-queue-screen) | TODO — deprioritised below Delta: The Gap |
 | [Delta: Reconciliation](#delta-reconciliation) | [1. Design account-level and household-level reconciliation checks](#task-1-design-account-level-and-household-level-reconciliation-checks) | TODO |
 | [Delta: The Gap](#delta-the-gap) | [1. Minimal income ledger](#task-1-minimal-income-ledger) | ✓ DONE |
-| | [2. Gap calculation](#task-2-gap-calculation) | TODO |
+| | [2. Gap calculation](#task-2-gap-calculation) | ✓ DONE |
 | | [3. Discovery about recording assets and liabilities](#task-3-discovery-about-recording-assets-and-liabilities) | ✓ DONE |
 | | [4. Implement assets and liabilities as accounts](#task-4-implement-assets-and-liabilities-as-accounts) | TODO |
+| | [5. Drive the Gap screen's "Untracked" figure to zero](#task-5-drive-the-gap-screens-untracked-figure-to-zero) | TODO |
 | [Delta: Mortgage Tracking](#delta-mortgage-tracking) | [1. Design the mortgage domain model](#task-1-design-the-mortgage-domain-model) | TODO |
 | [Delta: Spending Categorisation](#delta-spending-categorisation) | [1. Confirm Rebel Finance taxonomy](#task-1-confirm-rebel-finance-taxonomy) | IN PROGRESS |
 | | [2. Rule-based categorisation engine](#task-2-rule-based-categorisation-engine) | TODO |
@@ -36,6 +37,8 @@
 | | [3. Monthly Gap screen and spend drill-down](#task-3-monthly-gap-screen-and-spend-drill-down) | IN PROGRESS |
 | | [4. Leader-key navigation](#task-4-leader-key-navigation) | ✓ DONE — uncommitted, pending review |
 | | [5. Right-align numeric column headers on the Spend/Income month drill-down screens](#task-5-right-align-numeric-column-headers-on-the-spendinccome-month-drill-down-screens) | ✓ DONE |
+| | [6. Right-align the Monthly Transfers header row](#task-6-right-align-the-monthly-transfers-header-row) | ✓ DONE |
+| | [7. Split Monthly Transfers into In/Out/Household columns](#task-7-split-monthly-transfers-into-inouthousehold-columns) | ✓ DONE |
 | [Delta: Packaging & Distribution](#delta-packaging--distribution) | [1. Publish `ledgr` to crates.io](#task-1-publish-ledgr-to-cratesio) | ✓ DONE |
 | | [2. Web frontend](#task-2-web-frontend) | TODO |
 | [Delta: Live Open Banking (Enable Banking)](#delta-live-open-banking-enable-banking) | [1. Evaluate feasibility & security model](#task-1-evaluate-feasibility--security-model) | IN PROGRESS |
@@ -418,11 +421,149 @@ scope — just enough to sum income, no categorisation.
 - **Ad-hoc SimplyHealth net-cost query (not a built feature):** computed via direct SQL against `spend_entries`/`transactions` — £276.00 paid in premiums vs £365.00 claimed back over Jan–Jun 2026 (6 standing-order payments vs 7 claims), net +£89.00 in the user's favour. The user wants a proper annual-cap-aware version (there's a yearly claim cap and the policy year isn't finished), but deferred supplying the cap amount and policy-year start month to a later session — do not invent these values or add a new Delta for it yet.
 
 ### Task 2: Gap calculation
-- TODO — for a given period: `SUM(income_entries) − |SUM(spend_entries)|`.
-  Decide surface: a CLI command (`ledgr gap`, consistent with the
-  existing `ledgr status` pattern) versus a TUI view — lean CLI first
-  since it's the fastest path to a usable number, TUI view can follow
-  under TUI Analysis Views.
+- ✓ DONE (2026-07-18 session) — built as a TUI screen (`Screen::Gap`,
+  reached via `<space>g`), not a CLI command — the user wanted a single
+  report pane: a YTD (calendar-year-to-date) summary at the top and the
+  full month-by-month history below, in one bordered block with no
+  border between the two sections, not two separately-bordered widgets.
+  Deliberately **not navigable** — no `TableState`/row selection/
+  drill-down, unlike every other monthly screen — since there's nothing
+  to jump into from a summary report.
+  - New `MonthlyGap` model (`src/model.rs`): month, income_minor,
+    salary_minor, spend_minor, gap_minor (`income_minor + spend_minor`,
+    spend already signed negative — same convention throughout).
+  - New `Db::monthly_gap_totals` (`src/db/gap.rs`) combines the spend and
+    income ledgers per month via a `UNION` of both ledgers' distinct
+    months `LEFT JOIN`ed back onto each side's aggregates, so a month
+    present in only one ledger still gets a row (`COALESCE`d to 0 on the
+    missing side) rather than being silently dropped by an inner join.
+  - `App::open_gap` (`src/app.rs`) loads it and navigates to
+    `Screen::Gap`; `draw_gap`/`draw_gap_summary`/`draw_gap_months`
+    (`src/ui.rs`) render the two sections via a borderless inner
+    `Layout` split inside one bordered outer `Block`. Month table columns:
+    Month / Income / Spend / Gap / Salary / Other (Salary+Other break down
+    Income, matching the existing Monthly Income screen). All money
+    columns right-aligned, including the YTD summary's plain-text lines
+    (fixed-width label + right-justified amount, not a table).
+  - Verified live via `tmux` against the real database: `<space>g` opens
+    "Gap" showing 2026 YTD (Income £36,452.36 / Spend -£42,473.02 / Gap
+    -£6,020.66) and 7 months of history matching the existing Monthly
+    Spend/Income screens' per-month totals exactly.
+  - 91 unit tests still passing (no new tests — no new classification
+    logic, just an aggregation query); `cargo build`/`clippy` clean (same
+    pre-existing dead-code warnings, nothing new). Not yet committed to
+    git.
+  - **Not addressed, flagged by the user as a future direction, not a
+    task yet:** the growing pile of Reference Household Accounts,
+    Registered People, Income Sources, and Reimbursement Sources
+    (`config.toml`) is starting to resemble a **chart of accounts** —
+    worth revisiting once Delta: Double-Entry Accounting's evaluation
+    happens, not before. Explicitly not scoped into that delta yet, just
+    noted here so the connection isn't lost.
+  - **Follow-up same session: added a cash-drawdown check to the same
+    summary.** The user noticed the YTD Gap being negative (spending more
+    than earning) was concerning without knowing where the shortfall was
+    coming from — suspected savings. Added `Db::cash_balance_as_of`
+    (`src/db/gap.rs`), summing `Db::balance_as_of` (previously-unused,
+    already built for this exact reconstruction) across every `Current`/
+    `Savings` account — **deliberately excludes `CreditCard` accounts**,
+    since their balance is already reflected in the spend ledger via
+    card-payment matching and double-counting it would misstate the
+    drawdown. `App::open_gap` now also loads `cash_at_year_start`/
+    `cash_now` (1 Jan of the current year vs today); `draw_gap_summary`
+    shows both plus their difference under the existing Income/Spend/Gap
+    lines, separated by a blank line, same pane.
+  - **Follow-up, same session: excluded the in-progress current month
+    from the YTD summary** (`draw_gap_summary`'s `ytd` filter now also
+    requires `m.month < current_month`) — the user pointed out July was
+    skewing the ratio: spend so far this month with no matching income
+    yet (salary not paid), since the month isn't over. The month-by-month
+    table below still shows the current month's partial data (useful for
+    the shorter-term view), only the YTD roll-up excludes it. Cash
+    now/1 Jan are unaffected by this — they're real point-in-time
+    balances, not period sums, so a partial month doesn't skew them.
+  - **Real finding, investigated and explained (2026-07-18, same-day
+    follow-up)** — ad-hoc SQL against the real database (no code changes),
+    prompted by the user suspecting untracked outbound transfers. First
+    ruled out a reconciliation bug: direct-summed every real Current/
+    Savings transaction Jan-Jun and it matched the `balance_as_of`-derived
+    cash change exactly (-£8,645.95, once the summary was aligned to the
+    last-complete-month cutoff below), so the balance reconstruction
+    itself is sound. The residual between Gap (-£4,561.76) and cash change
+    (-£8,645.95), roughly **-£4,084**, breaks down as: (1) **~£3,334 net**
+    transferred to Romina's own registered household accounts (£4,244 out
+    to her primary, £840 back in from her secondary, £70 back from
+    primary) — correctly classified as internal transfers, not spend, but
+    her own spending of that money is invisible to `ledgr` — this is
+    exactly the gap **Task 4 below (Manual spend entries via a proxy
+    account)** exists to close, not a bug; (2) **~£271** paid down on the
+    Barclaycard beyond new charges this period (£6,298.86 paid vs
+    £6,027.76 newly spent) — clearing card debt faster than it's being
+    run up, draining cash with no matching new spend entry; (3) **~£479
+    still unaccounted for**, small enough to likely be a date-boundary
+    artefact (e.g. the 1 Jan balance anchor including/excluding same-day
+    transactions) rather than anything real — not chased further.
+  - **Follow-up, same session: laid the summary out as two side-by-side
+    columns** rather than stacked lines — `draw_gap`'s top section now
+    splits horizontally (`Layout::horizontal`, no border between the two)
+    into `draw_gap_income_summary` (Income/Spend/Gap, left) and
+    `draw_gap_cash_summary` (Cash 1 Jan/Now/Change, right), both above the
+    still-borderless month table.
+  - **Follow-up, same session: surfaced the residual in the UI itself** —
+    a fourth line, renamed "Untracked" after "Unexplained" (`cash_change -
+    gap`), added to the Cash column (`draw_gap_cash_summary`), so the
+    £4,084 finding above is visible on the screen itself rather than only
+    discoverable via ad-hoc SQL. `draw_gap` now computes YTD income/spend/
+    gap once and passes `gap` into both summary panels rather than each
+    recomputing it. Verified live: shows "Untracked -4084.19 GBP",
+    matching the SQL investigation exactly.
+  - **Follow-up, same session: Gap is now the screen the app opens on**,
+    not Accounts — the user wants the household finance overview first,
+    not an account list. `App::new` computes the Gap screen's data
+    up front (shared with `open_gap` via a new `load_gap_data(&Db)` free
+    function so both stay in sync) and sets `screen: Screen::Gap`
+    directly. Since this bypassed the old hardcoded "`q` quits only from
+    `Screen::Accounts`, otherwise `back()`" check in `main.rs`, replaced
+    it with a general `App::can_go_back()` (`!nav_stack.is_empty()`) —
+    `q`/`Esc` now quits whenever there's genuinely nowhere to go back to
+    (the screen the app launched into, or any screen reached with an
+    empty history), regardless of which screen that happens to be, rather
+    than special-casing Accounts. Help screen's `Esc / q` line reworded to
+    match. Verified live via `tmux`: launches straight into "Gap";
+    `<space>a` → Accounts → `q` returns to Gap → `q` again quits.
+  - **Follow-up, same session: fixed month ordering across every monthly
+    screen, not just Gap.** The user pointed out the Gap screen listed
+    months newest-first when it should read chronologically; turned out
+    all four monthly queries (`monthly_spend_totals`, `monthly_income_totals`,
+    `monthly_transfer_totals`, `monthly_gap_totals`) had the same `ORDER BY
+    month DESC`, so this was a display convention fix across Monthly
+    Spend/Income/Transfers/Gap, not just the new screen. Flipped all four
+    to `ASC` (`src/db/spend.rs`, `src/db/income.rs`, `src/db/gap.rs`).
+    Since row 0 now means January instead of the most recent month,
+    `open_monthly_spend`/`open_monthly_income`/`open_monthly_transfers`
+    (`src/app.rs`) updated to default the selection to the *last* row
+    (most recent month) instead of index `0`, so opening those screens
+    still lands on current data rather than January. Verified live via
+    `tmux`: Gap and Monthly Spend both read 2026-01 → 2026-07 top to
+    bottom.
+  - **Follow-up, same session: fixed a real column-alignment bug in the
+    two summary panels.** They were hand-padded strings
+    (`format!("{label:<N}{amount:>15}")`), so a label that happened to
+    fully fill its padding width (e.g. "End 2026-06", exactly 11 chars)
+    left less room for the amount's own right-justification than a
+    shorter label did, visibly shifting that row's digits by a column
+    versus its neighbours — the amount's *right* edge (the "GBP" suffix)
+    stayed aligned throughout, but the *start* of the digits drifted.
+    Replaced both panels' rendering with a real `Table` widget (new
+    shared `draw_summary_table` helper, `src/ui.rs`) — same convention
+    already used everywhere else in the app (Month table, Spend/Income
+    drill-downs) — so the amount column sits at a fixed position governed
+    by the `Table`'s own `Constraint`, independent of label length.
+    Verified live via `tmux`: every row's "GBP" now ends at the exact
+    same column in both panels.
+  - 91 unit tests still passing (no new tests — same reasoning as above,
+    pure aggregation); `cargo build`/`clippy` clean. Not yet committed to
+    git.
 - Prototyping session (2026-07-12): before building a "total spend"
   command, ad-hoc-queried `spend_entries` grouped by month directly
   against the real database — surfaced and fixed a real transfer-detection
@@ -512,6 +653,34 @@ scope — just enough to sum income, no categorisation.
   (interest rates, split/tranched parts of the mortgage, terms changing
   over time), not just another balance-snapshot account like the house
   or pension.
+
+### Task 5: Drive the Gap screen's "Untracked" figure to zero
+- TODO — added 2026-07-18, directly off the back of Task 2's real
+  finding: the Gap screen currently shows **Untracked: -£4,084.19**
+  (Jan-Jun 2026), i.e. real cash left the tracked `Current`/`Savings`
+  accounts that neither the spend ledger nor the income ledger explains.
+  Investigated (ad-hoc SQL, see Task 2) into three components, each with
+  a different fix:
+  1. **~£3,334 net to Romina's own registered accounts** — correctly
+     classified as an internal transfer, not spend, but her spending of
+     that money is invisible to `ledgr`. Fixed by **Delta: Credit Card
+     Transaction Import, Task 4 (Manual spend entries via a proxy
+     account)** — once her rough monthly spend is entered manually
+     against a proxy account, this portion should net out.
+  2. **~£271 extra Barclaycard paydown** beyond new charges that period —
+     cash spent reducing a debt that isn't tracked as a liability. Once
+     credit card accounts are included in a net-worth calculation
+     (extending **Task 4 above, Implement assets and liabilities as
+     accounts**, to also track the `CreditCard` account type's balance
+     change rather than excluding it entirely from "cash"), the money
+     paying down the card should show up as a transfer to a tracked
+     liability, not vanish.
+  3. **~£479 still unexplained** — suspected date-boundary artefact (the
+     1 Jan balance anchor's day-inclusion), not yet root-caused.
+  Not yet designed: whether "Untracked" hitting exactly £0 is a realistic
+  target (item 3 needs its own investigation) or whether the aim should
+  just be to shrink it to something clearly attributable, with any
+  residual understood rather than eliminated.
 
 ## Delta: Mortgage Tracking
 
@@ -693,6 +862,19 @@ Build out the TUI beyond the current scaffold.
   - Also added running totals to the top-level `draw_monthly_spend`/`draw_monthly_income` title bars (e.g. `"Monthly Spend — 42473.02 GBP"`), summed live from `app.monthly_spend`/`app.monthly_income` — verified live via `tmux`.
   - `cargo build`/`cargo clippy --all-targets` clean (same pre-existing dead-code warnings, nothing new).
 
+### Task 6: Right-align the Monthly Transfers header row
+- ✓ DONE — folded into Task 7 below since the header rework only made sense once the column design changed shape.
+
+### Task 7: Split Monthly Transfers into In/Out/Household columns
+- ✓ DONE — redesigned mid-session after the originally-planned three-column "In / Out / Household" split turned out to be structurally impossible: a `transfer_entries` row only ever gets created because `classify()` already confirmed its counterpart is internal to the household (via `household_contains()`/`matches_person_name` against tracked accounts + `config.toml`'s `household_accounts`) — so a genuinely external "left the household" counterpart can never reach this table; it falls through to the spend ledger instead (confirmed live: a real payment to Fraser Crichton correctly appears as a `person_reimbursement` spend entry, not a transfer).
+- Shipped design instead: **two columns — Own / Reference — plus a Total**, right-aligned headers throughout (this also delivers the original Task 6 header-alignment goal). "Own" = transfers where both legs are the user's own tracked accounts (`out_account_id`/`in_account_id` both known) — nets to zero across total tracked cash, just money relocating between the user's own accounts. "Reference" = transfers where only one leg is known and the other side is a registered Reference Household Account (e.g. Romina's Primary/Secondary Account) that `ledgr` doesn't track a balance for — this is the real, non-zero, meaningful split (and the same money identified in Delta: The Gap, Task 2's "Untracked" investigation as leaving tracked accounts to Romina).
+- New `Db::monthly_transfer_totals` (`src/db/spend.rs`) query simplified accordingly — no longer needs `household_accounts` config passed in at all, since the two-way split only needs to know whether both `transfer_entries` legs are known, not who the counterpart is.
+- `MonthlyTransfer` model (`src/model.rs`) fields renamed: `own_minor`/`reference_minor` (replacing the old `transferred_out_minor`/`transferred_in_minor`).
+- Screen renamed from "Monthly Transfers" to **"Monthly Inter-Household Transfers"** (`src/ui.rs`'s `draw_monthly_transfers` title, and the help screen's `<space>t` line) — the user's own naming choice, to make clear this screen only ever shows internal household movement, never money genuinely crossing the household boundary (that's the spend/income ledgers' job).
+- Verified live via `tmux` against the real database: headers align correctly over right-justified figures; e.g. 2026-01 shows Own £13,271.93 / Reference £208.99 / Total £13,480.92, matching an independent ad-hoc SQL check exactly across all 7 months of real data.
+- 91 unit tests still passing (no new tests — pure aggregation query, same reasoning as the Gap screen's totals); `cargo build`/`cargo clippy --all-targets` clean (same pre-existing dead-code warnings only, nothing new).
+- Files changed: `src/model.rs`, `src/db/spend.rs`, `src/app.rs`, `src/ui.rs`, `src/config.rs` (factored a small `household_accounts_contain` free function out of `Config::household_account_matches` during an earlier iteration of this work, still in use there). Not yet committed to git — sitting in the working tree alongside the rest of this session's uncommitted work (income ledger, Gap screen, this transfers redesign).
+
 ## Delta: Packaging & Distribution
 
 ### Task 1: Publish `ledgr` to crates.io
@@ -754,6 +936,14 @@ should be built in a way that blocks this.
   shows a real need for postings-level detail (e.g. splitting a
   mortgage payment into interest vs. principal) that the interim model
   can't give.
+- Note (2026-07-18, flagged in passing during the Gap screen session, not
+  investigated): the user observed that the growing pile of config-driven
+  named entities — Reference Household Accounts, Registered People,
+  Income Sources, Reimbursement Sources (`config.toml`) — is starting to
+  resemble a **chart of accounts** in its own right, even without formal
+  double-entry postings. Worth reconsidering as evidence for/against this
+  delta when this evaluation actually happens, not before. See Delta: The
+  Gap, Task 2 for the full context this observation came from.
 
 ## Delta: Payslip Import
 
@@ -867,106 +1057,6 @@ Technical debt flagged during the 2026-07-18 income/reimbursement classification
 
 ### Task 3: Revisit Classification::Refund's hardcoded confidence
 - TODO — `Classification::Refund` has no `confidence` field; every Refund-producing rule (`card_refund`, `cashback`, `claim_reimbursement`, `person_reimbursement`) gets the same hardcoded 0.7 at the insert site in `run_derivation` regardless of how confident the match actually is (e.g. a registered `SIMPLYHEALTH`/known-person match is more certain than a generic unlinked card refund). Add a `confidence: f64` field to the `Refund` variant and thread real per-rule values through, mirroring how `Spend`/`Income` already do this.
-
-## Checkpoint: Session 2026-07-13d
-
-**Completed:**
-- Two display bugs found by the user actually looking at the live TUI
-  (neither caught by tests/build/clippy/SQL checks, since both were
-  purely about rendering, not the persisted data): the counterparty
-  column resolving to a self-referencing leg's own account instead of
-  its real pair, and the drill-down showing two rows per paired transfer
-  when the user expected one. Both initially patched at the
-  query/display layer.
-- **The real fix, once the user rejected the patch as papering over a
-  wrong data model**: `transfer_entries` was redesigned from one row
-  per leg (two rows per paired transfer, linked by
-  `counterpart_transaction_id`) to **one row per real-world transfer**
-  (`out_*`/`in_*` columns naming both legs directly, either side
-  nullable until found). Full schema, model, `Db` layer, `derive.rs`
-  pairing logic (now needs a genuine second-stage "re-pairing sweep"
-  comparing open rows against each other, not just against fresh
-  transactions), and `app.rs`/`ui.rs` all reworked accordingly. See
-  "Delta: Transfer Ledger, Task 3" above for the full technical detail,
-  and `doc/implementation-notes/transfer-ledger-history.md` for the
-  complete reasoning trail and the lesson learned (a display-layer patch
-  had been accepted as "fixed" without checking whether the underlying
-  model actually matched the domain concept).
-- Real database re-migrated a second time (170 merged rows from the
-  prior 300 per-leg rows; 130 fully paired, 40 correctly one-sided; all
-  7 SHARED BILLS ACCO pairs confirmed intact) — backed up fresh first,
-  verified structurally against a scratch copy before touching the real
-  file.
-- Corrected an overclaim from earlier this session: "Transfer Ledger"/
-  "Transfer Entry" had been marked `established` in
-  `doc/domain/ubiquitous-language.md` and attributed to "the user" —
-  downgraded to `candidate`, re-attributed to the assistant, description
-  rewritten to match the corrected one-row-per-transfer shape.
-- Design docs split and rewritten: `transfer-ledger-design.md` is now a
-  clean current-state reference (schema, pairing algorithm, real worked
-  examples, all matching what's actually built); the discovery narrative
-  (original two-tier plan, the tier-3 gap, the retroactive re-scan bug,
-  the TUI display bugs, and this session's schema correction) moved to
-  the new `transfer-ledger-history.md`.
-- Tests: 81 total, all passing throughout every step (rewritten to
-  exercise the new schema, not just re-labelled). `cargo build`/`clippy
-  --all-targets`: 0 errors, same pre-existing dead-code baseline.
-
-**State of the project:** Delta: Transfer Ledger is functionally
-complete and, this time, structurally sound — a transfer entry is now
-genuinely the link between two transactions, matching the user's
-domain model, not two independently-stored legs. Everything from this
-session remains uncommitted, sitting alongside the already-uncommitted
-leader-key nav / Monthly Transfers v1 changes from prior sessions.
-
-**Immediate next priorities:** unchanged from the previous checkpoint —
-see "What's Next" at the top of this file.
-
-## Checkpoint: Session 2026-07-13e
-
-**Completed:**
-- Renamed `derive_spend_entries` to `run_derivation` throughout
-  `src/derive.rs`, `src/analysis.rs`, `src/main.rs`, `src/db/spend.rs`,
-  `src/model.rs` (function, call sites, test names, doc comments) —
-  prompted by the user questioning why transfer pairing ran "as part of
-  derive_spend_entries" when it also derives transfers/card payments.
-  `cargo build`/`test`/`clippy` clean throughout, 81 tests passing.
-- Fixed a genuinely self-contradictory paragraph in
-  `doc/implementation-notes/transfer-ledger-design.md` explaining
-  `transaction_links` vs `transfer_entries` — traced the root cause via
-  a read-only fable-model agent review (see
-  `doc/implementation-notes/transfer-ledger-critique.md`, newly written
-  up and linked from the design doc) rather than just improving the
-  prose.
-- Trimmed the design doc per the user's request: dropped the full DDL
-  block (now points at `src/db/schema.sql`), replaced it with a mermaid
-  ER diagram, and removed `transaction_links` from that diagram since
-  it isn't actually part of the transfer ledger.
-- Added **Credit Card Payment** to `doc/domain/ubiquitous-language.md`
-  (candidate) — the user asked for "card payment" to be made explicit
-  and distinguished from a card *purchase* (spend), since the informal
-  term was ambiguous between opposite ends of the household boundary.
-- Fable review's key finding: `Classification::CardPayment` should
-  already be an internal transfer by the project's own agreed
-  definition, but still writes to the legacy `transaction_links` table
-  instead of `transfer_entries` — logged as new Task 4 under Delta:
-  Transfer Ledger, deliberately **not fixed this session** (user asked
-  for docs/plan only, real fix deferred to a new session).
-- User flagged a separate, unrelated observation for later: OFX's
-  `NAME` field truncation is "super annoying" and worth checking whether
-  Barclaycard's CSV export avoids it, possibly reopening whether OFX is
-  worth keeping as the primary bank import format — logged as a TODO
-  note under Delta: Bank Transaction Import, Task 1, not investigated
-  yet.
-
-**State of the project:** Delta: Transfer Ledger's schema/pairing work
-(Tasks 1-3) is done and structurally sound; this session found and
-documented (but deliberately did not fix) a real gap where credit card
-payments don't yet participate in it. Everything remains uncommitted,
-alongside all prior uncommitted sessions' work.
-
-**Immediate next priorities:** see "What's Next" at the top of this
-file.
 
 ## Checkpoint: Session 2026-07-13f
 
@@ -1210,6 +1300,19 @@ Both the spend and income ledgers are now populated with real, correctly-classif
 1. Delta: The Gap, Task 2 — Gap calculation: build the first real Gap statement (income − spend) now that both ledgers are populated with real data across a meaningful date range.
 2. Decide the SimplyHealth annual-cap tracking approach once the user supplies the cap amount and policy year.
 3. Continue registering any further mis-classified income entries surfaced during ordinary use via the new `a` form.
+
+## Checkpoint: Session 2026-07-19
+
+**What was completed this session:**
+- Delta: TUI Analysis Views, Task 6 + Task 7 — Monthly Transfers screen reworked into "Monthly Inter-Household Transfers" with a redesigned Own/Reference/Total column split (not the originally-planned In/Out/Household — that design was found to be structurally impossible once tested against real data, see Task 7's body for the full reasoning)
+
+**State of the project:**
+Delta: TUI Analysis Views now has only Task 2 (net worth/spending trend views) left as TODO — every other task in that Delta is done. Still nothing from this session or recent prior sessions (income ledger, Gap screen, this transfers redesign) has been committed to git; the working tree carries several sessions' worth of verified-but-uncommitted work.
+
+**Immediate next priorities:**
+1. Review and commit the working tree (income ledger + Gap screen + this transfers redesign, all uncommitted)
+2. Delta: The Gap, Task 5 — drive the Gap screen's "Untracked" figure (currently -£4,084.19 Jan-Jun) to zero
+3. Delta: Credit Card Transaction Import, Task 3/4 — partner's credit card import + manual spend entries via a proxy account, which Task 5 above depends on for its first component
 
 ## Implementation Notes
 

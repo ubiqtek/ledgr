@@ -536,6 +536,7 @@ fn run(
                         KeyCode::Char('s') => app.open_monthly_spend()?,
                         KeyCode::Char('i') => app.open_monthly_income()?,
                         KeyCode::Char('t') => app.open_monthly_transfers()?,
+                        KeyCode::Char('g') => app.open_gap()?,
                         _ => {}
                     }
                     continue;
@@ -550,10 +551,10 @@ fn run(
                     KeyCode::Char('d') if ctrl => app.move_selection(page),
                     KeyCode::Char('u') if ctrl => app.move_selection(-page),
                     KeyCode::Char('q') | KeyCode::Esc => {
-                        if app.screen == app::Screen::Accounts {
-                            app.should_quit = true;
-                        } else {
+                        if app.can_go_back() {
                             app.back();
+                        } else {
+                            app.should_quit = true;
                         }
                     }
                     KeyCode::Char('?') => app.toggle_help(),

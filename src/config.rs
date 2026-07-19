@@ -79,6 +79,17 @@ pub struct HouseholdAccountRef {
     pub name: Option<String>,
 }
 
+/// Truncation-tolerant match of `sort`/`account` (as decoded from a `NAME`
+/// field) against a list of Reference Household Accounts — shared by
+/// `Config::household_account_matches` and `Db::monthly_transfer_totals`
+/// (which only has the account list, not a whole `Config`, to hand).
+pub fn household_accounts_contain(accounts: &[HouseholdAccountRef], sort: &str, account: &str) -> bool {
+    accounts.iter().any(|a| {
+        a.sort_code == sort
+            && (a.account_number == account || a.account_number.starts_with(account))
+    })
+}
+
 /// A registered external payer — see `Config::income_sources`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct IncomeSourceRef {
@@ -188,10 +199,7 @@ impl Config {
     /// reference account, permanently unpairable by design" apart from
     /// "no counterpart found at all".
     pub fn household_account_matches(&self, sort: &str, account: &str) -> bool {
-        self.household_accounts.iter().any(|a| {
-            a.sort_code == sort
-                && (a.account_number == account || a.account_number.starts_with(account))
-        })
+        household_accounts_contain(&self.household_accounts, sort, account)
     }
 
     /// Registers a new Registered Person — see the TUI's `a` "add reference"

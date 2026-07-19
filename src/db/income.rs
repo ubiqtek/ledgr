@@ -58,7 +58,7 @@ impl Db {
         Ok(())
     }
 
-    /// Net income per calendar month, most recent first — backs the TUI's
+    /// Net income per calendar month, earliest first — backs the TUI's
     /// Monthly Income screen. Same shape as `monthly_spend_totals`.
     pub fn monthly_income_totals(&self) -> rusqlite::Result<Vec<MonthlyIncome>> {
         let mut stmt = self.conn().prepare(
@@ -67,7 +67,7 @@ impl Db {
                     SUM(CASE WHEN rule_name = 'employment_income' THEN amount_minor ELSE 0 END)
              FROM income_entries
              GROUP BY month
-             ORDER BY month DESC",
+             ORDER BY month ASC",
         )?;
         let rows = stmt.query_map([], |row| {
             Ok(MonthlyIncome {

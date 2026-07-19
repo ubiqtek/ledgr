@@ -178,15 +178,15 @@ impl Db {
         rows.collect()
     }
 
-    /// Net spend per calendar month, most recent first — backs the TUI's
-    /// Monthly Gap screen. `occurred_on` is `YYYY-MM-DD`, so a plain string
-    /// prefix groups correctly without needing SQLite's `strftime`.
+    /// Net spend per calendar month, earliest first — backs the TUI's
+    /// Monthly Spend screen. `occurred_on` is `YYYY-MM-DD`, so a plain
+    /// string prefix groups correctly without needing SQLite's `strftime`.
     pub fn monthly_spend_totals(&self) -> rusqlite::Result<Vec<MonthlySpend>> {
         let mut stmt = self.conn().prepare(
             "SELECT substr(occurred_on, 1, 7) AS month, SUM(amount_minor)
              FROM spend_entries
              GROUP BY month
-             ORDER BY month DESC",
+             ORDER BY month ASC",
         )?;
         let rows = stmt.query_map([], |row| {
             Ok(MonthlySpend {
@@ -592,31 +592,63 @@ impl Db {
             .map(|outer: Option<Option<Id>>| outer.flatten())
     }
 
-    /// Net transferred in/out per calendar month, most recent first — backs
-    /// the TUI's Monthly Transfers screen. Same shape as
-    /// `monthly_spend_totals`, but keeps out/in separate (not netted) per
-    /// `MonthlyTransfer`'s doc comment. A row contributes to "out" whenever
-    /// its outgoing side is known (paired or not) and to "in" whenever its
-    /// incoming side is known — independent of each other, since a
-    /// one-sided row still represents real money having moved on its known
-    /// side.
+    /// Transferred within tracked accounts vs to/from a reference account,
+    /// per calendar month, earliest first — backs the TUI's Monthly
+    /// Inter-Household Transfers screen. Same shape as `monthly_spend_totals`,
+    /// but keeps the two totals apart rather than netting them — see
+    /// `MonthlyTransfer`'s doc comment for why there's no third "left the
+    /// household" bucket: every `transfer_entries` row is already confirmed
+    /// internal by the time it's created.
+    ///
+    /// Each row is classified into exactly one bucket, so the two totals
+    /// never double-count a single real-world transfer:
+    /// - Both legs known (`out_transaction_id` and `in_transaction_id` both
+    ///   set) → **own** — both ends are accounts `ledgr` tracks.
+    /// - Only one leg known → **reference** — the other side is a
+    ///   Reference Household Account `ledgr` doesn't track a balance for
+    ///   (matched the same truncation-tolerant way
+    ///   `Config::household_account_matches` does).
     pub fn monthly_transfer_totals(&self) -> rusqlite::Result<Vec<MonthlyTransfer>> {
         let mut stmt = self.conn().prepare(
             "SELECT substr(occurred_on, 1, 7) AS month,
-                    -SUM(CASE WHEN out_transaction_id IS NOT NULL THEN amount_minor ELSE 0 END),
-                    SUM(CASE WHEN in_transaction_id IS NOT NULL THEN amount_minor ELSE 0 END)
+                    amount_minor,
+                    out_transaction_id IS NOT NULL,
+                    in_transaction_id IS NOT NULL
              FROM transfer_entries
-             GROUP BY month
-             ORDER BY month DESC",
+             ORDER BY month ASC",
         )?;
         let rows = stmt.query_map([], |row| {
-            Ok(MonthlyTransfer {
-                month: row.get(0)?,
-                transferred_out_minor: row.get(1)?,
-                transferred_in_minor: row.get(2)?,
-            })
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, i64>(1)?,
+                row.get::<_, bool>(2)?,
+                row.get::<_, bool>(3)?,
+            ))
         })?;
-        rows.collect()
+
+        let mut totals: Vec<MonthlyTransfer> = Vec::new();
+        for row in rows {
+            let (month, amount_minor, out_known, in_known) = row?;
+
+            let entry = match totals.iter().position(|m| m.month == month) {
+                Some(idx) => &mut totals[idx],
+                None => {
+                    totals.push(MonthlyTransfer {
+                        month,
+                        own_minor: 0,
+                        reference_minor: 0,
+                    });
+                    totals.last_mut().expect("just pushed")
+                }
+            };
+
+            if out_known && in_known {
+                entry.own_minor += amount_minor;
+            } else {
+                entry.reference_minor += amount_minor;
+            }
+        }
+        Ok(totals)
     }
 
     /// All transfer entries for one calendar month (`month` as `YYYY-MM`),

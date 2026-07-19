@@ -2,7 +2,7 @@ use crate::config::{Config, HouseholdAccountRef, RegisteredPersonRef};
 use crate::db::{AccountStatus, Db};
 use crate::derive;
 use crate::model::{
-    Id, IncomeEntryWithAccount, MonthlyIncome, MonthlySpend, MonthlyTransfer,
+    Id, IncomeEntryWithAccount, MonthlyGap, MonthlyIncome, MonthlySpend, MonthlyTransfer,
     SpendEntryWithAccount, Transaction, TransferEntry,
 };
 use ratatui::widgets::TableState;
@@ -18,6 +18,7 @@ pub enum Screen {
     IncomeMonth,
     MonthlyTransfers,
     TransferMonth,
+    Gap,
     Help,
 }
 
@@ -49,6 +50,18 @@ pub struct App {
     pub income_month_entries: Vec<IncomeEntryWithAccount>,
     pub selected_income_entry: usize,
     pub income_month_table_state: TableState,
+    /// `Screen::Gap`'s month-by-month rows. No selection index or
+    /// `TableState` — unlike the other monthly screens, the Gap screen has
+    /// no drill-down to select into, just a summary report.
+    pub monthly_gap: Vec<MonthlyGap>,
+    /// Total cash (`Current`/`Savings` accounts) balance at the start of
+    /// the calendar year and at the end of the last complete month (same
+    /// cutoff as `monthly_gap`, not literally "now" — see `open_gap`) —
+    /// lets the Gap screen's summary show where a YTD spend-exceeds-income
+    /// shortfall actually came from (e.g. drawn down from savings) rather
+    /// than leaving it unexplained.
+    pub cash_at_year_start: i64,
+    pub cash_now: i64,
     /// Reference household accounts (e.g. a partner's — see ADR 0008),
     /// loaded once from `config.toml` at startup, same lifecycle as the
     /// account-name overrides applied in `App::new`, so
@@ -146,9 +159,12 @@ impl App {
         let config_path = Config::default_path()?;
         let config = Config::load_or_init(&config_path)?;
         config.apply_account_name_overrides(accounts.iter_mut().map(|s| &mut s.account));
+        let (monthly_gap, cash_at_year_start, cash_now) = load_gap_data(&db)?;
         Ok(Self {
             db,
-            screen: Screen::Accounts,
+            // The Gap screen is the first thing the user wants to see on
+            // launch — a household finance overview, not an account list.
+            screen: Screen::Gap,
             nav_stack: Vec::new(),
             accounts,
             selected_account: 0,
@@ -168,6 +184,9 @@ impl App {
             income_month_entries: Vec::new(),
             selected_income_entry: 0,
             income_month_table_state: TableState::default(),
+            monthly_gap,
+            cash_at_year_start,
+            cash_now,
             household_accounts: config.household_accounts.clone(),
             monthly_transfers: Vec::new(),
             selected_transfer_month: 0,
@@ -199,7 +218,9 @@ impl App {
 
     pub fn open_monthly_spend(&mut self) -> anyhow::Result<()> {
         self.monthly_spend = self.db.monthly_spend_totals()?;
-        self.selected_month = 0;
+        // Rows are earliest-first; start the selection on the most recent
+        // month (the last row) rather than January.
+        self.selected_month = self.monthly_spend.len().saturating_sub(1);
         self.navigate_to(Screen::MonthlySpend);
         Ok(())
     }
@@ -216,7 +237,9 @@ impl App {
 
     pub fn open_monthly_income(&mut self) -> anyhow::Result<()> {
         self.monthly_income = self.db.monthly_income_totals()?;
-        self.selected_income_month = 0;
+        // Rows are earliest-first; start the selection on the most recent
+        // month (the last row) rather than January.
+        self.selected_income_month = self.monthly_income.len().saturating_sub(1);
         self.navigate_to(Screen::MonthlyIncome);
         Ok(())
     }
@@ -228,6 +251,22 @@ impl App {
         self.income_month_entries = self.db.income_entries_for_month(&month.month)?;
         self.selected_income_entry = 0;
         self.navigate_to(Screen::IncomeMonth);
+        Ok(())
+    }
+
+    /// Opens `Screen::Gap` — the YTD summary + month-by-month report
+    /// combining the spend and income ledgers. No selection state to reset,
+    /// unlike the other monthly screens: this screen has no drill-down.
+    /// The whole report (summary and month-by-month alike) only covers
+    /// complete calendar months — the current, still-in-progress month is
+    /// dropped entirely, since its partial spend with no matching income
+    /// yet (e.g. salary not yet paid) would misrepresent both.
+    pub fn open_gap(&mut self) -> anyhow::Result<()> {
+        let (monthly_gap, cash_at_year_start, cash_now) = load_gap_data(&self.db)?;
+        self.monthly_gap = monthly_gap;
+        self.cash_at_year_start = cash_at_year_start;
+        self.cash_now = cash_now;
+        self.navigate_to(Screen::Gap);
         Ok(())
     }
 
@@ -385,7 +424,9 @@ impl App {
     /// — no live re-derivation, per ADR 0009.
     pub fn open_monthly_transfers(&mut self) -> anyhow::Result<()> {
         self.monthly_transfers = self.db.monthly_transfer_totals()?;
-        self.selected_transfer_month = 0;
+        // Rows are earliest-first; start the selection on the most recent
+        // month (the last row) rather than January.
+        self.selected_transfer_month = self.monthly_transfers.len().saturating_sub(1);
         self.navigate_to(Screen::MonthlyTransfers);
         Ok(())
     }
@@ -543,6 +584,7 @@ impl App {
             Screen::IncomeMonth => self.income_month_entries.len(),
             Screen::MonthlyTransfers => self.monthly_transfers.len(),
             Screen::TransferMonth => self.transfer_month_entries.len(),
+            Screen::Gap => return,
             Screen::Help => return,
         };
         if len == 0 {
@@ -557,6 +599,7 @@ impl App {
             Screen::IncomeMonth => &mut self.selected_income_entry,
             Screen::MonthlyTransfers => &mut self.selected_transfer_month,
             Screen::TransferMonth => &mut self.selected_transfer_entry,
+            Screen::Gap => return,
             Screen::Help => return,
         };
         let next = *selected as i32 + delta;
@@ -574,6 +617,7 @@ impl App {
             Screen::IncomeMonth => &mut self.selected_income_entry,
             Screen::MonthlyTransfers => &mut self.selected_transfer_month,
             Screen::TransferMonth => &mut self.selected_transfer_entry,
+            Screen::Gap => return,
             Screen::Help => return,
         };
         *selected = 0;
@@ -590,6 +634,7 @@ impl App {
             Screen::IncomeMonth => self.income_month_entries.len(),
             Screen::MonthlyTransfers => self.monthly_transfers.len(),
             Screen::TransferMonth => self.transfer_month_entries.len(),
+            Screen::Gap => return,
             Screen::Help => return,
         };
         if len == 0 {
@@ -604,6 +649,7 @@ impl App {
             Screen::IncomeMonth => &mut self.selected_income_entry,
             Screen::MonthlyTransfers => &mut self.selected_transfer_month,
             Screen::TransferMonth => &mut self.selected_transfer_entry,
+            Screen::Gap => return,
             Screen::Help => return,
         };
         *selected = len - 1;
@@ -703,11 +749,13 @@ impl App {
             }
             Screen::MonthlyTransfers => {
                 let month = self.monthly_transfers.get(self.selected_transfer_month)?;
+                let total = month.own_minor + month.reference_minor;
                 Some(format!(
-                    "{}\t{}\t{}",
+                    "{}\t{}\t{}\t{}",
                     month.month,
-                    crate::format_amount_minor(month.transferred_out_minor.abs(), "GBP"),
-                    crate::format_amount_minor(month.transferred_in_minor, "GBP")
+                    crate::format_amount_minor(month.own_minor, "GBP"),
+                    crate::format_amount_minor(month.reference_minor, "GBP"),
+                    crate::format_amount_minor(total, "GBP")
                 ))
             }
             Screen::TransferMonth => {
@@ -742,6 +790,7 @@ impl App {
                     to
                 ))
             }
+            Screen::Gap => None,
             Screen::Help => None,
         }
     }
@@ -763,6 +812,13 @@ impl App {
         self.screen = self.nav_stack.pop().unwrap_or(Screen::Accounts);
     }
 
+    /// Whether `back()` has anywhere to return to — `false` on the screen
+    /// the user launched into (or landed on via a leader-key jump with an
+    /// empty history), which is when `q`/`Esc` should quit instead.
+    pub fn can_go_back(&self) -> bool {
+        !self.nav_stack.is_empty()
+    }
+
     /// Shows the help screen, or leaves it (returning to whichever screen
     /// was open before) if it's already showing.
     pub fn toggle_help(&mut self) {
@@ -772,6 +828,34 @@ impl App {
             self.navigate_to(Screen::Help);
         }
     }
+}
+
+/// Loads `Screen::Gap`'s data: month-by-month rows (excluding the current,
+/// still-in-progress month) plus cash balances at the start of the year and
+/// at the end of the last complete month. Shared by `App::new` (the Gap
+/// screen is what the user sees on launch) and `App::open_gap` (jumping
+/// back to it via `<space>g`), so both stay in sync.
+fn load_gap_data(db: &Db) -> anyhow::Result<(Vec<MonthlyGap>, i64, i64)> {
+    use chrono::Datelike;
+
+    let today = chrono::Local::now().date_naive();
+    let current_month = today.format("%Y-%m").to_string();
+    let monthly_gap = db
+        .monthly_gap_totals()?
+        .into_iter()
+        .filter(|m| m.month < current_month)
+        .collect();
+    // The last day of the last complete month — both the cash comparison
+    // and the ledger totals above should end at the same cutoff, rather
+    // than the ledger stopping in June while cash keeps counting into July.
+    let period_end = chrono::NaiveDate::from_ymd_opt(today.year(), today.month(), 1)
+        .expect("valid date")
+        .pred_opt()
+        .expect("month always has a preceding day");
+    let year_start = format!("{}-01-01", today.year());
+    let cash_at_year_start = db.cash_balance_as_of(&year_start)?;
+    let cash_now = db.cash_balance_as_of(&period_end.format("%Y-%m-%d").to_string())?;
+    Ok((monthly_gap, cash_at_year_start, cash_now))
 }
 
 /// Guesses a Registered Person `name` value from a transaction description,

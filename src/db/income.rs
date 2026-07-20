@@ -45,6 +45,16 @@ impl Db {
         Ok(self.conn().last_insert_rowid())
     }
 
+    /// Sets (or, given `None`, clears) an income entry's free-text `note`.
+    /// Same idiom/contract as `Db::set_spend_entry_note`.
+    pub fn set_income_entry_note(&self, id: Id, note: Option<&str>) -> rusqlite::Result<()> {
+        self.conn().execute(
+            "UPDATE income_entries SET note = ?1 WHERE id = ?2",
+            params![note, id],
+        )?;
+        Ok(())
+    }
+
     pub fn insert_income_entry_source(
         &self,
         income_entry_id: Id,

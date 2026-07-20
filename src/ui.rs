@@ -2,7 +2,7 @@ use crate::app::{App, Screen};
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::Line;
-use ratatui::widgets::{Block, Borders, Cell, Clear, Paragraph, Row, Table};
+use ratatui::widgets::{Block, Borders, Cell, Clear, Paragraph, Row, Table, Wrap};
 use ratatui::Frame;
 
 const SELECTED_STYLE: Style = Style::new()
@@ -82,7 +82,20 @@ fn draw_note_editor(frame: &mut Frame, buffer: &str, area: Rect) {
 /// which by definition has no imports) rather than a lookup failure, so
 /// that's stated plainly instead of looking like an error.
 fn draw_transfer_detail(frame: &mut Frame, detail: &crate::app::TransferDetail, area: Rect) {
-    let popup = centered_rect(70, 8, area);
+    // Popup width only depends on `area`/the 70% split, not on `height`, so
+    // it's known before the note's wrapped line count (needed for `height`)
+    // can be computed — see `centered_rect`.
+    let inner_width = (area.width * 70 / 100).saturating_sub(2) as usize;
+
+    let mut height = 8;
+    if detail.linked_spend.is_some() {
+        height += 3;
+    }
+    let note_text = detail.note.as_deref().map(|note| format!("Note: {note}"));
+    if let Some(note_text) = &note_text {
+        height += 1 + wrapped_line_count(note_text, inner_width) as u16;
+    }
+    let popup = centered_rect(70, height, area);
     frame.render_widget(Clear, popup);
 
     let own_amount = crate::format_amount_minor(detail.own.amount_minor, &detail.own.currency);
@@ -113,12 +126,50 @@ fn draw_transfer_detail(frame: &mut Frame, detail: &crate::app::TransferDetail, 
         }
     }
 
-    let paragraph = Paragraph::new(lines.join("\n")).block(
-        Block::default()
-            .title("Both legs of this transfer (any key to close)")
-            .borders(Borders::ALL),
-    );
+    if let Some(spend) = &detail.linked_spend {
+        let spend_amount = crate::format_amount_minor(spend.amount_minor, &spend.currency);
+        lines.push(String::new());
+        lines.push(format!(
+            "Tracked spend: {}  {}  {}",
+            spend.occurred_on, spend_amount, spend.description
+        ));
+    }
+
+    if let Some(note_text) = note_text {
+        lines.push(String::new());
+        lines.push(note_text);
+    }
+
+    let paragraph = Paragraph::new(lines.join("\n"))
+        .wrap(Wrap { trim: false })
+        .block(
+            Block::default()
+                .title("Both legs of this transfer (any key to close)")
+                .borders(Borders::ALL),
+        );
     frame.render_widget(paragraph, popup);
+}
+
+/// Greedy word-wrap line count for a single line of text at the given
+/// column width — used to size the transfer-detail popup around a
+/// free-text note before rendering it with `Paragraph`'s own `Wrap`, so the
+/// popup is tall enough to show the whole note without clipping.
+fn wrapped_line_count(text: &str, width: usize) -> usize {
+    if width == 0 {
+        return 1;
+    }
+    let mut lines = 1;
+    let mut col = 0;
+    for word in text.split(' ') {
+        let word_len = word.chars().count();
+        if col > 0 && col + 1 + word_len > width {
+            lines += 1;
+            col = word_len;
+        } else {
+            col += if col > 0 { 1 + word_len } else { word_len };
+        }
+    }
+    lines
 }
 
 /// Shows the raw imported transaction behind the selected income entry
@@ -582,11 +633,15 @@ fn draw_income_month(frame: &mut Frame, app: &mut App, area: Rect) {
                 .find(|s| s.account.id == row.account_id)
                 .map(|s| s.account.name.as_str())
                 .unwrap_or("?");
+            let description = match &entry.note {
+                Some(note) => format!("{}  \u{1f4dd} {note}", entry.description),
+                None => entry.description.clone(),
+            };
             Row::new(vec![
                 Cell::from(entry.occurred_on.clone()),
                 Cell::from(Line::from(amount).alignment(Alignment::Right)),
                 Cell::from(entry.counterparty.clone().unwrap_or_default()),
-                Cell::from(entry.description.clone()),
+                Cell::from(description),
                 Cell::from(rule),
                 Cell::from(account_name.to_string()),
             ])
@@ -1081,13 +1136,18 @@ fn build_transfer_rows<'a>(
                 .out_description
                 .as_deref()
                 .or(entry.in_description.as_deref())
-                .unwrap_or("");
+                .unwrap_or("")
+                .to_string();
+            let tracked = if entry.has_tracked_spend { "Y" } else { "" };
+            let has_note = if entry.note.is_some() { "*" } else { "" };
             Row::new(vec![
                 Cell::from(entry.occurred_on.clone()),
                 Cell::from(Line::from(amount).alignment(Alignment::Right)),
-                Cell::from(description.to_string()),
+                Cell::from(Line::from(tracked).alignment(Alignment::Center)),
+                Cell::from(description),
                 Cell::from(from),
                 Cell::from(to),
+                Cell::from(Line::from(has_note).alignment(Alignment::Center)),
             ])
         })
         .collect::<Vec<_>>()
@@ -1103,9 +1163,11 @@ fn draw_transfer_month_table(
     let header = Row::new(vec![
         Cell::from("Date"),
         Cell::from(Line::from("Amount").alignment(Alignment::Right)),
+        Cell::from(Line::from("Spend").alignment(Alignment::Center)),
         Cell::from("Description"),
         Cell::from("From"),
         Cell::from("To"),
+        Cell::from(Line::from("Note").alignment(Alignment::Center)),
     ])
     .style(Style::default().add_modifier(Modifier::BOLD));
 
@@ -1114,9 +1176,11 @@ fn draw_transfer_month_table(
         [
             Constraint::Length(10),
             Constraint::Length(12),
-            Constraint::Fill(1),
+            Constraint::Length(7),
+            Constraint::Length(50),
             Constraint::Length(20),
             Constraint::Length(22),
+            Constraint::Length(6),
         ],
     )
     .header(header)
@@ -1144,13 +1208,17 @@ fn draw_help(frame: &mut Frame, area: Rect) {
         ("<space>i", "Jump to Monthly Income screen"),
         ("<space>t", "Jump to Monthly Inter-Household Transfers screen"),
         ("<space>g", "Jump to Gap screen"),
-        ("n", "Edit note on selected spend entry (spend drill-down)"),
+        (
+            "n",
+            "Edit note on selected entry (spend/income/transfers drill-downs)",
+        ),
         (
             "i",
-            "Show both legs of selected transfer (transfers drill-down), \
-             source transaction of selected income entry (income \
-             drill-down), or Salary/Other breakdown of selected month (Gap \
-             screen)",
+            "Show both legs and any tracked spend of selected transfer \
+             (transfers drill-down), the originating transfer of selected \
+             spend entry if recorded from one (spend drill-down), source \
+             transaction of selected income entry (income drill-down), or \
+             Salary/Other breakdown of selected month (Gap screen)",
         ),
         (
             "a",

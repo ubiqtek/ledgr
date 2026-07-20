@@ -150,6 +150,13 @@ CREATE TABLE IF NOT EXISTS spend_entries (
     -- non-refund entry, and for a refund whose original charge wasn't found
     -- (best-effort merchant-prefix match, see `Db::find_refund_original`).
     refunds_spend_entry_id INTEGER REFERENCES spend_entries(id) ON DELETE SET NULL,
+    -- The transfer this manual spend entry was recorded from (`s` on
+    -- `Screen::TransferMonth` — see Delta: Credit Card Transaction Import,
+    -- Task 4/6). `NULL` for every entry not created that way (i.e. every
+    -- normal derived spend entry). Lets the Transfers drill-down show
+    -- whether a spend has already been recorded against a given transfer,
+    -- and resolve back to it for review/amendment.
+    transfer_entry_id INTEGER REFERENCES transfer_entries(id) ON DELETE SET NULL,
     classified_by  TEXT NOT NULL CHECK (classified_by IN
                        ('rule', 'matcher', 'manual')),
     confidence     REAL,
@@ -247,6 +254,10 @@ CREATE TABLE IF NOT EXISTS transfer_entries (
                                                      -- involved
                          )),
     pair_confidence     REAL,
+
+    -- Free-text annotation, same idiom as spend_entries.note/
+    -- income_entries.note — e.g. recording why a transfer was made.
+    note                TEXT,
 
     -- Classification provenance for "this is certainly an internal
     -- transfer" — from whichever leg's classify() result created this row.

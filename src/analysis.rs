@@ -13,6 +13,10 @@ use crate::model::Id;
 
 /// Total signed amount (minor units) per category for one account's spend
 /// entries, largest magnitude first. `None` category means uncategorised.
+/// Not yet wired to a screen/command — awaiting Delta: Spending
+/// Categorisation and Delta: TUI Analysis Views, Task 2 (net worth/spending
+/// trend views), see `doc/planning/plan.md`.
+#[allow(dead_code)]
 pub fn category_totals(db: &Db, account_id: Id) -> rusqlite::Result<Vec<(Option<Id>, i64)>> {
     let mut stmt = db.conn().prepare(
         "SELECT se.category_id, SUM(se.amount_minor) AS total

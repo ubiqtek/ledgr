@@ -27,7 +27,10 @@ impl Db {
         Self::init(conn)
     }
 
-    /// Open a private in-memory database. Useful for tests.
+    /// Open a private in-memory database. Only ever exercised by `#[cfg(test)]`
+    /// code within this crate, so a plain `cargo build` (which doesn't compile
+    /// test code) sees it as unused — hence the `allow`.
+    #[allow(dead_code)]
     pub fn open_in_memory() -> rusqlite::Result<Self> {
         let conn = Connection::open_in_memory()?;
         Self::init(conn)
@@ -38,6 +41,7 @@ impl Db {
         Self::migrate_statements_to_imports(&conn)?;
         Self::migrate_add_transactions_notes(&conn)?;
         Self::migrate_add_spend_entries_refunds_column(&conn)?;
+        Self::migrate_add_spend_entries_transfer_entry_id_column(&conn)?;
         let renamed_leg_shaped_transfer_entries =
             Self::migrate_rename_leg_shaped_transfer_entries(&conn)?;
         let renamed_narrow_pair_method_transfer_entries =
@@ -49,6 +53,10 @@ impl Db {
         if renamed_narrow_pair_method_transfer_entries {
             Self::migrate_copy_narrow_pair_method_transfer_entries(&conn)?;
         }
+        // Runs after the rename/merge migrations above so it only ever
+        // touches the current-shape `transfer_entries` table, never one
+        // mid-rename to `_pre_leg_merge`/`_pre_pair_method_wide_shape`.
+        Self::migrate_add_transfer_entries_note_column(&conn)?;
         Self::migrate_retire_transaction_links(&conn)?;
         Ok(Self { conn })
     }
@@ -127,6 +135,57 @@ impl Db {
             "ALTER TABLE spend_entries ADD COLUMN refunds_spend_entry_id INTEGER
                 REFERENCES spend_entries(id) ON DELETE SET NULL;",
         )
+    }
+
+    /// One-off migration for databases created before `transfer_entry_id`
+    /// was added to `spend_entries` (Delta: Credit Card Transaction Import,
+    /// Task 6 — links a manual "spend from transfer" entry back to the
+    /// transfer it was recorded from). Same `ALTER TABLE ... ADD COLUMN`
+    /// pattern as `migrate_add_spend_entries_refunds_column`; no-op if
+    /// already present.
+    fn migrate_add_spend_entries_transfer_entry_id_column(conn: &Connection) -> rusqlite::Result<()> {
+        let has_table: bool = conn.query_row(
+            "SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name = 'spend_entries'",
+            [],
+            |row| row.get::<_, i64>(0),
+        )? > 0;
+        if !has_table {
+            return Ok(());
+        }
+        let has_column: bool = conn
+            .prepare(
+                "SELECT 1 FROM pragma_table_info('spend_entries') WHERE name = 'transfer_entry_id'",
+            )?
+            .exists([])?;
+        if has_column {
+            return Ok(());
+        }
+        conn.execute_batch(
+            "ALTER TABLE spend_entries ADD COLUMN transfer_entry_id INTEGER
+                REFERENCES transfer_entries(id) ON DELETE SET NULL;",
+        )
+    }
+
+    /// One-off migration for databases created before `note` was added to
+    /// `transfer_entries` (Delta: Credit Card Transaction Import, Task 6) —
+    /// same free-text annotation idiom as `spend_entries.note`/
+    /// `income_entries.note`. No-op if already present.
+    fn migrate_add_transfer_entries_note_column(conn: &Connection) -> rusqlite::Result<()> {
+        let has_table: bool = conn.query_row(
+            "SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name = 'transfer_entries'",
+            [],
+            |row| row.get::<_, i64>(0),
+        )? > 0;
+        if !has_table {
+            return Ok(());
+        }
+        let has_column: bool = conn
+            .prepare("SELECT 1 FROM pragma_table_info('transfer_entries') WHERE name = 'note'")?
+            .exists([])?;
+        if has_column {
+            return Ok(());
+        }
+        conn.execute_batch("ALTER TABLE transfer_entries ADD COLUMN note TEXT;")
     }
 
     /// One-off migration for databases whose `transfer_entries` table still
@@ -438,10 +497,6 @@ impl Db {
 
     pub fn conn(&self) -> &Connection {
         &self.conn
-    }
-
-    pub fn conn_mut(&mut self) -> &mut Connection {
-        &mut self.conn
     }
 }
 

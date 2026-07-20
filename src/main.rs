@@ -255,16 +255,6 @@ fn run_status(db: Db) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Last 4 digits of an optional sort code/account number, `"(1289)"`, or
-/// `"-"` when absent — full digits aren't needed to eyeball which account is
-/// which, and shortening avoids the columns dominating the table's width.
-fn last4(value: &Option<String>) -> String {
-    value
-        .as_deref()
-        .map(last4_str)
-        .unwrap_or_else(|| "-".to_string())
-}
-
 fn last4_str(value: &str) -> String {
     if value.len() > 4 {
         format!("({})", &value[value.len() - 4..])
@@ -598,17 +588,27 @@ fn run(
                     }
                     KeyCode::Char('q') | KeyCode::Esc => {
                         if app.can_go_back() {
-                            app.back();
+                            app.back()?;
                         } else {
                             app.should_quit = true;
                         }
                     }
-                    KeyCode::Char('?') => app.toggle_help(),
-                    KeyCode::Char('n') if app.screen == app::Screen::SpendMonth => {
+                    KeyCode::Char('?') => app.toggle_help()?,
+                    KeyCode::Char('n')
+                        if matches!(
+                            app.screen,
+                            app::Screen::SpendMonth
+                                | app::Screen::IncomeMonth
+                                | app::Screen::TransferMonth
+                        ) =>
+                    {
                         app.start_editing_note();
                     }
                     KeyCode::Char('i') if app.screen == app::Screen::TransferMonth => {
                         app.show_transfer_detail()?;
+                    }
+                    KeyCode::Char('i') if app.screen == app::Screen::SpendMonth => {
+                        app.show_spend_transfer_detail()?;
                     }
                     KeyCode::Char('s') if app.screen == app::Screen::TransferMonth => {
                         app.start_spend_from_transfer();

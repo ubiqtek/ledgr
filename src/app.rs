@@ -3,8 +3,8 @@ use crate::db::{AccountStatus, Db};
 use crate::derive;
 use crate::model::{
     AccountType, ClassifiedBy, Id, IncomeEntryWithAccount, MonthlyGap, MonthlyIncome,
-    MonthlySpend, MonthlyTransfer, NewAccount, NewSpendEntry, NewTransaction, SpendEntryWithAccount,
-    Transaction, TransferEntry,
+    MonthlySpend, MonthlyTransfer, NewAccount, NewSpendEntry, NewTransaction, SpendEntry,
+    SpendEntryWithAccount, Transaction, TransferEntry,
 };
 use ratatui::widgets::TableState;
 use std::path::PathBuf;
@@ -188,6 +188,14 @@ pub struct TransferDetail {
     pub own_account_name: String,
     pub counterpart: Option<Transaction>,
     pub counterpart_label: String,
+    /// The manual spend entry already recorded from this transfer (`s` on
+    /// `Screen::TransferMonth`), if any — see Delta: Credit Card
+    /// Transaction Import, Task 6.
+    pub linked_spend: Option<SpendEntry>,
+    /// The transfer's own free-text note (`n` on `Screen::TransferMonth`),
+    /// if any — the table itself only shows a `*` marker for this, the full
+    /// text is only shown here.
+    pub note: Option<String>,
 }
 
 /// Which field of `SpendFromTransferForm` is currently being edited.
@@ -231,6 +239,7 @@ pub struct SpendFromTransferForm {
     pub household_label: String,
     proxy_account_name: String,
     currency: String,
+    transfer_entry_id: Id,
 }
 
 impl App {
@@ -700,7 +709,43 @@ impl App {
         let Some(entry) = visible.get(self.selected_transfer_entry) else {
             return Ok(());
         };
+        self.transfer_detail = self.build_transfer_detail(entry)?;
+        Ok(())
+    }
 
+    /// Opens the same "both legs of this transfer" popup as
+    /// `show_transfer_detail`, but starting from a spend entry rather than
+    /// the transfer itself — `i` on `Screen::SpendMonth`, for a spend entry
+    /// recorded from a transfer (`s` on `Screen::TransferMonth`). A no-op if
+    /// the selected spend entry has no `transfer_entry_id` (i.e. it wasn't
+    /// recorded that way).
+    pub fn show_spend_transfer_detail(&mut self) -> anyhow::Result<()> {
+        if self.screen != Screen::SpendMonth {
+            return Ok(());
+        }
+        let Some(row) = self.spend_month_entries.get(self.selected_spend_entry) else {
+            return Ok(());
+        };
+        let Some(transfer_entry_id) = row.entry.transfer_entry_id else {
+            return Ok(());
+        };
+        let Some(entry) = self.db.get_transfer_entry(transfer_entry_id)? else {
+            return Ok(());
+        };
+        self.transfer_detail = self.build_transfer_detail(&entry)?;
+        Ok(())
+    }
+
+    /// Shared by `show_transfer_detail` and `show_spend_transfer_detail` —
+    /// resolves both legs (and any linked spend) of a given `TransferEntry`
+    /// into the popup's display data. `None` if the "own" leg has no
+    /// transaction to show (shouldn't happen in practice — every transfer
+    /// entry has at least one real leg — but kept as a safe no-op rather
+    /// than a panic).
+    fn build_transfer_detail(
+        &self,
+        entry: &TransferEntry,
+    ) -> anyhow::Result<Option<TransferDetail>> {
         let (
             own_transaction_id,
             own_account_id,
@@ -735,10 +780,10 @@ impl App {
         };
 
         let Some(own_transaction_id) = own_transaction_id else {
-            return Ok(());
+            return Ok(None);
         };
         let Some(own) = self.db.get_transaction(own_transaction_id)? else {
-            return Ok(());
+            return Ok(None);
         };
         let own_account_name = resolve_transfer_leg_name(
             own_account_id,
@@ -758,13 +803,16 @@ impl App {
             &self.household_accounts,
         );
 
-        self.transfer_detail = Some(TransferDetail {
+        let linked_spend = self.db.spend_entry_for_transfer(entry.id)?;
+
+        Ok(Some(TransferDetail {
             own,
             own_account_name,
             counterpart,
             counterpart_label,
-        });
-        Ok(())
+            linked_spend,
+            note: entry.note.clone(),
+        }))
     }
 
     pub fn close_transfer_detail(&mut self) {
@@ -811,6 +859,7 @@ impl App {
             household_label,
             proxy_account_name,
             currency: entry.currency.clone(),
+            transfer_entry_id: entry.id,
         });
     }
 
@@ -929,6 +978,7 @@ impl App {
                 note: None,
                 category_id: None,
                 refunds_spend_entry_id: None,
+                transfer_entry_id: Some(form.transfer_entry_id),
                 classified_by: ClassifiedBy::Manual,
                 confidence: Some(1.0),
                 rule_name: Some("manual_entry".to_string()),
@@ -936,20 +986,41 @@ impl App {
             transaction_id,
         )?;
 
+        // Updates the in-memory row too, not just the database, so the
+        // Transfers drill-down's "Tracked Spend" column reflects the new
+        // entry immediately rather than only after the screen is reopened.
+        if let Some(entry) = self
+            .transfer_month_entries
+            .iter_mut()
+            .find(|e| e.id == form.transfer_entry_id)
+        {
+            entry.has_tracked_spend = true;
+        }
+
         self.spend_form = None;
         Ok(())
     }
 
-    /// Opens the note editor for the selected spend entry on
-    /// `Screen::SpendMonth`, pre-filled with its existing note (if any).
+    /// Opens the note editor for the selected entry on `Screen::SpendMonth`,
+    /// `Screen::IncomeMonth`, or `Screen::TransferMonth`, pre-filled with its
+    /// existing note (if any). Same editor/keys for all three — only which
+    /// entry (and which `Db` setter `commit_note` calls) differs.
     pub fn start_editing_note(&mut self) {
-        if self.screen != Screen::SpendMonth {
-            return;
-        }
-        let Some(row) = self.spend_month_entries.get(self.selected_spend_entry) else {
-            return;
+        self.note_edit = match self.screen {
+            Screen::SpendMonth => self
+                .spend_month_entries
+                .get(self.selected_spend_entry)
+                .map(|row| row.entry.note.clone().unwrap_or_default()),
+            Screen::IncomeMonth => self
+                .income_month_entries
+                .get(self.selected_income_entry)
+                .map(|row| row.entry.note.clone().unwrap_or_default()),
+            Screen::TransferMonth => self
+                .visible_transfer_entries()
+                .get(self.selected_transfer_entry)
+                .map(|entry| entry.note.clone().unwrap_or_default()),
+            _ => None,
         };
-        self.note_edit = Some(row.entry.note.clone().unwrap_or_default());
     }
 
     /// Discards the in-progress note edit without saving.
@@ -965,18 +1036,46 @@ impl App {
         let Some(buffer) = self.note_edit.take() else {
             return Ok(());
         };
-        let Some(row) = self.spend_month_entries.get_mut(self.selected_spend_entry) else {
-            return Ok(());
-        };
         let trimmed = buffer.trim();
         let note = if trimmed.is_empty() {
             None
         } else {
             Some(trimmed.to_string())
         };
-        self.db
-            .set_spend_entry_note(row.entry.id, note.as_deref())?;
-        row.entry.note = note;
+        match self.screen {
+            Screen::SpendMonth => {
+                let Some(row) = self.spend_month_entries.get_mut(self.selected_spend_entry)
+                else {
+                    return Ok(());
+                };
+                self.db
+                    .set_spend_entry_note(row.entry.id, note.as_deref())?;
+                row.entry.note = note;
+            }
+            Screen::IncomeMonth => {
+                let Some(row) = self.income_month_entries.get_mut(self.selected_income_entry)
+                else {
+                    return Ok(());
+                };
+                self.db
+                    .set_income_entry_note(row.entry.id, note.as_deref())?;
+                row.entry.note = note;
+            }
+            Screen::TransferMonth => {
+                let Some(id) = self
+                    .visible_transfer_entries()
+                    .get(self.selected_transfer_entry)
+                    .map(|entry| entry.id)
+                else {
+                    return Ok(());
+                };
+                self.db.set_transfer_entry_note(id, note.as_deref())?;
+                if let Some(entry) = self.transfer_month_entries.iter_mut().find(|e| e.id == id) {
+                    entry.note = note;
+                }
+            }
+            _ => {}
+        }
         Ok(())
     }
 
@@ -1230,8 +1329,23 @@ impl App {
 
     /// Pops the navigation-history stack and returns to whatever screen was
     /// there, falling back to `Screen::Accounts` if the stack is empty.
-    pub fn back(&mut self) {
+    /// Returning to `Screen::Gap` re-runs the query that populates it —
+    /// unlike `navigate_to` (forward-only, always freshly queried by the
+    /// `open_*` method that calls it), `back()` would otherwise just
+    /// restore stale figures from before whatever the user did on the
+    /// screen they're returning from (e.g. recording a manual spend via `s`
+    /// on `Screen::TransferMonth`, which changes the Gap's Spend/Untracked
+    /// totals) — see Delta: Credit Card Transaction Import, Task 6.
+    pub fn back(&mut self) -> anyhow::Result<()> {
         self.screen = self.nav_stack.pop().unwrap_or(Screen::Accounts);
+        if self.screen == Screen::Gap {
+            let (monthly_gap, cash_at_year_start, cash_now) = load_gap_data(&self.db)?;
+            self.selected_gap_month = monthly_gap.len().saturating_sub(1);
+            self.monthly_gap = monthly_gap;
+            self.cash_at_year_start = cash_at_year_start;
+            self.cash_now = cash_now;
+        }
+        Ok(())
     }
 
     /// Whether `back()` has anywhere to return to — `false` on the screen
@@ -1243,11 +1357,12 @@ impl App {
 
     /// Shows the help screen, or leaves it (returning to whichever screen
     /// was open before) if it's already showing.
-    pub fn toggle_help(&mut self) {
+    pub fn toggle_help(&mut self) -> anyhow::Result<()> {
         if self.screen == Screen::Help {
-            self.back();
+            self.back()
         } else {
             self.navigate_to(Screen::Help);
+            Ok(())
         }
     }
 }

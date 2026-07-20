@@ -47,6 +47,10 @@ impl Db {
         }
     }
 
+    /// Basic single-account lookup — currently only exercised by tests;
+    /// kept as a natural CRUD primitive for whatever next needs it (e.g. a
+    /// future web frontend, per ADR 0003).
+    #[allow(dead_code)]
     pub fn get_account(&self, id: Id) -> rusqlite::Result<Option<Account>> {
         self.conn()
             .query_row(

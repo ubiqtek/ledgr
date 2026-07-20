@@ -80,6 +80,9 @@ pub struct CardIdentity {
     pub currency: String,
 }
 
+/// Scaffold for Delta: Spending Categorisation, Task 2 (rule-based
+/// categorisation engine) — not yet constructed anywhere.
+#[allow(dead_code)]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Category {
     pub id: Id,
@@ -169,6 +172,10 @@ pub struct SpendEntry {
     /// The original charge this entry refunds, if this entry is itself a
     /// refund. See `schema.sql`'s doc comment on the column.
     pub refunds_spend_entry_id: Option<Id>,
+    /// The transfer this entry was manually recorded from (`s` on
+    /// `Screen::TransferMonth`), if any. See `schema.sql`'s doc comment on
+    /// the column.
+    pub transfer_entry_id: Option<Id>,
     pub classified_by: ClassifiedBy,
     pub confidence: Option<f64>,
     pub rule_name: Option<String>,
@@ -186,6 +193,7 @@ pub struct NewSpendEntry {
     pub note: Option<String>,
     pub category_id: Option<Id>,
     pub refunds_spend_entry_id: Option<Id>,
+    pub transfer_entry_id: Option<Id>,
     pub classified_by: ClassifiedBy,
     pub confidence: Option<f64>,
     pub rule_name: Option<String>,
@@ -342,8 +350,18 @@ pub struct TransferEntry {
     pub in_account: Option<String>,
     pub in_description: Option<String>,
 
+    /// Populated from the DB but not yet surfaced in the TUI (e.g. the
+    /// transfer-detail popup could show how a match was made).
+    #[allow(dead_code)]
     pub pair_method: Option<TransferPairMethod>,
+    #[allow(dead_code)]
     pub pair_confidence: Option<f64>,
+    /// Free-text annotation, same idiom as `spend_entries.note`.
+    pub note: Option<String>,
+    /// Whether a manual spend entry has already been recorded from this
+    /// transfer (`s` on `Screen::TransferMonth`) — backs the Transfers
+    /// drill-down's "Tracked Spend" column.
+    pub has_tracked_spend: bool,
 }
 
 /// A `transfer_entries` row still missing one side — the candidate set for
@@ -360,6 +378,11 @@ pub struct OpenTransferEntry {
     pub out_transaction_id: Option<Id>,
     pub out_account_id: Option<Id>,
     pub out_description: Option<String>,
+    /// Mirrors `out_transaction_id` for the DB row's shape; the sweep only
+    /// needs `in_account_id`/`in_description` to search for a match (which
+    /// side is known is inferred from `out_transaction_id`'s presence), so
+    /// the raw id itself is never read.
+    #[allow(dead_code)]
     pub in_transaction_id: Option<Id>,
     pub in_account_id: Option<Id>,
     pub in_description: Option<String>,

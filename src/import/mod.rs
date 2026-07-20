@@ -29,7 +29,11 @@ pub enum ImportError {
 /// insert for a given account. Implementations should not touch the
 /// database themselves — that keeps parsers trivially unit-testable.
 pub trait ImportFileParser {
-    /// Human-readable name, e.g. `"Generic CSV"`.
+    /// Human-readable name, e.g. `"Generic CSV"`. Required of every parser
+    /// per the trait contract (see CLAUDE.md's Architecture section), but
+    /// not yet surfaced anywhere (e.g. a "which format matched this file"
+    /// line in `ledgr import`'s own output).
+    #[allow(dead_code)]
     fn name(&self) -> &'static str;
 
     /// If the file itself identifies which account it belongs to (e.g. OFX's

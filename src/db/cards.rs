@@ -78,7 +78,10 @@ impl Db {
     /// already-known account, so future imports carrying that last4 match
     /// this account instead of spawning a new one. Deliberately manual —
     /// nothing in a card statement export ties an old number to a new one
-    /// (see the KB article), so this is never inferred automatically.
+    /// (see the KB article), so this is never inferred automatically. Not
+    /// yet wired to a CLI command — currently only exercised by tests; the
+    /// user's own reissue confirmations so far were done via direct SQL.
+    #[allow(dead_code)]
     pub fn link_card_number(&self, account_id: Id, last4: &str) -> rusqlite::Result<()> {
         self.record_card_number(account_id, last4)
     }

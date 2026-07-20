@@ -63,9 +63,9 @@ impl Db {
         self.conn().execute(
             "INSERT INTO spend_entries
                 (occurred_on, amount_minor, currency, counterparty, description, note,
-                 category_id, refunds_spend_entry_id, classified_by, confidence, rule_name,
-                 classified_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))",
+                 category_id, refunds_spend_entry_id, transfer_entry_id, classified_by,
+                 confidence, rule_name, classified_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))",
             params![
                 new.occurred_on,
                 new.amount_minor,
@@ -75,6 +75,7 @@ impl Db {
                 new.note,
                 new.category_id,
                 new.refunds_spend_entry_id,
+                new.transfer_entry_id,
                 new.classified_by.as_str(),
                 new.confidence,
                 new.rule_name,
@@ -100,12 +101,15 @@ impl Db {
 
     /// All spend entries, most recent first — the derivation pass's output,
     /// for `ledgr status`-style summaries and the future review queue TUI
-    /// (Spend Ledger Task 3).
+    /// (Delta: Review and Re-classification TUI, Task 1 — still TODO,
+    /// deprioritised below Delta: The Gap). Currently only exercised by
+    /// tests.
+    #[allow(dead_code)]
     pub fn list_spend_entries(&self) -> rusqlite::Result<Vec<SpendEntry>> {
         let mut stmt = self.conn().prepare(
             "SELECT id, occurred_on, amount_minor, currency, counterparty, description,
                     note, category_id, refunds_spend_entry_id, classified_by, confidence,
-                    rule_name, classified_at
+                    rule_name, classified_at, transfer_entry_id
              FROM spend_entries
              ORDER BY occurred_on DESC, id DESC",
         )?;
@@ -126,6 +130,7 @@ impl Db {
                 confidence: row.get(10)?,
                 rule_name: row.get(11)?,
                 classified_at: row.get(12)?,
+                transfer_entry_id: row.get(13)?,
             })
         })?;
         rows.collect()
@@ -146,7 +151,8 @@ impl Db {
         let mut stmt = self.conn().prepare(
             "SELECT se.id, se.occurred_on, se.amount_minor, se.currency, se.counterparty,
                     se.description, se.note, se.category_id, se.refunds_spend_entry_id,
-                    se.classified_by, se.confidence, se.rule_name, se.classified_at, t.account_id
+                    se.classified_by, se.confidence, se.rule_name, se.classified_at, t.account_id,
+                    se.transfer_entry_id
              FROM spend_entries se
              JOIN spend_entry_sources ses ON ses.spend_entry_id = se.id AND ses.role = 'source'
              JOIN transactions t ON t.id = ses.transaction_id
@@ -171,6 +177,7 @@ impl Db {
                     confidence: row.get(10)?,
                     rule_name: row.get(11)?,
                     classified_at: row.get(12)?,
+                    transfer_entry_id: row.get(14)?,
                 },
                 account_id: row.get(13)?,
             })
@@ -572,7 +579,9 @@ impl Db {
 
     /// The counterpart transaction id recorded for a transfer leg, if any —
     /// `None` both when the transaction has no `transfer_entries` row at all
-    /// and when it has one but the other side isn't known yet.
+    /// and when it has one but the other side isn't known yet. Currently
+    /// only exercised by tests verifying the pairing sweep.
+    #[allow(dead_code)]
     pub fn get_transfer_counterpart_transaction_id(
         &self,
         transaction_id: Id,
@@ -658,13 +667,14 @@ impl Db {
     /// doc), so no display-layer deduplication is needed.
     pub fn transfer_entries_for_month(&self, month: &str) -> rusqlite::Result<Vec<TransferEntry>> {
         let mut stmt = self.conn().prepare(
-            "SELECT id, occurred_on, amount_minor, currency,
-                    out_transaction_id, out_account_id, out_sort_code, out_account_number, out_description,
-                    in_transaction_id, in_account_id, in_sort_code, in_account_number, in_description,
-                    pair_method, pair_confidence
-             FROM transfer_entries
-             WHERE substr(occurred_on, 1, 7) = ?1
-             ORDER BY occurred_on, id",
+            "SELECT te.id, te.occurred_on, te.amount_minor, te.currency,
+                    te.out_transaction_id, te.out_account_id, te.out_sort_code, te.out_account_number, te.out_description,
+                    te.in_transaction_id, te.in_account_id, te.in_sort_code, te.in_account_number, te.in_description,
+                    te.pair_method, te.pair_confidence, te.note,
+                    EXISTS(SELECT 1 FROM spend_entries se WHERE se.transfer_entry_id = te.id)
+             FROM transfer_entries te
+             WHERE substr(te.occurred_on, 1, 7) = ?1
+             ORDER BY te.occurred_on, te.id",
         )?;
         let rows = stmt.query_map([month], |row| {
             let pair_method: Option<String> = row.get(14)?;
@@ -690,9 +700,105 @@ impl Db {
                     _ => TransferPairMethod::SelfReferenceMatch,
                 }),
                 pair_confidence: row.get(15)?,
+                note: row.get(16)?,
+                has_tracked_spend: row.get(17)?,
             })
         })?;
         rows.collect()
+    }
+
+    /// A single transfer entry by id — backs the Spend drill-down's `i`
+    /// popup for a spend entry recorded from a transfer (`transfer_entry_id`
+    /// set), the reverse lookup of `spend_entry_for_transfer`. Same column
+    /// shape as `transfer_entries_for_month`, just filtered by id instead of
+    /// month.
+    pub fn get_transfer_entry(&self, id: Id) -> rusqlite::Result<Option<TransferEntry>> {
+        self.conn()
+            .query_row(
+                "SELECT te.id, te.occurred_on, te.amount_minor, te.currency,
+                        te.out_transaction_id, te.out_account_id, te.out_sort_code, te.out_account_number, te.out_description,
+                        te.in_transaction_id, te.in_account_id, te.in_sort_code, te.in_account_number, te.in_description,
+                        te.pair_method, te.pair_confidence, te.note,
+                        EXISTS(SELECT 1 FROM spend_entries se WHERE se.transfer_entry_id = te.id)
+                 FROM transfer_entries te
+                 WHERE te.id = ?1",
+                params![id],
+                |row| {
+                    let pair_method: Option<String> = row.get(14)?;
+                    Ok(TransferEntry {
+                        id: row.get(0)?,
+                        occurred_on: row.get(1)?,
+                        amount_minor: row.get(2)?,
+                        currency: row.get(3)?,
+                        out_transaction_id: row.get(4)?,
+                        out_account_id: row.get(5)?,
+                        out_sort: row.get(6)?,
+                        out_account: row.get(7)?,
+                        out_description: row.get(8)?,
+                        in_transaction_id: row.get(9)?,
+                        in_account_id: row.get(10)?,
+                        in_sort: row.get(11)?,
+                        in_account: row.get(12)?,
+                        in_description: row.get(13)?,
+                        pair_method: pair_method.map(|m| match m.as_str() {
+                            "description_match" => TransferPairMethod::DescriptionMatch,
+                            "amount_date_match" => TransferPairMethod::AmountDateMatch,
+                            "credit_card_payment_match" => TransferPairMethod::CreditCardPaymentMatch,
+                            _ => TransferPairMethod::SelfReferenceMatch,
+                        }),
+                        pair_confidence: row.get(15)?,
+                        note: row.get(16)?,
+                        has_tracked_spend: row.get(17)?,
+                    })
+                },
+            )
+            .optional()
+    }
+
+    /// Sets (or, given `None`, clears) a transfer entry's free-text `note`.
+    /// Same idiom/contract as `set_spend_entry_note`.
+    pub fn set_transfer_entry_note(&self, id: Id, note: Option<&str>) -> rusqlite::Result<()> {
+        self.conn().execute(
+            "UPDATE transfer_entries SET note = ?1 WHERE id = ?2",
+            params![note, id],
+        )?;
+        Ok(())
+    }
+
+    /// The manual spend entry already recorded from a transfer (`s` on
+    /// `Screen::TransferMonth`), if any — backs the Transfers drill-down's
+    /// "Tracked Spend" column and its `i` popup.
+    pub fn spend_entry_for_transfer(&self, transfer_entry_id: Id) -> rusqlite::Result<Option<SpendEntry>> {
+        self.conn()
+            .query_row(
+                "SELECT id, occurred_on, amount_minor, currency, counterparty, description,
+                        note, category_id, refunds_spend_entry_id, classified_by, confidence,
+                        rule_name, classified_at, transfer_entry_id
+                 FROM spend_entries
+                 WHERE transfer_entry_id = ?1",
+                params![transfer_entry_id],
+                |row| {
+                    let classified_by_str: String = row.get(9)?;
+                    Ok(SpendEntry {
+                        id: row.get(0)?,
+                        occurred_on: row.get(1)?,
+                        amount_minor: row.get(2)?,
+                        currency: row.get(3)?,
+                        counterparty: row.get(4)?,
+                        description: row.get(5)?,
+                        note: row.get(6)?,
+                        category_id: row.get(7)?,
+                        refunds_spend_entry_id: row.get(8)?,
+                        classified_by: ClassifiedBy::parse(&classified_by_str)
+                            .unwrap_or(ClassifiedBy::Rule),
+                        confidence: row.get(10)?,
+                        rule_name: row.get(11)?,
+                        classified_at: row.get(12)?,
+                        transfer_entry_id: row.get(13)?,
+                    })
+                },
+            )
+            .optional()
     }
 
     /// Best-effort search for a credit card bill payment's counterpart: any

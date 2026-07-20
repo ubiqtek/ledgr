@@ -16,6 +16,9 @@ pub struct AccountStatus {
     pub account: Account,
     pub transaction_count: i64,
     pub balance_minor: Option<i64>,
+    /// The anchor date `balance_minor` is as-of. Populated but not yet
+    /// shown on the Accounts screen (only exercised by tests today).
+    #[allow(dead_code)]
     pub balance_as_of: Option<String>,
     pub earliest_transaction: Option<String>,
     pub latest_transaction: Option<String>,
@@ -307,6 +310,7 @@ mod tests {
                 note: None,
                 category_id: None,
                 refunds_spend_entry_id: None,
+                transfer_entry_id: None,
                 classified_by: crate::model::ClassifiedBy::Rule,
                 confidence: Some(0.4),
                 rule_name: Some("fallback".into()),

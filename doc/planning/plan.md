@@ -2,10 +2,10 @@
 
 ## What's Next
 
-- **Next:** Task 5 — Drive the Gap screen's "Untracked" figure to zero (Delta: The Gap)
+- **Next:** Commit outstanding uncommitted work to git (several sessions' worth — see Checkpoint below), then **Delta: Double-Entry Accounting, Task 1 — Evaluate a double-entry model for ledgr**, now top priority ahead of Task 3 (partner's credit card import — deprioritised, not dropped)
 - **Sub-doc:** none
 - **Blockers:** None
-- **Context:** Monthly Inter-Household Transfers screen redesigned and verified live 2026-07-19 (`<space>t`); see Delta: TUI Analysis Views, Task 7
+- **Context:** Decided 2026-07-20 to prioritise the double-entry evaluation now rather than let it keep sitting as "future/exploratory" — see Delta: Double-Entry Accounting, Task 1's 2026-07-20 decision note for why
 
 ## Summary
 
@@ -15,9 +15,10 @@
 | [Delta: Automatic Inbox Import](#delta-automatic-inbox-import) | [1. Inbox change notification](#task-1-inbox-change-notification) | TODO |
 | [Delta: Credit Card Transaction Import](#delta-credit-card-transaction-import) | [1. Credit card statement parser](#task-1-credit-card-statement-parser) | ✓ DONE |
 | | [2. Evaluate Barclaycard PDF export](#task-2-evaluate-barclaycard-pdf-export) | ✓ DONE |
-| | [3. Import the user's partner's credit card](#task-3-import-the-users-partners-credit-card) | TODO |
-| | [4. Manual spend entries via a proxy account](#task-4-manual-spend-entries-via-a-proxy-account) | TODO |
+| | [3. Import the user's partner's credit card](#task-3-import-the-users-partners-credit-card) | TODO — deprioritised below Delta: Double-Entry Accounting |
+| | [4. Manual spend entries via a proxy account](#task-4-manual-spend-entries-via-a-proxy-account) | ✓ DONE |
 | | [5. Match credit card payments to bank-side transfers](#task-5-match-credit-card-payments-to-bank-side-transfers) | ✓ DONE |
+| | [6. Spend-from-transfer follow-ups](#task-6-spend-from-transfer-follow-ups) | ✓ DONE |
 | [Delta: Amazon Order Import](#delta-amazon-order-import) | [1. Evaluate automation route — email scanning vs manual export](#task-1-evaluate-automation-route--email-scanning-vs-manual-export) | TODO |
 | | [2. Amazon order import](#task-2-amazon-order-import) | TODO |
 | [Delta: Review and Re-classification TUI](#delta-review-and-re-classification-tui) | [1. Review queue screen](#task-1-review-queue-screen) | TODO — deprioritised below Delta: The Gap |
@@ -39,10 +40,11 @@
 | | [5. Right-align numeric column headers on the Spend/Income month drill-down screens](#task-5-right-align-numeric-column-headers-on-the-spendinccome-month-drill-down-screens) | ✓ DONE |
 | | [6. Right-align the Monthly Transfers header row](#task-6-right-align-the-monthly-transfers-header-row) | ✓ DONE |
 | | [7. Split Monthly Transfers into In/Out/Household columns](#task-7-split-monthly-transfers-into-inouthousehold-columns) | ✓ DONE |
+| | [8. Filterable Transfers drill-down](#task-8-filterable-transfers-drill-down) | ✓ DONE |
 | [Delta: Packaging & Distribution](#delta-packaging--distribution) | [1. Publish `ledgr` to crates.io](#task-1-publish-ledgr-to-cratesio) | ✓ DONE |
 | | [2. Web frontend](#task-2-web-frontend) | TODO |
 | [Delta: Live Open Banking (Enable Banking)](#delta-live-open-banking-enable-banking) | [1. Evaluate feasibility & security model](#task-1-evaluate-feasibility--security-model) | IN PROGRESS |
-| [Delta: Double-Entry Accounting](#delta-double-entry-accounting) | [1. Evaluate a double-entry model for ledgr](#task-1-evaluate-a-double-entry-model-for-ledgr) | TODO |
+| [Delta: Double-Entry Accounting](#delta-double-entry-accounting) | [1. Evaluate a double-entry model for ledgr](#task-1-evaluate-a-double-entry-model-for-ledgr) | IN PROGRESS — now top priority |
 | [Delta: Payslip Import](#delta-payslip-import) | [1. Evaluate payslip format and scope](#task-1-evaluate-payslip-format-and-scope) | TODO |
 | [Delta: Reclaimable Work Expenses](#delta-reclaimable-work-expenses) | [1. Design the reclaimable expenses ledger and marking flow](#task-1-design-the-reclaimable-expenses-ledger-and-marking-flow) | TODO |
 | [Delta: Regular Payments](#delta-regular-payments) | [1. Design regular payment recognition and labelling](#task-1-design-regular-payment-recognition-and-labelling) | TODO |
@@ -164,7 +166,9 @@ remembering to run the command.
   in `doc/kb/barclaycard/pdf-export-structure.md`.
 
 ### Task 3: Import the user's partner's credit card
-- TODO (2026-07-12) — the user will load his partner's credit card
+- TODO (2026-07-12) — **deprioritised 2026-07-20** below Delta:
+  Double-Entry Accounting, Task 1 (not dropped, just no longer next).
+  The user will load his partner's credit card
   statement as a normal Transaction Import (same parser as his own once
   Task 1/2 land), but not her personal bank accounts — those aren't
   going to be imported. This account will need registering as a
@@ -176,21 +180,49 @@ remembering to run the command.
   (uncaptured) is what Task 4 below covers.
 
 ### Task 4: Manual spend entries via a proxy account
-- TODO (2026-07-12) — the user's partner's own spend (on her personal
-  bank accounts, which won't be imported) still needs to count towards
-  household spend/the Gap, entered manually on a rough cadence (e.g.
-  monthly: "spent £200 this month on food"). Design idea agreed with the
-  user: back a manual spend entry with a normal `Transaction` row on a
-  new **proxy account** (an `Account` with no real sort code/account
-  number, so it can never collide with or be mistaken for a real
-  account) rather than changing the spend-entry schema — keeps
-  `classified_by = 'manual'` (already in the schema's `CHECK`
-  constraint, unused so far) working through the existing
-  derivation/provenance model. New domain terms **Proxy Account** and
-  **Manual Spend Entry** recorded as candidates in
-  `doc/domain/ubiquitous-language.md`. Not yet designed: the actual
-  entry flow (CLI command vs TUI form), or whether proxy accounts need
-  their own `AccountType` variant.
+- ✓ DONE (2026-07-19 session) — the user's partner's own spend (on her
+  personal bank accounts, which won't be imported) still needs to count
+  towards household spend/the Gap. Built as: `s` on `Screen::TransferMonth`
+  (the Monthly Transfers drill-down), not the Spend drill-down originally
+  envisioned — triggered directly from the transfer that sent her the
+  money, since the transfer already carries the date/amount/which
+  Reference Household Account it went to.
+  - Only activates when one leg of the selected transfer is a Reference
+    Household Account (e.g. Romina's accounts) — a no-op on transfers
+    between the user's own tracked accounts.
+  - Design questions resolved: entry flow is a TUI form (`SpendFromTransferForm`
+    in `src/app.rs`, mirrors the existing "add reference" form's
+    Tab/Enter/Esc three-field shape), pre-filled Date/Amount from the
+    transfer, free-text Description. Proxy accounts reuse the existing
+    `AccountType::Other` rather than a new `AccountType::Proxy` variant —
+    no functional difference since cash calculations already whitelist
+    only `Current`/`Savings`, and adding a new CHECK-constrained enum
+    value would have needed a live-database migration for no benefit.
+  - One proxy account per Reference Household Account, lazily created
+    via the existing `Db::find_or_create_account`, named
+    `"<household label> (Manual Spend)"` (e.g. "Romina Primary Account
+    (Manual Spend)").
+  - Submitting posts a `Transaction` to the proxy account and a
+    `spend_entries` row (`classified_by = 'manual'`,
+    `rule_name = 'manual_entry'`) via the existing
+    `Db::insert_spend_entry_with_source` — the originating
+    `transfer_entries` row is untouched (the transfer itself was real
+    and correctly classified; this is a separate record of what the
+    money was then spent on).
+  - One spend per transfer only, by design — splitting one transfer into
+    multiple spends is left for a later delta.
+  - Verified live via `tmux` against the real database: selected the
+    real £1,415.00 30 March transfer to Romina Primary Account
+    (identified via the new transfer filter, see Delta: TUI Analysis
+    Views Task 8), entered "Holiday", confirmed the spend entry, proxy
+    account, and transaction were created correctly, and that the Gap
+    screen's Untracked figure dropped by exactly £1,415.00 (March:
+    -£2,018.26 → -£603.26; YTD: -£4,084.19 → -£2,669.19) — then removed
+    the test entry afterwards (real `ledgr.db` backed up first as
+    `ledgr.db.bak-20260719224447-remove-test-manual-spend`; transaction,
+    spend entry, and proxy account all deleted, confirmed empty).
+  - 91 unit tests still passing; `cargo clippy` clean (same pre-existing
+    warnings). Not yet committed to git.
 
 ### Task 5: Match credit card payments to bank-side transfers
 - ✓ DONE — both ideas from the earlier discussion built together:
@@ -248,6 +280,77 @@ remembering to run the command.
     same-day same-amount coincidence across two cards could match the
     wrong counterpart. Not a problem today (only one card exists); flag
     for revisiting when Task 3 lands.
+
+### Task 6: Spend-from-transfer follow-ups
+- ✓ DONE (2026-07-20 session) — all four issues from real-usage feedback
+  fixed together:
+  1. **Gap screen now auto-refreshes on `back()`.** `App::back()`
+     (`src/app.rs`) now returns `anyhow::Result<()>` and, when the screen
+     it's returning to is `Screen::Gap`, re-runs `load_gap_data` (the same
+     helper `open_gap` uses) before restoring the selection — so returning
+     from `Screen::TransferMonth` after recording a spend (or from
+     anywhere else) shows current figures without a full app restart.
+     `toggle_help` and `main.rs`'s `q`/`Esc`/`?` handlers updated to
+     propagate the `Result`.
+  2. **Spend entries now link back to their originating transfer.** New
+     `spend_entries.transfer_entry_id` column (nullable, `ON DELETE SET
+     NULL`, migration `migrate_add_spend_entries_transfer_entry_id_column`
+     in `src/db/mod.rs`) — `NULL` for every normal derived spend entry,
+     set to the transfer's id only for entries created via `s` on
+     `Screen::TransferMonth`. New `Db::spend_entry_for_transfer` resolves
+     it back for display.
+  3. **All three entry types now support a note.** `transfer_entries`
+     gained a `note TEXT` column (migration
+     `migrate_add_transfer_entries_note_column`, deliberately run *after*
+     the existing leg-shape/pair-method rename migrations so it never
+     touches a table mid-rename) plus `Db::set_transfer_entry_note`.
+     `income_entries.note` already existed in the schema — added
+     `Db::set_income_entry_note`. `App::start_editing_note`/`commit_note`
+     generalised from SpendMonth-only to also cover `Screen::IncomeMonth`
+     and `Screen::TransferMonth` (same `n` key, same popup, routes on
+     `self.screen` to the right entry/setter). Transfer notes show inline
+     in the description column (`📝 note`), matching the existing spend/
+     income convention exactly.
+  4. **New "Tracked Spend" column on the Transfers drill-down.** New
+     `TransferEntry.has_tracked_spend` (an `EXISTS` subquery against
+     `spend_entries.transfer_entry_id` in `transfer_entries_for_month`)
+     shows `Y` once a spend has been recorded — `App::commit_spend_form`
+     also updates the in-memory row immediately so the column reflects it
+     without leaving the screen. The existing `i` "both legs" popup
+     (rather than a separate one — decided at implementation time) now
+     also shows the linked spend entry's date/amount/description when
+     present (`TransferDetail.linked_spend`, populated in
+     `show_transfer_detail` via `spend_entry_for_transfer`).
+  - Help screen text updated for the generalised `n` and extended `i`
+    bindings.
+  - 91 unit tests still passing; `cargo build`/`cargo clippy --all-targets`
+    clean (same pre-existing dead-code warnings, nothing new).
+  - **Verified live via `tmux`**, against a scratch copy of the real
+    database under a throwaway `$HOME` (never touched the real
+    `~/.local/share/ledgr/ledgr.db`): recorded a spend from the real
+    £1,415.00 30 March transfer to Romina Primary Account — "Tracked
+    Spend" showed `Y` immediately, the `i` popup showed "Tracked spend:
+    2026-03-30 -1415.00 GBP Holiday", a note typed via `n` on that same
+    transfer row appeared inline immediately, a note typed via `n` on an
+    Income Month row worked identically, and backing out to `Screen::Gap`
+    showed Spend/Untracked updated by exactly £1,415.00 (Spend -£43,948.12
+    → -£45,363.12; Untracked -£1,150.19 → £264.81) without restarting the
+    app.
+  - **Real backfill needed and done (2026-07-20, same-day follow-up):** the
+    new `transfer_entry_id` link only applies going forward — 16 real
+    `rule_name = 'manual_entry'` spend entries the user had already
+    recorded via `s` earlier the same day (before this session's schema
+    change existed) all had `transfer_entry_id` left `NULL`, so none
+    showed as Tracked Spend. Root-caused via each entry's `classified_at`
+    timestamp (2026-07-20T18:04–18:14Z, confirming they predated this
+    session's fix, not the 19th as first assumed). Backfilled by matching
+    each entry to the one `transfer_entries` row sharing its exact date +
+    amount (unambiguous in every case — checked first). Real `ledgr.db`
+    backed up first
+    (`ledgr.db.bak-20260720201726-pre-transfer-entry-id-backfill`); all 16
+    rows (ids 894–909, £110–£1,415 each, spanning Jan–Jun) now correctly
+    link to their transfers and show `Y` in Tracked Spend.
+  - Not yet committed to git.
 
 ## Delta: Amazon Order Import
 
@@ -627,6 +730,53 @@ scope — just enough to sum income, no categorisation.
   4 accounts total: Romina Primary Account, Romina Secondary Account, Shared
   Shopping Account, Joint Annual Expense. All 52 unit tests pass throughout;
   `cargo build`/`cargo test` clean.
+- **Follow-up session (2026-07-19): month-by-month Gap screen extended with
+  a Cash Movement column and per-account drill-down.**
+  - `draw_gap_months` (`src/ui.rs`) gained a **Cash Movement** column
+    (`cash_end_minor - cash_start_minor`) between Cash End and Untracked,
+    and the Salary/Other columns were dropped from the table (moved to an
+    on-demand popup — `i` on a selected month row shows Salary/Other/Total,
+    same popup pattern as the existing transfer/income detail popups).
+  - The month table is now navigable (`j`/`k`/`gg`/`G`, `TableState`),
+    unlike the original non-navigable report design — `Screen::Gap`'s
+    `move_selection`/`select_first`/`select_last`/`selected_row_text` arms
+    updated accordingly.
+  - New `Screen::GapMonth` (`Enter` on a selected Gap month row) — a
+    per-account cash breakdown table (Account / Start / End / Movement,
+    with a bold Total row) for that month, answering "which real account
+    is this cash figure actually sitting in?". New `Db::cash_balances_by_account_as_of`
+    (`src/db/gap.rs`, per-account version of the existing
+    `cash_balance_as_of`) and `App::combine_account_balances` (merges the
+    start/end per-account lists by name). `month_bounds` (`src/db/gap.rs`)
+    made `pub(crate)` so `App::open_selected_gap_month` can share it.
+  - Column header dates fixed to read as first-day-to-last-day of the
+    month (`Cash Start (2026-01-01)` → `Cash End (2026-01-31)`) rather
+    than the initially-shown day-before/last-day convention
+    (`2025-12-31` → `2026-01-31`) — purely a display fix, the underlying
+    balance is unchanged (end of 31 Dec and start of 1 Jan are the same
+    instant).
+  - **Real investigation, not just a UI change:** the user doubted a
+    reconstructed opening balance (£5,498.73 for "Jims Premier Account"
+    on 1 Jan) at first. Verified via independent raw SQL (matched the
+    app's own arithmetic exactly), checked for a date-coverage gap in
+    that account's transaction history (none found, no gap over 5 days
+    anywhere Jan–Jul), and checked for duplicate-imported transactions
+    (found two same-day/same-amount pairs, but both carry genuinely
+    different bank FITIDs — real distinct transactions, not an import
+    bug). Separately found real duplicate-looking rows on the
+    Barclaycard account (doesn't affect cash calculations, which exclude
+    `CreditCard`) — flagged for a future look, not chased further.
+  - **Real discovery: the user's salary lands at the end of each month
+    (28th–31st), not the 1st as assumed** — confirmed from
+    `income_entries` (`rule_name = 'employment_income'`): Jan 29, Feb 27,
+    Mar 31, Apr 30, May 28, Jun 29. This explains why `Cash End` snapshots
+    aren't depleted: they're taken 1-3 days *after* payday, not right
+    before it. For January specifically, only ~£175 of the £6,424.16
+    salary had been spent by the 31st (a £500 in/£500 out roofing
+    transfer nets to zero) — most of the salary is still sitting
+    untouched in the `Cash End` figure.
+  - 91 unit tests still passing (no new tests — no new classification
+    logic); `cargo build`/`clippy` clean. Not yet committed to git.
 
 ### Task 3: Discovery about recording assets and liabilities
 - ✓ DONE — decided: do **not** pivot to double-entry now. Extend the
@@ -876,6 +1026,24 @@ Build out the TUI beyond the current scaffold.
 - Files changed: `src/model.rs`, `src/db/spend.rs`, `src/app.rs`, `src/ui.rs`, `src/config.rs` (factored a small `household_accounts_contain` free function out of `Config::household_account_matches` during an earlier iteration of this work, still in use there). Not yet committed to git — sitting in the working tree alongside the rest of this session's uncommitted work (income ledger, Gap screen, this transfers redesign).
 - **Same-session follow-up:** renamed the "Own" column header to **"Tracked"** and added a "Household accounts" grouping label above the Tracked/Reference columns (`draw_monthly_transfers` in `src/ui.rs`, using the same inner-`Layout`-split-plus-`Paragraph`-label pattern as `draw_summary_table`) — makes clear Tracked and Reference are the two components of household-internal movement, with Total as their sum sitting apart. Verified live via `tmux`; `cargo build`/`test`/`clippy --all-targets` clean (91 tests, same pre-existing warnings only).
 
+### Task 8: Filterable Transfers drill-down
+- ✓ DONE (2026-07-19 session) — `f` on `Screen::TransferMonth` opens a live
+  filter box on the bottom line (`App::transfer_filter`/`transfer_filter_editing`,
+  `App::visible_transfer_entries` in `src/app.rs`) — case-insensitive
+  substring match against the transfer's description or either leg's
+  resolved name, so typing e.g. "romina" matches whether she's sender or
+  recipient. `Enter` stops editing but keeps the filter applied (so
+  `j`/`k` navigate the filtered list); `Esc` discards the filter; `Ctrl-g`
+  clears it at any time. Title shows `(N of M shown)` while filtered;
+  filter resets automatically when a different month is opened.
+- Real bug found and fixed during implementation: the header row (e.g.
+  `Start (2026-02-01)`, 19 chars) was silently clipped from the left by a
+  too-narrow fixed column width — widened the affected columns.
+  Verified live via `tmux`: filtering "romina" on a real month correctly
+  matched both description-based and resolved-account-name-based rows.
+- 91 unit tests still passing; `cargo clippy` clean. Not yet committed to
+  git.
+
 ## Delta: Packaging & Distribution
 
 ### Task 1: Publish `ledgr` to crates.io
@@ -918,8 +1086,8 @@ model) than adding a new `ImportFileParser`.
 
 ## Delta: Double-Entry Accounting
 
-Future/exploratory. The user is considering introducing double-entry
-accounting at some point. The spend ledger design
+**No longer purely future/exploratory as of 2026-07-20** — see Task 1's
+decision note below. The spend ledger design
 (`doc/implementation-notes/spend-ledger-design.md`, "Future:
 double-entry compatibility") records how the current derived-ledger
 model maps onto it (spend entries → expense-account postings,
@@ -945,6 +1113,50 @@ should be built in a way that blocks this.
   double-entry postings. Worth reconsidering as evidence for/against this
   delta when this evaluation actually happens, not before. See Delta: The
   Gap, Task 2 for the full context this observation came from.
+- **Concrete evidence found 2026-07-20: the Gap screen's "Untracked"
+  figure structurally cannot converge to zero under the current
+  cash-only model, even with 100% correct classification.** Investigating
+  a real June residual (user correctly rejected a "date-boundary
+  artefact" explanation — verified `cash_balance_as_of`'s reconstruction
+  against a direct sum of the month's real transactions and they matched
+  exactly, so the balance walk itself isn't the bug) traced most of the
+  gap to credit card overpayment: £749.58 paid onto the Barclaycard in
+  June vs. only £462.54 of new charges posted that month — a **£287.04**
+  difference with no offsetting Spend entry, since the Spend for that
+  money was already recorded whenever the original purchase happened
+  (a different month, or never, if it's older principal). Asked a
+  `fable`-model agent for a second opinion on the user's hypothesis
+  ("if everything were accounted for, Untracked should drop to zero") —
+  verdict: **false, and provably so**, not a data-quality gap. With
+  perfect classification, a card charge moves Spend but not Cash
+  Movement, and a card payment moves Cash Movement but not Spend/Income;
+  algebraically `Untracked = card charges − card payments for the
+  month = that month's Δ(credit card balance)`, identically. It hits
+  zero only in the coincidental month where payments exactly equal
+  same-month charges, and can flip sign (looking like mystery income in
+  a month where charges exceed payments). The fix that would make "zero
+  when fully classified" a true invariant: replace "Cash Movement" with
+  **Net Worth Movement** — fold the credit card's balance in (as a
+  negative liability) alongside current/savings in the same start/end
+  total, so a charge moves Spend and net worth together and a payment
+  nets to zero (cash down, liability up by the same amount). This is
+  the concrete case that pushes Delta: The Gap's cash-only model towards
+  this delta's territory — the user's framing: this is exactly what
+  double-entry bookkeeping is *for* — making it structurally provable
+  that nothing has "escaped", rather than reasoned about ad hoc per
+  discrepancy.
+- **Decision (2026-07-20): this evaluation is now the top priority**,
+  ahead of Delta: Credit Card Transaction Import, Task 3 (partner's card
+  import — deprioritised, not dropped). The user's reasoning: the
+  household's finances (accounts, credit card, Reference Household
+  Accounts, Registered People, Income/Reimbursement Sources) have grown
+  complex enough that single-entry, ad hoc cross-checking (like the June
+  Untracked investigation above) is becoming the limiting factor — every
+  new discrepancy needs its own manual SQL investigation to explain,
+  rather than the books structurally proving nothing escaped. Not yet
+  started — next session should begin Task 1 proper: study Firefly
+  III/beancount/GnuCash models, decide whether/when to adopt, ADR if
+  adopted (per Task 1's original TODO below).
 
 ## Delta: Payslip Import
 
@@ -1059,160 +1271,6 @@ Technical debt flagged during the 2026-07-18 income/reimbursement classification
 ### Task 3: Revisit Classification::Refund's hardcoded confidence
 - TODO — `Classification::Refund` has no `confidence` field; every Refund-producing rule (`card_refund`, `cashback`, `claim_reimbursement`, `person_reimbursement`) gets the same hardcoded 0.7 at the insert site in `run_derivation` regardless of how confident the match actually is (e.g. a registered `SIMPLYHEALTH`/known-person match is more certain than a generic unlinked card refund). Add a `confidence: f64` field to the `Refund` variant and thread real per-rule values through, mirroring how `Spend`/`Income` already do this.
 
-## Checkpoint: Session 2026-07-13f
-
-**Completed:**
-- Investigated three real alternate Barclays export formats for the
-  current account against OFX's `NAME`-field truncation problem
-  (`~/Downloads/data.csv`, `Transaction.pdf`, `data.qbo` — all
-  scratch-only, never imported or committed). Full findings in new doc
-  `doc/implementation-notes/optimising-import-data.md`, linked from
-  Delta: Bank Transaction Import, Task 1.
-- **`data.csv`**: same truncation failure mode as OFX (label and account
-  number share one fixed-width field), no `FITID` equivalent, no balance
-  column — no advantage over OFX found.
-- **`data.qbo`**: confirmed to be the identical OFX 1.02 SGML payload
-  `BarclaysOfxParser` already parses (same header, same `FITID`, same
-  `NAME` field, same truncation) — not a distinct format, just a
-  different file extension. `.qbo` isn't in `src/import/pipeline.rs`'s
-  extension map today; a one-line addition if ever needed, not
-  currently required.
-- **`Transaction.pdf`** (current-account statement PDF, distinct from
-  the already-built `BarclaycardPdfParser`): a genuine lead. Its
-  transfer-type rows (`Funds Transfer`/`Standing Order`/`Direct
-  Debit`/`Bill Payment`) carry the counterpart sort code/account number
-  on its own line, separate from the truncated free-text label — so the
-  account number is never truncated, unlike OFX where label and account
-  number share one 32-char `NAME` field. This directly targets the
-  `SHARED BILLS ACCO`-style gap driving Delta: Transfer Ledger's
-  self-reference-match tier. Also has a per-transaction running balance
-  (neither OFX nor CSV provide this per-line) and a "Pending debit card
-  transactions" section with untruncated merchant descriptions and full
-  card numbers, not currently importable by anything. Has no `FITID`
-  equivalent — real-data check found a hash of `(date, amount,
-  description)` alone is unsafe as a de-dup key (two genuine same-day,
-  same-amount, same-description collisions found in 573 real
-  transactions), but the running balance disambiguates them and is
-  proposed as a required part of a synthetic de-dup key for this format.
-- Evaluated three further options surfaced via external search
-  (third-party PDF-to-CSV converters, a browser extension against a live
-  Barclays session, Open Banking) — first two rejected as inconsistent
-  with `ledgr`'s no-data-leaves-the-machine design; Open Banking is
-  already tracked separately under Delta: Live Open Banking (Enable
-  Banking) and not duplicated here.
-- Not decided: whether to actually build a `BarclaysStatementPdfParser`
-  for the current-account PDF format. Deliberately left as a TODO/open
-  question, not actioned this session.
-
-**State of the project:** unchanged from Session 2026-07-13e otherwise —
-the real fix (Delta: Transfer Ledger, Task 4: migrate credit card
-payment matching into `transfer_entries`) is still the next priority for
-a new session; this session was research-only, no code touched, no
-plan.md task marked done. The PDF-format lead is a separate, independent
-thread (Delta: Bank Transaction Import, Task 1) that can be picked up
-whenever, not a blocker for Task 4.
-
-**Immediate next priorities:** see "What's Next" at the top of this
-file.
-
-## Checkpoint: Session 2026-07-13g
-
-**Completed (run autonomously, per the user's request):**
-- Sign-off obtained: "Transfer Entry"/"Transfer Ledger"/"Credit Card
-  Payment" promoted `candidate` → `established` in
-  `doc/domain/ubiquitous-language.md`.
-- Delta: Transfer Ledger, Task 4 done in full — see that task's entry
-  above for the complete write-up. Headline: credit card payment
-  matching migrated off `transaction_links` onto `transfer_entries`
-  (new `TransferPairMethod::CreditCardPaymentMatch`), both real bugs the
-  critique doc flagged (endless reprocessing of matched payments;
-  permanent double-count of ever-unmatched ones) fixed as a natural
-  consequence, `LinkRelation::Transfer` removed, real database migrated
-  and validated (32/32 real credit card payments matched, idempotent on
-  a second run, no balance/transaction-count regression). 81 tests
-  total, all still passing (two existing card-payment tests expanded
-  rather than new ones added); `cargo clippy --all-targets` clean (same
-  pre-existing dead-code baseline).
-- Updated `doc/implementation-notes/transfer-ledger-design.md` (new
-  "Credit card payment matching" section) and
-  `doc/implementation-notes/transfer-ledger-critique.md` (resolution
-  note at the top) to match.
-
-**Not done / left for later:** Delta: Transfer Ledger, Task 5 (retire
-`transaction_links` entirely by absorbing refund links into
-`spend_entries`) — not started, still needs the column-shape design
-question answered (see that task's TODOs). No manual click-through of
-the live TUI this session (verified via `cargo build`/`test`/`clippy`
-and real-database SQL checks only, consistent with how Task 3 was
-verified).
-
-**Immediate next priorities:** see "What's Next" at the top of this
-file.
-
-## Checkpoint: Session 2026-07-17
-
-**Completed:** none — reorientation only, no code/doc changes. The user
-had stepped away and lost track of state; re-briefed from this file plus
-`git status`/`git diff --stat` (Session 2026-07-13g's Task 4 work is
-still fully done but **uncommitted** — 10 files changed, listed in that
-checkpoint). Also touched up
-`doc/implementation-notes/transfer-ledger-design.md` in the prior session
-(2026-07-14, not separately checkpointed): fixed three spots left stale
-by Task 4 (the `transaction_links`-tangle notes, the naming open
-question) and refreshed the real-data numbers/added a
-`credit_card_payment_match` worked example — folded into the same
-uncommitted diff.
-
-**Decision:** the user wants a fresh session for the next real work
-(Task 5) rather than continuing here.
-
-**Immediate next priorities:** see "What's Next" at the top of this
-file — review and commit the Task 4 diff first, then start Task 5.
-
-## Checkpoint: Session 2026-07-17b
-
-**Completed:**
-- Extended `ledgr status` (Bank Transaction Import, Task 3): Spend Ledger
-  and Transfer Ledger summary sections, unpaired-transfer split into
-  "reference accounts" (expected) vs "unresolved" (needs review), and a
-  Balance-column right-alignment fix. Prompted by the user asking how to
-  test the still-uncommitted Task 4 work, then asking where the credit
-  card payment matched/unmatched counts (until now only ever printed
-  transiently by `ledgr import`) could be seen afterwards.
-- Delta: Transfer Ledger, **Task 5 done in full** — see that task's entry
-  above. Headline: `transaction_links` dropped entirely;
-  `spend_entries.refunds_spend_entry_id` (self-referencing column)
-  replaces its one remaining live purpose (refund linking); real database
-  migrated (backfilled 3 existing refund links, dropped the table,
-  confirmed idempotent).
-- TUI Analysis Views, Task 3 addendum: `Screen::MonthlyGap`/`MonthSpend`
-  renamed to `Screen::MonthlySpend`/`SpendMonth` (matching the
-  `MonthlyTransfers`/`TransferMonth` pattern), leader key `<space>g` →
-  `<space>s` — "gap" doesn't exist as a concept yet (no income ledger),
-  so the old name overclaimed. Verified live via `tmux` against the real
-  database.
-- All work this session verified against the real `~/.local/share/ledgr/ledgr.db`
-  (backed up first: `ledgr.db.bak-20260717205948-pre-transaction-links-retirement`),
-  not just `cargo test`. 84 tests passing throughout; `cargo clippy
-  --all-targets` clean at the same pre-existing dead-code baseline
-  (nothing new) after every change.
-- Also fixed as a side effect: the `ledgr import` summary line's
-  `entr(y/ies)` pluralisation-attempt wording, at the user's request
-  ("just have entries") — simplified to plain "entries" everywhere it
-  appeared (`src/main.rs`).
-
-**Not done / left for later:** Delta: Reclaimable Work Expenses — the
-user asked what happened to this mid-session; confirmed it's still just
-the sketch already in this file (Task 1, TODO), nothing built, not
-started this session.
-
-**Decision:** the user is committing this session's work themselves; no
-git operations performed by the assistant this session.
-
-**Immediate next priorities:** see "What's Next" at the top of this
-file — next delta not yet chosen (candidates: Reconciliation, or
-resuming the Credit Card/Amazon/Gap chain).
-
 ## Checkpoint: Session 2026-07-17c
 
 **Completed:** Delta: The Gap, Task 1 — minimal income ledger, done in
@@ -1314,6 +1372,140 @@ Delta: TUI Analysis Views now has only Task 2 (net worth/spending trend views) l
 1. Review and commit the working tree (income ledger + Gap screen + this transfers redesign, all uncommitted)
 2. Delta: The Gap, Task 5 — drive the Gap screen's "Untracked" figure (currently -£4,084.19 Jan-Jun) to zero
 3. Delta: Credit Card Transaction Import, Task 3/4 — partner's credit card import + manual spend entries via a proxy account, which Task 5 above depends on for its first component
+
+## Checkpoint: Session 2026-07-19b
+
+**What was completed this session:**
+- Gap screen month table: added a Cash Movement column, moved
+  Salary/Other into an `i`-key popup, made the table navigable, and added
+  a new `Screen::GapMonth` per-account cash breakdown drill-down
+  (`Enter` on a month row) with Start/End/Movement columns and a Total row
+- Fixed the Gap month drill-down's date labels to read first-to-last day
+  of month, and fixed a header-clipping rendering bug
+- Investigated (and ruled out) data-integrity explanations for a
+  seemingly-high reconstructed opening balance; discovered the user's
+  real salary payday is the last working day of the month, not the 1st
+- Added a live filter (`f`/`Ctrl-g`) to the Transfers drill-down screen,
+  matching on description or either leg's resolved account name
+- Built Delta: Credit Card Transaction Import Task 4 (manual spend
+  entries via a proxy account) — `s` on a Transfers-drill-down row opens
+  a form to record what money sent to a Reference Household Account was
+  actually spent on; verified end-to-end against real data, then cleanly
+  removed the test entry
+
+**State of the project:**
+The Gap screen is now a genuine reconciliation tool: month-by-month cash
+movement, per-account drill-down, and a working mechanism (manual spend
+entries) to close the gap between what the ledgers explain and what
+actually happened to the household's cash. Task 5 (driving Untracked to
+zero) has real data-backed next steps rather than open questions — the
+tool to close the largest component (~£3,334 net transferred to Romina)
+now exists, it just needs the user to work through the remaining months.
+91 unit tests passing throughout; nothing from this session committed to
+git yet.
+
+**Immediate next priorities:**
+1. Use the new `s` (record spend from transfer) feature to log Romina's
+   real holiday/other spending across the months with a net transfer to
+   her, closing out that component of Untracked
+2. Investigate the remaining ~£479 unexplained residual (suspected
+   date-boundary artefact, not yet root-caused)
+3. Delta: The Gap, Task 4 (assets/liabilities as accounts) — once built,
+   extend to track `CreditCard` balance change so Barclaycard paydown
+   beyond new spend stops showing as unexplained Untracked
+4. Commit this session's and the prior sessions' uncommitted work to git
+
+## Checkpoint: Session 2026-07-20
+
+**What was completed this session:**
+- No code changes — the user tried the newly-built "record spend from
+  transfer" feature (`s` on the Transfers drill-down) against real data
+  and reported four issues/requests, captured as Delta: Credit Card
+  Transaction Import, Task 6
+
+**State of the project:**
+The spend-from-transfer feature works but has rough edges surfaced by
+real use: the Gap screen doesn't refresh after using it (misleading
+until a manual reload), there's no way to trace a manual spend entry back
+to its originating transfer for correction, notes are only supported on
+spend entries (not income or transfer entries), and the Transfers
+drill-down gives no visual indication of which transfers already have a
+recorded spend against them. None of these are implemented yet.
+
+**Immediate next priorities:**
+1. Fix the Gap screen's stale-data-on-back() bug (Task 6, item 1) —
+   likely the smallest, most isolated fix
+2. Design and build the spend-entry-to-transfer-entry link (Task 6, item
+   2) — a prerequisite for item 4
+3. Add the "Tracked Spend" column + linked-spend popup to the Transfers
+   drill-down (Task 6, item 4)
+4. Extend note support to income and transfer entries (Task 6, item 3)
+
+## Checkpoint: Session 2026-07-20b
+
+**What was completed this session:**
+- Delta: Credit Card Transaction Import, Task 6 (Spend-from-transfer
+  follow-ups) — all four issues fixed: Gap screen now refreshes on
+  `back()`; spend entries link back to their originating transfer
+  (`spend_entries.transfer_entry_id`); all three entry types (spend,
+  income, transfer) now support an editable note via the same `n` key;
+  a new "Tracked Spend" column plus a linked-spend line in the transfer
+  detail popup on the Transfers drill-down. Two new schema migrations
+  (`migrate_add_spend_entries_transfer_entry_id_column`,
+  `migrate_add_transfer_entries_note_column`). Full detail under Task 6
+  above.
+
+**State of the project:**
+The spend-from-transfer feature (Task 4/5's follow-on) is now complete
+end-to-end: recording a manual spend from a transfer is immediately
+visible everywhere it should be (Gap totals, the Transfers drill-down's
+Tracked Spend column, the transfer detail popup) without restarting the
+app or leaving the screen. Notes are now a consistent feature across all
+three ledgers rather than spend-only. A meaningful backlog of committed-
+but-not-yet-`git commit`ed work has built up across several recent
+sessions (see repeated "not yet committed to git" notes throughout this
+plan) — worth committing soon to avoid losing the thread of what's
+changed.
+
+**Immediate next priorities:**
+1. Commit this session's and the prior sessions' uncommitted work to git
+2. Delta: Credit Card Transaction Import, Task 3 — import the user's
+   partner's credit card (needs her card registered as a household
+   account, same identity-tracking mechanism as Task 1)
+3. Delta: The Gap, Task 4/5 — assets/liabilities as accounts, and driving
+   Untracked to zero (would resolve the remaining Barclaycard-paydown and
+   ~£479 residual noted in Task 2's real-data investigation)
+4. Delta: Spending Categorisation, Task 1 — confirm the Rebel Finance
+   taxonomy (currently IN PROGRESS, blocking Tasks 2/3 of that Delta)
+
+## Checkpoint: Session 2026-07-20c
+
+**What was completed this session:**
+- Real data-quality fix, no new code — the user reported none of their
+  real spend-from-transfer entries showed as Tracked Spend after Task 6
+  landed. Root cause: those 16 entries were created via `s` earlier the
+  same day, before Task 6's `transfer_entry_id` column existed, so there
+  was nothing to link at creation time (confirmed via each entry's
+  `classified_at` timestamp — 2026-07-20T18:04–18:14Z). Backfilled all 16
+  by matching each to its transfer on exact date + amount (unambiguous in
+  every case); real `ledgr.db` backed up first
+  (`ledgr.db.bak-20260720201726-pre-transfer-entry-id-backfill`). Full
+  detail appended to Task 6 above.
+
+**State of the project:**
+Task 6 (Spend-from-transfer follow-ups) is now fully complete, including
+this backfill — every existing manual spend entry and every future one
+correctly shows as Tracked Spend. Nothing else changed this session; the
+next-priorities list from the prior checkpoint still stands.
+
+**Immediate next priorities:**
+1. Commit this session's and the prior sessions' uncommitted work to git
+2. Delta: Credit Card Transaction Import, Task 3 — import the user's
+   partner's credit card
+3. Delta: The Gap, Task 4/5 — assets/liabilities as accounts, and driving
+   Untracked to zero
+4. Delta: Spending Categorisation, Task 1 — confirm the Rebel Finance
+   taxonomy (currently IN PROGRESS)
 
 ## Implementation Notes
 

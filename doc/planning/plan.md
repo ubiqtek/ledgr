@@ -2,10 +2,10 @@
 
 ## What's Next
 
-- **Next:** Commit outstanding uncommitted work to git (several sessions' worth — see Checkpoint below), then **Delta: Double-Entry Accounting, Task 1 — Evaluate a double-entry model for ledgr**, now top priority ahead of Task 3 (partner's credit card import — deprioritised, not dropped)
-- **Sub-doc:** none
+- **Next:** ✓ Evaluation doc written (`doc/implementation-notes/double-entry-evaluation.md`) and its recommended Net Worth Movement fix built and verified live. Next: write the ADR (overrides ADR 0007's deferral, confirms ADR 0005) per the evaluation doc's "Recommendation" section, then come back to the full journal/double-entry build later.
+- **Sub-doc:** `doc/implementation-notes/double-entry-evaluation.md`
 - **Blockers:** None
-- **Context:** Decided 2026-07-20 to prioritise the double-entry evaluation now rather than let it keep sitting as "future/exploratory" — see Delta: Double-Entry Accounting, Task 1's 2026-07-20 decision note for why
+- **Context:** Decided 2026-07-20 to prioritise the double-entry evaluation now rather than let it keep sitting as "future/exploratory". Net Worth Movement fix (step 1 of the evaluation's suggested sequencing) is done; the ADR (step 2) and the journal build (step 3) are still ahead.
 
 ## Summary
 
@@ -44,7 +44,7 @@
 | [Delta: Packaging & Distribution](#delta-packaging--distribution) | [1. Publish `ledgr` to crates.io](#task-1-publish-ledgr-to-cratesio) | ✓ DONE |
 | | [2. Web frontend](#task-2-web-frontend) | TODO |
 | [Delta: Live Open Banking (Enable Banking)](#delta-live-open-banking-enable-banking) | [1. Evaluate feasibility & security model](#task-1-evaluate-feasibility--security-model) | IN PROGRESS |
-| [Delta: Double-Entry Accounting](#delta-double-entry-accounting) | [1. Evaluate a double-entry model for ledgr](#task-1-evaluate-a-double-entry-model-for-ledgr) | IN PROGRESS — now top priority |
+| [Delta: Double-Entry Accounting](#delta-double-entry-accounting) | [1. Evaluate a double-entry model for ledgr](#task-1-evaluate-a-double-entry-model-for-ledgr) | IN PROGRESS — evaluation doc done, Net Worth Movement fix built; ADR next |
 | [Delta: Payslip Import](#delta-payslip-import) | [1. Evaluate payslip format and scope](#task-1-evaluate-payslip-format-and-scope) | TODO |
 | [Delta: Reclaimable Work Expenses](#delta-reclaimable-work-expenses) | [1. Design the reclaimable expenses ledger and marking flow](#task-1-design-the-reclaimable-expenses-ledger-and-marking-flow) | TODO |
 | [Delta: Regular Payments](#delta-regular-payments) | [1. Design regular payment recognition and labelling](#task-1-design-regular-payment-recognition-and-labelling) | TODO |
@@ -1157,6 +1157,97 @@ should be built in a way that blocks this.
   started — next session should begin Task 1 proper: study Firefly
   III/beancount/GnuCash models, decide whether/when to adopt, ADR if
   adopted (per Task 1's original TODO below).
+- **Evaluation doc written 2026-07-20** (`fable`-model agent, background):
+  `doc/implementation-notes/double-entry-evaluation.md` compares Firefly
+  III, beancount, and GnuCash against the concrete Untracked-can't-reach-
+  zero evidence above. **Recommendation: adopt a minimal internal
+  double-entry core** (typed accounts — Assets/Liabilities/Equity/Income/
+  Expenses; balanced postings; a *derived* journal, not source-of-truth)
+  in ledgr's own SQLite schema, no external dependency. Firefly III
+  rejected as a model (its fixed source/destination transaction shapes
+  can't express a multi-leg entry — fails at the already-planned payslip
+  import); beancount/GnuCash's model adopted, not their toolchains
+  (Python; C++ GUI). Explicitly **overrides ADR 0007's deferral** (its
+  revisit trigger — "real need for postings-level detail" — has now fired,
+  with algebraic proof) while **confirming ADR 0005** (spend/income stay
+  separate domains, now expressed as account-type subtrees rather than
+  separate tables). Suggested sequencing: (1) ship the cheap Net Worth
+  Movement read-side fix, (2) write the ADR, (3) build the journal behind
+  the existing UI, cross-checked against current ledger totals before any
+  screen switches its query source. Full source comparison, minimal-model
+  schema sketch, and domain-vocabulary mapping table in the doc itself —
+  not duplicated here.
+- **Step 1 (Net Worth Movement fix) built and verified 2026-07-20**, ahead
+  of the ADR — the user wanted to see it working before committing to the
+  full journal design. New `Db::net_worth_balance_as_of` (`src/db/gap.rs`)
+  sums `Current`/`Savings` balances plus `CreditCard` balances (the latter
+  negated, since a card statement reports the amount owed as positive but
+  it's a liability) via the existing `balance_as_of` reconstruction — no
+  new dependency, uses data ledgr already has. `MonthlyGap` gained
+  `net_worth_start_minor`/`net_worth_end_minor` (`src/model.rs`);
+  `untracked_minor` now computed from net worth movement
+  (`net_worth_end − net_worth_start − gap`) instead of cash movement, so a
+  credit card payment nets to zero (cash down, liability down by the same
+  amount) rather than draining Untracked with no offsetting spend entry.
+  `App` gained `net_worth_at_year_start`/`net_worth_now`
+  (`src/app.rs`, threaded through `load_gap_data`/`open_gap`/`back()`
+  exactly like the existing cash figures). UI (`src/ui.rs`): the Gap
+  screen's right-hand summary panel (`draw_gap_cash_summary`) retitled
+  "Cash / Net Worth" and now shows both Cash and NW 1 Jan/end-month/change
+  rows plus the (now net-worth-based) Untracked line; the month table's
+  "Cash Movement" column renamed "NW Movement" and now shows net worth
+  movement, Cash Start/End columns left as-is (still real, still
+  informative). 91 unit tests still passing; `cargo clippy --all-targets`
+  clean.
+  - **Verified live via `tmux`** against a scratch copy of the real
+    database under a throwaway `$HOME` (never touched the real
+    `~/.local/share/ledgr/ledgr.db`).
+  - **Layout follow-up, same session:** split the single "Cash / Net
+    Worth" panel into three side-by-side summary columns (Income/Spend/
+    Gap, Cash, Net Worth) at the user's request, rather than one combined
+    panel — `draw_gap_cash_summary` now only shows Cash 1 Jan/end-month/
+    Change, and a new `draw_gap_net_worth_summary` shows the Net Worth
+    equivalents plus Untracked. `draw_gap`'s `summary_columns` layout
+    changed from two `Length(30)` columns to three.
+  - **Real bug found and fixed, same session:** the first live check
+    showed YTD Untracked of only **−£610.87** (down from the documented
+    −£4,084.19 cash-only baseline) but with large, oddly-varying
+    per-month figures (e.g. May +£1,451.65) that didn't add up to any
+    plausible real-world cause. Root cause: `Db::balance_as_of`
+    (`src/db/balances.rs`) assumes `balance_snapshots.balance_minor` and
+    `transactions.amount_minor` share one sign convention — true for
+    `Current`/`Savings`, but **not** for `CreditCard`: a snapshot records
+    the amount owed (always positive, per the statement), while a
+    transaction uses the money-out convention (a purchase is negative, a
+    payment positive) — inverted relative to "owed". Nothing had called
+    `balance_as_of` on a `CreditCard` account before this session's
+    `net_worth_balance_as_of`, so the bug was real but latent. Confirmed
+    numerically against the real Barclaycard account: reconstructing
+    2026-07-01's owed balance from the 2026-07-12 anchor (£613.73) and
+    £251.87 of purchases in between gave £865.60 via the buggy formula,
+    vs. the correct £361.86 (purchases increase debt, not decrease it) —
+    an error of exactly 2× the window's transaction total, growing with
+    distance from the anchor, which is exactly the shape of the erratic
+    monthly figures observed. Fixed with a new
+    `Db::credit_card_owed_as_of` (`src/db/balances.rs`) — same anchor
+    selection/fallback structure as `balance_as_of`, but with the
+    transaction-sum sign mirrored — and `net_worth_balance_as_of`
+    (`src/db/gap.rs`) now calls it for `CreditCard` accounts instead of
+    the generic `balance_as_of`. Two new unit tests
+    (`credit_card_owed_as_of_walks_backward_from_a_later_anchor`/
+    `..._forward_from_an_earlier_anchor`, `src/db/balances.rs`); 93 tests
+    total, `cargo clippy --all-targets` clean.
+  - **Re-verified live via `tmux`** after the fix: YTD Untracked is now
+    **−£68.67** (vs. −£610.87 pre-fix, −£4,084.19 original cash-only
+    baseline) and per-month figures are small and plausible (£16–£77 for
+    four of six months; April −£627.17 and May +£655.21 stand out and
+    roughly cancel, suggestive of a date-boundary artefact worth a future
+    look, not chased further this session). Confirms the fix rather than
+    just moving the error around.
+  - Not yet committed to git.
+- **Not yet started:** the ADR itself (step 2) and the full journal build
+  (step 3) — next session should pick up from the ADR, per the evaluation
+  doc's sequencing.
 
 ## Delta: Payslip Import
 

@@ -77,6 +77,11 @@ pub struct App {
     /// than leaving it unexplained.
     pub cash_at_year_start: i64,
     pub cash_now: i64,
+    /// Same as `cash_at_year_start`/`cash_now` but net worth (`Current`/
+    /// `Savings` plus `CreditCard`, the latter negated) rather than cash
+    /// alone — see `Db::net_worth_balance_as_of`.
+    pub net_worth_at_year_start: i64,
+    pub net_worth_now: i64,
     /// Reference household accounts (e.g. a partner's — see ADR 0008),
     /// loaded once from `config.toml` at startup, same lifecycle as the
     /// account-name overrides applied in `App::new`, so
@@ -248,7 +253,8 @@ impl App {
         let config_path = Config::default_path()?;
         let config = Config::load_or_init(&config_path)?;
         config.apply_account_name_overrides(accounts.iter_mut().map(|s| &mut s.account));
-        let (monthly_gap, cash_at_year_start, cash_now) = load_gap_data(&db)?;
+        let (monthly_gap, cash_at_year_start, cash_now, net_worth_at_year_start, net_worth_now) =
+            load_gap_data(&db)?;
         // Rows are earliest-first; start the selection on the most recent
         // month (the last row) rather than January, matching the other
         // monthly screens.
@@ -285,6 +291,8 @@ impl App {
             gap_month_end_date: String::new(),
             cash_at_year_start,
             cash_now,
+            net_worth_at_year_start,
+            net_worth_now,
             household_accounts: config.household_accounts.clone(),
             monthly_transfers: Vec::new(),
             selected_transfer_month: 0,
@@ -363,11 +371,14 @@ impl App {
     /// partial spend with no matching income yet (e.g. salary not yet paid)
     /// would misrepresent both.
     pub fn open_gap(&mut self) -> anyhow::Result<()> {
-        let (monthly_gap, cash_at_year_start, cash_now) = load_gap_data(&self.db)?;
+        let (monthly_gap, cash_at_year_start, cash_now, net_worth_at_year_start, net_worth_now) =
+            load_gap_data(&self.db)?;
         self.selected_gap_month = monthly_gap.len().saturating_sub(1);
         self.monthly_gap = monthly_gap;
         self.cash_at_year_start = cash_at_year_start;
         self.cash_now = cash_now;
+        self.net_worth_at_year_start = net_worth_at_year_start;
+        self.net_worth_now = net_worth_now;
         self.navigate_to(Screen::Gap);
         Ok(())
     }
@@ -1339,11 +1350,14 @@ impl App {
     pub fn back(&mut self) -> anyhow::Result<()> {
         self.screen = self.nav_stack.pop().unwrap_or(Screen::Accounts);
         if self.screen == Screen::Gap {
-            let (monthly_gap, cash_at_year_start, cash_now) = load_gap_data(&self.db)?;
+            let (monthly_gap, cash_at_year_start, cash_now, net_worth_at_year_start, net_worth_now) =
+                load_gap_data(&self.db)?;
             self.selected_gap_month = monthly_gap.len().saturating_sub(1);
             self.monthly_gap = monthly_gap;
             self.cash_at_year_start = cash_at_year_start;
             self.cash_now = cash_now;
+            self.net_worth_at_year_start = net_worth_at_year_start;
+            self.net_worth_now = net_worth_now;
         }
         Ok(())
     }
@@ -1397,7 +1411,7 @@ fn combine_account_balances(
 /// at the end of the last complete month. Shared by `App::new` (the Gap
 /// screen is what the user sees on launch) and `App::open_gap` (jumping
 /// back to it via `<space>g`), so both stay in sync.
-fn load_gap_data(db: &Db) -> anyhow::Result<(Vec<MonthlyGap>, i64, i64)> {
+fn load_gap_data(db: &Db) -> anyhow::Result<(Vec<MonthlyGap>, i64, i64, i64, i64)> {
     use chrono::Datelike;
 
     let today = chrono::Local::now().date_naive();
@@ -1415,9 +1429,18 @@ fn load_gap_data(db: &Db) -> anyhow::Result<(Vec<MonthlyGap>, i64, i64)> {
         .pred_opt()
         .expect("month always has a preceding day");
     let year_start = format!("{}-01-01", today.year());
+    let period_end_str = period_end.format("%Y-%m-%d").to_string();
     let cash_at_year_start = db.cash_balance_as_of(&year_start)?;
-    let cash_now = db.cash_balance_as_of(&period_end.format("%Y-%m-%d").to_string())?;
-    Ok((monthly_gap, cash_at_year_start, cash_now))
+    let cash_now = db.cash_balance_as_of(&period_end_str)?;
+    let net_worth_at_year_start = db.net_worth_balance_as_of(&year_start)?;
+    let net_worth_now = db.net_worth_balance_as_of(&period_end_str)?;
+    Ok((
+        monthly_gap,
+        cash_at_year_start,
+        cash_now,
+        net_worth_at_year_start,
+        net_worth_now,
+    ))
 }
 
 /// Guesses a Registered Person `name` value from a transaction description,

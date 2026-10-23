@@ -57,6 +57,37 @@ impl Db {
         Ok(total)
     }
 
+    /// Total net worth (`Current`/`Savings` balances plus `CreditCard`
+    /// balances, the latter negated since a card statement reports the
+    /// amount owed as a positive figure but it's a liability) as of `date`.
+    /// Unlike `cash_balance_as_of`, a credit card payment nets to zero here
+    /// (cash down, liability down by the same amount) and a charge moves
+    /// this figure together with spend — the fix for the Gap screen's
+    /// "Untracked" figure being unable to reach zero under a cash-only
+    /// model even with perfect classification (see doc/planning/plan.md,
+    /// Delta: Double-Entry Accounting, Task 1's 2026-07-20 evidence, and
+    /// `doc/implementation-notes/double-entry-evaluation.md`).
+    pub fn net_worth_balance_as_of(&self, date: &str) -> rusqlite::Result<i64> {
+        let mut stmt = self.conn().prepare(
+            "SELECT id, account_type FROM accounts
+             WHERE account_type IN ('current', 'savings', 'credit_card')",
+        )?;
+        let accounts: Vec<(crate::model::Id, String)> = stmt
+            .query_map(params![], |row| Ok((row.get(0)?, row.get(1)?)))?
+            .collect::<rusqlite::Result<_>>()?;
+        let mut total = 0;
+        for (account_id, account_type) in accounts {
+            if account_type == "credit_card" {
+                if let Some(owed) = self.credit_card_owed_as_of(account_id, date)? {
+                    total -= owed;
+                }
+            } else if let Some(balance) = self.balance_as_of(account_id, date)? {
+                total += balance;
+            }
+        }
+        Ok(total)
+    }
+
     /// Per-account breakdown behind `cash_balance_as_of` — same accounts,
     /// same exclusions, same "skip if no anchor yet" rule, but returned one
     /// row per account instead of summed, for the Gap month drill-down
@@ -135,7 +166,10 @@ impl Db {
                 let (month_start, month_end) = month_bounds(&month);
                 let cash_start_minor = self.cash_balance_as_of(&month_start)?;
                 let cash_end_minor = self.cash_balance_as_of(&month_end)?;
-                let untracked_minor = (cash_end_minor - cash_start_minor) - gap_minor;
+                let net_worth_start_minor = self.net_worth_balance_as_of(&month_start)?;
+                let net_worth_end_minor = self.net_worth_balance_as_of(&month_end)?;
+                let untracked_minor =
+                    (net_worth_end_minor - net_worth_start_minor) - gap_minor;
                 Ok(MonthlyGap {
                     month,
                     income_minor,
@@ -144,6 +178,8 @@ impl Db {
                     gap_minor,
                     cash_start_minor,
                     cash_end_minor,
+                    net_worth_start_minor,
+                    net_worth_end_minor,
                     untracked_minor,
                 })
             })

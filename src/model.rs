@@ -497,10 +497,18 @@ pub struct MonthlyGap {
     pub cash_start_minor: i64,
     /// Combined `Current`/`Savings` balance at the end of this month.
     pub cash_end_minor: i64,
-    /// `(cash_end_minor - cash_start_minor) - gap_minor` — real cash
-    /// movement the Gap doesn't explain (internal transfers to an
-    /// unimported account, card paydown beyond new spend, etc). Zero means
-    /// this month is fully reconciled.
+    /// Net worth (`Current`/`Savings` plus `CreditCard`, the latter
+    /// negated) at the end of the previous month — see
+    /// `Db::net_worth_balance_as_of`.
+    pub net_worth_start_minor: i64,
+    /// Net worth at the end of this month.
+    pub net_worth_end_minor: i64,
+    /// `(net_worth_end_minor - net_worth_start_minor) - gap_minor` — net
+    /// worth movement the Gap doesn't explain (internal transfers to an
+    /// unimported account, an account with no balance anchor, etc). Unlike
+    /// a cash-only figure, this is zero exactly when every transaction is
+    /// correctly classified, since it's unaffected by credit card
+    /// payment/charge timing — see `Db::net_worth_balance_as_of`.
     pub untracked_minor: i64,
 }
 

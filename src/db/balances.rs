@@ -91,6 +91,64 @@ impl Db {
 
         Ok(None)
     }
+
+    /// Like `balance_as_of`, but for a `CreditCard` account, where
+    /// `balance_snapshots.balance_minor` and `transactions.amount_minor`
+    /// use *opposite* sign conventions for the same account: a snapshot
+    /// records the amount owed (always positive, per the statement), while
+    /// a transaction uses the money-out convention (a purchase is
+    /// negative, a payment positive) — the same convention every other
+    /// account type uses, where it happens to also match the balance's own
+    /// sign. `balance_as_of`'s walk assumes both share one convention, so
+    /// calling it directly on a card account silently returns a figure off
+    /// by twice the transaction total in the walked window. Same anchor
+    /// selection/fallback logic as `balance_as_of`, but the transaction sum
+    /// is added going backward and subtracted going forward — the mirror
+    /// image — since a purchase (negative `amount_minor`) *increases* the
+    /// amount owed rather than decreasing it.
+    pub fn credit_card_owed_as_of(&self, account_id: Id, date: &str) -> rusqlite::Result<Option<i64>> {
+        if let Some((anchor_owed, anchor_as_of)) = self
+            .conn()
+            .query_row(
+                "SELECT balance_minor, as_of FROM balance_snapshots
+                 WHERE account_id = ?1 AND as_of >= ?2
+                 ORDER BY as_of ASC LIMIT 1",
+                params![account_id, date],
+                |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)),
+            )
+            .optional()?
+        {
+            let later_transactions: i64 = self.conn().query_row(
+                "SELECT COALESCE(SUM(amount_minor), 0) FROM transactions
+                 WHERE account_id = ?1 AND posted_at > ?2 AND posted_at <= ?3",
+                params![account_id, date, anchor_as_of],
+                |row| row.get(0),
+            )?;
+            return Ok(Some(anchor_owed + later_transactions));
+        }
+
+        if let Some((anchor_owed, anchor_as_of)) = self
+            .conn()
+            .query_row(
+                "SELECT balance_minor, as_of FROM balance_snapshots
+                 WHERE account_id = ?1 AND as_of < ?2
+                 ORDER BY as_of DESC LIMIT 1",
+                params![account_id, date],
+                |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)),
+            )
+            .optional()?
+        {
+            let later_transactions: i64 = self.conn().query_row(
+                "SELECT COALESCE(SUM(amount_minor), 0) FROM transactions
+                 WHERE account_id = ?1 AND posted_at > ?2 AND posted_at <= ?3",
+                params![account_id, anchor_as_of, date],
+                |row| row.get(0),
+            )?;
+            return Ok(Some(anchor_owed - later_transactions));
+        }
+
+        Ok(None)
+    }
 }
 
 #[cfg(test)]
@@ -103,6 +161,18 @@ mod tests {
             name: "Current Account".into(),
             institution: None,
             account_type: AccountType::Current,
+            currency: "GBP".into(),
+            sort_code: None,
+            account_number: None,
+        })
+        .expect("insert account")
+    }
+
+    fn test_credit_card_account(db: &Db) -> Id {
+        db.insert_account(&NewAccount {
+            name: "Credit Card".into(),
+            institution: None,
+            account_type: AccountType::CreditCard,
             currency: "GBP".into(),
             sort_code: None,
             account_number: None,
@@ -213,5 +283,47 @@ mod tests {
                 .expect("balance_as_of"),
             None
         );
+    }
+
+    #[test]
+    fn credit_card_owed_as_of_walks_backward_from_a_later_anchor() {
+        let db = Db::open_in_memory().expect("open db");
+        let account_id = test_credit_card_account(&db);
+
+        // Anchor: £613.73 owed as of 2026-07-12.
+        db.insert_balance_snapshot(account_id, None, 61_373, "2026-07-12")
+            .expect("insert snapshot");
+        // A purchase (money-out convention, so negative) posted after the
+        // target date, before the anchor.
+        transaction_on(&db, account_id, "2026-07-05", -25_187);
+
+        // Owed on 2026-07-01 (before that purchase) should be lower by the
+        // purchase amount, not higher — a purchase increases what's owed,
+        // the opposite of what `balance_as_of` would compute if called on
+        // a card account directly (see doc comment).
+        let owed = db
+            .credit_card_owed_as_of(account_id, "2026-07-01")
+            .expect("credit_card_owed_as_of")
+            .expect("has an anchor");
+        assert_eq!(owed, 61_373 - 25_187);
+    }
+
+    #[test]
+    fn credit_card_owed_as_of_walks_forward_from_an_earlier_anchor() {
+        let db = Db::open_in_memory().expect("open db");
+        let account_id = test_credit_card_account(&db);
+
+        // Anchor: £100.00 owed as of 2026-06-01.
+        db.insert_balance_snapshot(account_id, None, 10_000, "2026-06-01")
+            .expect("insert snapshot");
+        // A payment (positive amount_minor) posted after the anchor,
+        // before the target date — reduces what's owed.
+        transaction_on(&db, account_id, "2026-06-15", 3_000);
+
+        let owed = db
+            .credit_card_owed_as_of(account_id, "2026-07-01")
+            .expect("credit_card_owed_as_of")
+            .expect("has an anchor");
+        assert_eq!(owed, 10_000 - 3_000);
     }
 }

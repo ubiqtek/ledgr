@@ -770,7 +770,11 @@ fn draw_gap(frame: &mut Frame, app: &mut App, area: Rect) {
 
     let summary_columns = Layout::default()
         .direction(Direction::Horizontal)
-        .constraints([Constraint::Length(30), Constraint::Length(30)])
+        .constraints([
+            Constraint::Length(30),
+            Constraint::Length(30),
+            Constraint::Length(30),
+        ])
         .split(chunks[0]);
 
     // The report's cutoff — both `monthly_gap` and `cash_now` stop at the
@@ -790,7 +794,8 @@ fn draw_gap(frame: &mut Frame, app: &mut App, area: Rect) {
     let gap: i64 = ytd.map(|m| m.gap_minor).sum();
 
     draw_gap_income_summary(frame, summary_columns[0], &last_complete_month, income, spend, gap);
-    draw_gap_cash_summary(frame, app, summary_columns[1], &last_complete_month, gap);
+    draw_gap_cash_summary(frame, app, summary_columns[1], &last_complete_month);
+    draw_gap_net_worth_summary(frame, app, summary_columns[2], &last_complete_month, gap);
     draw_gap_months(frame, app, chunks[2]);
 }
 
@@ -840,18 +845,8 @@ fn draw_gap_income_summary(
     );
 }
 
-fn draw_gap_cash_summary(
-    frame: &mut Frame,
-    app: &App,
-    area: Rect,
-    last_complete_month: &str,
-    gap: i64,
-) {
+fn draw_gap_cash_summary(frame: &mut Frame, app: &App, area: Rect, last_complete_month: &str) {
     let cash_change = app.cash_now - app.cash_at_year_start;
-    // What the Gap doesn't explain about the real cash movement — e.g.
-    // transfers out (to a partner's own untracked account, an overpayment)
-    // that are correctly excluded from spend but still drain cash.
-    let untracked = cash_change - gap;
 
     draw_summary_table(
         frame,
@@ -861,6 +856,36 @@ fn draw_gap_cash_summary(
             ("1 Jan", app.cash_at_year_start),
             (&format!("End {last_complete_month}"), app.cash_now),
             ("Change", cash_change),
+        ],
+    );
+}
+
+fn draw_gap_net_worth_summary(
+    frame: &mut Frame,
+    app: &App,
+    area: Rect,
+    last_complete_month: &str,
+    gap: i64,
+) {
+    let net_worth_change = app.net_worth_now - app.net_worth_at_year_start;
+    // What the Gap doesn't explain about net worth movement — e.g.
+    // transfers out (to a partner's own untracked account) that are
+    // correctly excluded from spend but still drain net worth. Unlike a
+    // cash-only figure, this is zero exactly when everything is classified
+    // correctly, since folding the credit card balance in (as a negative
+    // liability) means a card payment nets to zero rather than draining
+    // cash with no offsetting spend entry — see
+    // `Db::net_worth_balance_as_of`.
+    let untracked = net_worth_change - gap;
+
+    draw_summary_table(
+        frame,
+        area,
+        "Net Worth (Cash + Card)",
+        &[
+            ("1 Jan", app.net_worth_at_year_start),
+            (&format!("End {last_complete_month}"), app.net_worth_now),
+            ("Change", net_worth_change),
             ("Untracked", untracked),
         ],
     );
@@ -887,8 +912,10 @@ fn draw_gap_months(frame: &mut Frame, app: &mut App, area: Rect) {
             let gap = crate::format_amount_minor(month.gap_minor, "GBP");
             let cash_start = crate::format_amount_minor(month.cash_start_minor, "GBP");
             let cash_end = crate::format_amount_minor(month.cash_end_minor, "GBP");
-            let cash_movement =
-                crate::format_amount_minor(month.cash_end_minor - month.cash_start_minor, "GBP");
+            let net_worth_movement = crate::format_amount_minor(
+                month.net_worth_end_minor - month.net_worth_start_minor,
+                "GBP",
+            );
             let untracked = crate::format_amount_minor(month.untracked_minor, "GBP");
             Row::new(vec![
                 Cell::from(month.month.clone()),
@@ -897,7 +924,7 @@ fn draw_gap_months(frame: &mut Frame, app: &mut App, area: Rect) {
                 Cell::from(Line::from(gap).alignment(Alignment::Right)),
                 Cell::from(Line::from(cash_start).alignment(Alignment::Right)),
                 Cell::from(Line::from(cash_end).alignment(Alignment::Right)),
-                Cell::from(Line::from(cash_movement).alignment(Alignment::Right)),
+                Cell::from(Line::from(net_worth_movement).alignment(Alignment::Right)),
                 Cell::from(Line::from(untracked).alignment(Alignment::Right)),
             ])
         })
@@ -910,7 +937,7 @@ fn draw_gap_months(frame: &mut Frame, app: &mut App, area: Rect) {
         Cell::from(Line::from("Gap").alignment(Alignment::Right)),
         Cell::from(Line::from("Cash Start").alignment(Alignment::Right)),
         Cell::from(Line::from("Cash End").alignment(Alignment::Right)),
-        Cell::from(Line::from("Cash Movement").alignment(Alignment::Right)),
+        Cell::from(Line::from("NW Movement").alignment(Alignment::Right)),
         Cell::from(Line::from("Untracked").alignment(Alignment::Right)),
     ])
     .style(Style::default().add_modifier(Modifier::BOLD));
